@@ -419,6 +419,7 @@ interface UserState {
     message: string;
     delaySeconds: number;
     cancelled: boolean;
+    botMode?: "single" | "both";
   };
   autoConnectStep?: string;
 }
@@ -437,7 +438,47 @@ interface AutoChatSession {
   currentRound: number;
 }
 
+interface CigSession {
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  groups: Array<{ id: string; subject: string }>;
+  message: string;
+  sent: number;
+  failed: number;
+  botMode: "single" | "both";
+}
+
+interface AcfSession {
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  primaryJid: string;
+  autoJid: string;
+  sent: number;
+  failed: number;
+  currentPair: number;
+  totalPairs: number;
+}
+
+const CHAT_FRIEND_PAIRS: [string, string][] = [
+  ["Yaar, kal ka test tha kaisa gaya?", "Bilkul bekar 😭 Tu bata?"],
+  ["Main sab bhool gaya tha 😂", "Hahaha mujhe bhi! Chalo saath mein rone wale hain 😂"],
+  ["Kal physics padh le yaar seriously", "Haan yaar, aaj raat 11 baje call karte hain group mein"],
+  ["Bhai tune notes liye the class mein?", "Nahi yaar main so gaya tha 🙈 Tu de de please"],
+  ["Assignment submit ho gaya tera?", "Abhi nahi yaar, 2 ghante bacha hai deadline mein 😰"],
+  ["Canteen ka khana aaj kaisa tha?", "Ekdum bekar! Ghar ka khana yaad aa gaya 😭"],
+  ["Weekend pe kya plan hai?", "Bas ghar pe padhai... ya shayad nahi bhi 😄"],
+  ["Bhai exam me kitna aaya?", "Puchh mat yaar... dard hota hai yaad karke 😂"],
+  ["Tu serious kyun rehta hai har waqt?", "Serious nahi hoon yaar, bas aaj neend nahi aayi 😪"],
+  ["Chal coffee peete hain baad mein?", "Haan bilkul! 3 baje canteen chalte hain ✅"],
+];
+
 const autoChatSessions: Map<number, AutoChatSession> = new Map();
+const cigSessions: Map<number, CigSession> = new Map();
+const acfSessions: Map<number, AcfSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
 const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
@@ -648,7 +689,6 @@ async function startQrPairing(ctx: any, userId: number): Promise<void> {
 
 function mainMenu(userId?: number): InlineKeyboard {
   const connected = userId !== undefined && isConnected(String(userId));
-  const autoConnected = userId !== undefined && isAutoConnected(String(userId));
   const kb = new InlineKeyboard();
   if (!connected) {
     kb.text("📱 Connect WhatsApp", "connect_wa").row();
@@ -659,13 +699,8 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
-    .text("💬 Chat In Group", "chat_in_group").row();
-  if (!autoConnected) {
-    kb.text("🤖 Connect Auto Chat WA", "connect_auto_wa").row();
-  } else {
-    kb.text("🤖 Auto Chat", "auto_chat_menu").row();
-  }
-  kb.text("🔌 Disconnect", "disconnect_wa");
+    .text("🤖 Auto Chat", "auto_chat_menu").row()
+    .text("🔌 Disconnect", "disconnect_wa");
   return kb;
 }
 
@@ -3343,34 +3378,55 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!isAutoConnected(String(userId))) {
     await ctx.editMessageText(
-      "❌ <b>Auto Chat WhatsApp not connected!</b>\n\nPehle Auto Chat WA connect karo.",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Connect Auto WA", "connect_auto_wa").text("🏠 Menu", "main_menu") }
+      "🤖 <b>Auto Chat</b>\n\n" +
+      "Dusra WhatsApp abhi connect nahi hai.\n\n" +
+      "Auto Chat ke liye ek aur WhatsApp number connect karo:",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("📱 Connect 2nd WhatsApp", "connect_auto_wa").row()
+          .text("🏠 Main Menu", "main_menu"),
+      }
     );
     return;
   }
 
-  const session = autoChatSessions.get(userId);
-  if (session?.running) {
-    const progressText = autoChatProgressText(session);
-    await ctx.editMessageText(progressText, {
+  const cigSess = cigSessions.get(userId);
+  if (cigSess?.running) {
+    await ctx.editMessageText(cigProgressText(cigSess), {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("🔄 Refresh", "auto_chat_refresh")
-        .text("⏹️ Stop", "auto_chat_stop").row()
+        .text("🔄 Refresh", "cig_refresh")
+        .text("⏹️ Stop", "cig_stop_btn").row()
+        .text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+
+  const acfSess = acfSessions.get(userId);
+  if (acfSess?.running) {
+    await ctx.editMessageText(acfProgressText(acfSess), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔄 Refresh", "acf_refresh")
+        .text("⏹️ Stop", "acf_stop_btn").row()
         .text("🏠 Main Menu", "main_menu"),
     });
     return;
   }
 
   const autoNumber = getAutoConnectedNumber(String(userId));
+  const mainNumber = getConnectedWhatsAppNumber(String(userId));
   await ctx.editMessageText(
     "🤖 <b>Auto Chat Menu</b>\n\n" +
-    (autoNumber ? `📞 Auto WA: <code>${esc(autoNumber)}</code>\n\n` : "") +
-    "Kya karna chahte ho?",
+    (mainNumber ? `📞 Primary WA: <code>${esc(mainNumber)}</code>\n` : "") +
+    (autoNumber ? `🤖 Auto WA: <code>${esc(autoNumber)}</code>\n` : "") +
+    "\nKya karna chahte ho?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("💬 Start Auto Chat", "auto_chat_start").row()
+        .text("👥 Chat In Group", "acig_start").row()
+        .text("👫 Chat Friend", "acf_start").row()
         .text("🔌 Disconnect Auto WA", "auto_disconnect_wa").row()
         .text("🏠 Main Menu", "main_menu"),
     }
@@ -3468,7 +3524,11 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   });
 });
 
-bot.callbackQuery("auto_chat_start", async (ctx) => {
+const CIG_PAGE_SIZE = 15;
+
+// ─── Chat In Group (Auto Chat) — ACIG ─────────────────────────────────────────
+
+bot.callbackQuery("acig_start", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
@@ -3480,43 +3540,56 @@ bot.callbackQuery("auto_chat_start", async (ctx) => {
   }
 
   const autoUserId = getAutoUserId(String(userId));
-  let groups: Array<{ id: string; subject: string }> = [];
+  let primaryGroups: Array<{ id: string; subject: string }> = [];
+  let autoGroups: Array<{ id: string; subject: string }> = [];
   try {
-    groups = await getAllGroups(autoUserId);
+    [primaryGroups, autoGroups] = await Promise.all([
+      getAllGroups(String(userId)),
+      getAllGroups(autoUserId),
+    ]);
   } catch {}
 
-  if (!groups.length) {
-    await ctx.editMessageText("❌ <b>Koi group nahi mila!</b>\n\nAuto Chat WA me koi group nahi hai.", {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
+  const autoGroupIds = new Set(autoGroups.map(g => g.id));
+  const commonGroups = primaryGroups.filter(g => autoGroupIds.has(g.id));
+
+  if (!commonGroups.length) {
+    await ctx.editMessageText(
+      "❌ <b>Koi common group nahi mila!</b>\n\n" +
+      "Dono WhatsApp numbers jo groups me hain unme se koi common group nahi hai.\n\n" +
+      `Primary WA groups: ${primaryGroups.length}\nAuto WA groups: ${autoGroups.length}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu").text("🏠 Menu", "main_menu"),
+      }
+    );
     return;
   }
 
   userStates.set(userId, {
-    step: "auto_chat_select_groups",
+    step: "acig_select_groups",
     chatInGroupData: {
-      allGroups: groups,
+      allGroups: commonGroups,
       selectedIndices: new Set(),
       page: 0,
       message: "",
       delaySeconds: 5,
       cancelled: false,
+      botMode: "both",
     },
   });
 
   await ctx.editMessageText(
-    "💬 <b>Auto Chat — Groups Select Karo</b>\n\n" +
-    `📋 ${groups.length} groups mile.\n\n` +
-    "Jin groups me msg bhejnha hai unhe select karo:",
+    "👥 <b>Chat In Group — Groups Select Karo</b>\n\n" +
+    `📋 ${commonGroups.length} common groups mile (dono WA me hain).\n\n` +
+    "Jin groups me dono numbers se msg bhejnha hai unhe select karo:",
     {
       parse_mode: "HTML",
-      reply_markup: buildAutoGroupKeyboard(userStates.get(userId)!),
+      reply_markup: buildAcigKeyboard(userStates.get(userId)!),
     }
   );
 });
 
-function buildAutoGroupKeyboard(state: UserState): InlineKeyboard {
+function buildAcigKeyboard(state: UserState): InlineKeyboard {
   const data = state.chatInGroupData!;
   const kb = new InlineKeyboard();
   const groups = data.allGroups;
@@ -3529,62 +3602,62 @@ function buildAutoGroupKeyboard(state: UserState): InlineKeyboard {
   for (let i = start; i < end; i++) {
     const g = groups[i];
     const isSelected = selected.has(i);
-    kb.text(`${isSelected ? "✅" : "☐"} ${g.subject.substring(0, 28)}`, `act_tog_${i}`).row();
+    kb.text(`${isSelected ? "✅" : "☐"} ${g.subject.substring(0, 28)}`, `acig_tog_${i}`).row();
   }
 
   if (totalPages > 1) {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
-    kb.text(prev, "act_prev_page").text(`📄 ${page + 1}/${totalPages}`, "act_page_info").text(next, "act_next_page").row();
+    kb.text(prev, "acig_prev_page").text(`📄 ${page + 1}/${totalPages}`, "acig_page_info").text(next, "acig_next_page").row();
   }
 
-  kb.text("☑️ Sab Select", "act_select_all").text("🧹 Clear", "act_clear_all").row();
+  kb.text("☑️ Sab Select", "acig_select_all").text("🧹 Clear", "acig_clear_all").row();
   if (selected.size > 0) {
-    kb.text(`✅ Aage Badho (${selected.size} groups)`, "act_proceed").row();
+    kb.text(`✅ Aage Badho (${selected.size} groups)`, "acig_proceed").row();
   }
-  kb.text("🏠 Main Menu", "main_menu");
+  kb.text("🔙 Back", "auto_chat_menu").text("🏠 Menu", "main_menu");
   return kb;
 }
 
-bot.callbackQuery(/^act_tog_(\d+)$/, async (ctx) => {
+bot.callbackQuery(/^acig_tog_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.chatInGroupData || state.step !== "auto_chat_select_groups") return;
+  if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
   const idx = parseInt(ctx.match[1]);
   const selected = state.chatInGroupData.selectedIndices;
   if (selected.has(idx)) selected.delete(idx); else selected.add(idx);
-  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAutoGroupKeyboard(state) }); } catch {}
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("act_select_all", async (ctx) => {
+bot.callbackQuery("acig_select_all", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.chatInGroupData) return;
+  if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
   for (let i = 0; i < state.chatInGroupData.allGroups.length; i++) state.chatInGroupData.selectedIndices.add(i);
-  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAutoGroupKeyboard(state) }); } catch {}
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("act_clear_all", async (ctx) => {
+bot.callbackQuery("acig_clear_all", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.chatInGroupData) return;
+  if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
   state.chatInGroupData.selectedIndices.clear();
-  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAutoGroupKeyboard(state) }); } catch {}
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("act_prev_page", async (ctx) => {
+bot.callbackQuery("acig_prev_page", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.page <= 0) return;
   state.chatInGroupData.page--;
-  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAutoGroupKeyboard(state) }); } catch {}
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("act_next_page", async (ctx) => {
+bot.callbackQuery("acig_next_page", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
@@ -3592,26 +3665,26 @@ bot.callbackQuery("act_next_page", async (ctx) => {
   const data = state.chatInGroupData;
   const totalPages = Math.ceil(data.allGroups.length / CIG_PAGE_SIZE);
   if (data.page < totalPages - 1) data.page++;
-  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAutoGroupKeyboard(state) }); } catch {}
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("act_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
+bot.callbackQuery("acig_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
 
-bot.callbackQuery("act_proceed", async (ctx) => {
+bot.callbackQuery("acig_proceed", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
-  state.step = "auto_chat_set_message";
+  state.step = "acig_enter_message";
   const count = state.chatInGroupData.selectedIndices.size;
   await ctx.editMessageText(
     `✅ <b>${count} groups select kiye!</b>\n\n` +
-    "📝 Ab wo message bhejo jo in groups me Auto Chat se bhejnha hai:",
+    "📝 Ab wo message bhejo jo in groups me dono WhatsApp se bhejnha hai:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
 
-bot.callbackQuery("auto_chat_confirm_start", async (ctx) => {
+bot.callbackQuery("acig_confirm_start", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
@@ -3622,14 +3695,346 @@ bot.callbackQuery("auto_chat_confirm_start", async (ctx) => {
   const autoUserId = getAutoUserId(String(userId));
 
   const statusMsg = await ctx.editMessageText(
-    "🤖 <b>Auto Chat Shuru Ho Gaya!</b>\n\n⏳ Background me messages ja rahe hain...",
+    "👥 <b>Chat In Group Shuru Ho Gaya!</b>\n\n⏳ Dono WhatsApp se background me messages ja rahe hain...",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
   userStates.delete(userId);
-  void runAutoChatBackground(userId, autoUserId, chatId, msgId, selectedGroups, data.message, data.delaySeconds, 0);
+  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, data.message, data.delaySeconds);
 });
+
+function cigProgressText(session: CigSession): string {
+  const total = session.groups.length * (session.botMode === "both" ? 2 : 1);
+  const processed = session.sent + session.failed;
+  const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+  return (
+    "👥 <b>Chat In Group Chal Raha Hai...</b>\n\n" +
+    `📤 Sent: <b>${session.sent}</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n` +
+    `📊 Progress: <b>${percent}%</b> (${processed}/${total})\n` +
+    (session.botMode === "both" ? "🤖 Dono WA se bhej raha hai\n" : "") +
+    "\nRoknay ke liye Stop dabao."
+  );
+}
+
+async function runGroupChatDualBackground(
+  userId: number,
+  primaryUserId: string,
+  autoUserId: string,
+  chatId: number,
+  msgId: number,
+  groups: Array<{ id: string; subject: string }>,
+  message: string,
+  delaySeconds: number
+): Promise<void> {
+  const session: CigSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    groups,
+    message,
+    sent: 0,
+    failed: 0,
+    botMode: "both",
+  };
+  cigSessions.set(userId, session);
+
+  try {
+    for (const group of groups) {
+      if (session.cancelled) break;
+
+      const ok1 = await sendGroupMessage(primaryUserId, group.id, message);
+      if (ok1) session.sent++; else session.failed++;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "cig_refresh")
+            .text("⏹️ Stop", "cig_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        });
+      } catch {}
+
+      if (session.cancelled) break;
+      if (delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
+
+      const ok2 = await sendGroupMessage(autoUserId, group.id, message);
+      if (ok2) session.sent++; else session.failed++;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "cig_refresh")
+            .text("⏹️ Stop", "cig_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        });
+      } catch {}
+
+      if (!session.cancelled && delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
+    }
+  } catch (err: any) {
+    console.error(`[ACIG][${userId}] Error:`, err?.message);
+  }
+
+  session.running = false;
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat In Group Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📋 Groups: ${groups.length}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
+bot.callbackQuery("cig_refresh", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("✅ <b>Chat In Group band ho gaya.</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  try {
+    await ctx.editMessageText(cigProgressText(session), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔄 Refresh", "cig_refresh")
+        .text("⏹️ Stop", "cig_stop_btn").row()
+        .text("🏠 Main Menu", "main_menu"),
+    });
+  } catch {}
+});
+
+bot.callbackQuery("cig_stop_btn", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("ℹ️ Chat In Group already band hai.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  await ctx.editMessageText(
+    "⚠️ <b>Chat In Group Band Karo?</b>\n\nKya aap messages bhejnha band karna chahte ho?",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Haan, Band Karo", "cig_stop_confirm")
+        .text("❌ Wapas Jao", "cig_refresh"),
+    }
+  );
+});
+
+bot.callbackQuery("cig_stop_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (session) {
+    session.cancelled = true;
+    session.running = false;
+  }
+  await ctx.editMessageText("⏹️ <b>Chat In Group band kar diya gaya!</b>", {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+  });
+});
+
+// ─── Chat Friend Feature ────────────────────────────────────────────────────────
+
+bot.callbackQuery("acf_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isAutoConnected(String(userId))) {
+    await ctx.editMessageText("❌ Auto Chat WA connected nahi hai.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+
+  const primaryNumber = getConnectedWhatsAppNumber(String(userId));
+  const autoNumber = getAutoConnectedNumber(String(userId));
+
+  if (!primaryNumber || !autoNumber) {
+    await ctx.editMessageText("❌ Dono WhatsApp numbers detect nahi hue. Reconnect karo.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu"),
+    });
+    return;
+  }
+
+  const primaryJid = primaryNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
+  const autoJid = autoNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
+  const totalPairs = CHAT_FRIEND_PAIRS.length;
+
+  const statusMsg = await ctx.editMessageText(
+    "👫 <b>Chat Friend Shuru Ho Gaya!</b>\n\n" +
+    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
+    `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
+    `⏳ ${totalPairs} conversation pairs background me chal rahi hain...`,
+    { parse_mode: "HTML" }
+  );
+  const msgId = (statusMsg as any).message_id;
+  const chatId = ctx.chat!.id;
+
+  void runChatFriendBackground(userId, String(userId), getAutoUserId(String(userId)), chatId, msgId, primaryJid, autoJid, totalPairs);
+});
+
+function acfProgressText(session: AcfSession): string {
+  const percent = session.totalPairs > 0 ? Math.floor((session.currentPair / session.totalPairs) * 100) : 0;
+  return (
+    "👫 <b>Chat Friend Chal Raha Hai...</b>\n\n" +
+    `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
+    `📤 Sent: <b>${session.sent}</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n` +
+    `📊 Progress: <b>${percent}%</b>\n\n` +
+    "Roknay ke liye Stop dabao."
+  );
+}
+
+async function runChatFriendBackground(
+  userId: number,
+  primaryUserId: string,
+  autoUserId: string,
+  chatId: number,
+  msgId: number,
+  primaryJid: string,
+  autoJid: string,
+  totalPairs: number
+): Promise<void> {
+  const session: AcfSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    primaryJid,
+    autoJid,
+    sent: 0,
+    failed: 0,
+    currentPair: 0,
+    totalPairs,
+  };
+  acfSessions.set(userId, session);
+
+  try {
+    for (let i = 0; i < CHAT_FRIEND_PAIRS.length; i++) {
+      if (session.cancelled) break;
+      session.currentPair = i + 1;
+
+      const [msg1, msg2] = CHAT_FRIEND_PAIRS[i];
+
+      const ok1 = await sendGroupMessage(primaryUserId, autoJid, msg1);
+      if (ok1) session.sent++; else session.failed++;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, acfProgressText(session), {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "acf_refresh")
+            .text("⏹️ Stop", "acf_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        });
+      } catch {}
+
+      if (session.cancelled) break;
+      await new Promise(r => setTimeout(r, 5000));
+
+      const ok2 = await sendGroupMessage(autoUserId, primaryJid, msg2);
+      if (ok2) session.sent++; else session.failed++;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, acfProgressText(session), {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "acf_refresh")
+            .text("⏹️ Stop", "acf_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        });
+      } catch {}
+
+      if (!session.cancelled) await new Promise(r => setTimeout(r, 5000));
+    }
+  } catch (err: any) {
+    console.error(`[ACF][${userId}] Error:`, err?.message);
+  }
+
+  session.running = false;
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat Friend Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n💬 Pairs: ${session.totalPairs}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
+bot.callbackQuery("acf_refresh", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = acfSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("✅ <b>Chat Friend band ho gaya.</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  try {
+    await ctx.editMessageText(acfProgressText(session), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔄 Refresh", "acf_refresh")
+        .text("⏹️ Stop", "acf_stop_btn").row()
+        .text("🏠 Main Menu", "main_menu"),
+    });
+  } catch {}
+});
+
+bot.callbackQuery("acf_stop_btn", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = acfSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("ℹ️ Chat Friend already band hai.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  await ctx.editMessageText(
+    "⚠️ <b>Chat Friend Band Karo?</b>",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Haan, Band Karo", "acf_stop_confirm")
+        .text("❌ Wapas Jao", "acf_refresh"),
+    }
+  );
+});
+
+bot.callbackQuery("acf_stop_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = acfSessions.get(userId);
+  if (session) {
+    session.cancelled = true;
+    session.running = false;
+  }
+  await ctx.editMessageText("⏹️ <b>Chat Friend band kar diya gaya!</b>", {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+  });
+});
+
+// ─── Old Auto Chat background (kept for compatibility) ────────────────────────
 
 function autoChatProgressText(session: AutoChatSession): string {
   const total = session.groups.length;
@@ -3708,8 +4113,6 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
 }
 
 // ─── Chat In Group Feature ─────────────────────────────────────────────────────
-
-const CIG_PAGE_SIZE = 15;
 
 function buildChatGroupKeyboard(state: UserState): InlineKeyboard {
   const data = state.chatInGroupData!;
@@ -3883,35 +4286,55 @@ bot.callbackQuery("cig_cancel_confirm", async (ctx) => {
 });
 
 async function cigSendBackground(userId: number, waUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number): Promise<void> {
-  let sent = 0;
-  let failed = 0;
+  const session: CigSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    groups,
+    message,
+    sent: 0,
+    failed: 0,
+    botMode: "single",
+  };
+  cigSessions.set(userId, session);
 
   for (let i = 0; i < groups.length; i++) {
+    if (session.cancelled) break;
     const group = groups[i];
     const ok = await sendGroupMessage(waUserId, group.id, message);
-    if (ok) sent++; else failed++;
+    if (ok) session.sent++; else session.failed++;
 
     try {
       await bot.api.editMessageText(chatId, msgId,
         `📤 <b>Messages bhej raha hun...</b>\n\n` +
-        `✅ Sent: ${sent}\n❌ Failed: ${failed}\n` +
+        `✅ Sent: ${session.sent}\n❌ Failed: ${session.failed}\n` +
         `📊 Progress: ${i + 1}/${groups.length}\n\n` +
-        `⏳ Last: ${group.subject}`,
-        { parse_mode: "HTML" }
+        `⏳ Last: ${esc(group.subject)}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "cig_refresh")
+            .text("⏹️ Stop", "cig_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        }
       );
     } catch {}
 
-    if (i < groups.length - 1 && delaySeconds > 0) {
+    if (!session.cancelled && i < groups.length - 1 && delaySeconds > 0) {
       await new Promise(r => setTimeout(r, delaySeconds * 1000));
     }
   }
 
-  try {
-    await bot.api.editMessageText(chatId, msgId,
-      `✅ <b>Done!</b>\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n📊 Total: ${groups.length} groups`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-    );
-  } catch {}
+  session.running = false;
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Done!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📊 Total: ${groups.length} groups`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
 }
 
 // ─── Add Members Feature ──────────────────────────────────────────────────────
@@ -4363,7 +4786,49 @@ bot.on("message:text", async (ctx) => {
   const state = userStates.get(userId);
   const text = ctx.message.text.trim();
 
-  if (!state) { await ctx.reply("💬 Use /start to begin.", { reply_markup: mainMenu(userId) }); return; }
+  if (!state) {
+    if (text.toLowerCase() === "start") {
+      if (await isBanned(userId)) return;
+      if (!(await hasAccess(userId))) {
+        await ctx.reply(
+          `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+      await ctx.reply(
+        mainMenuText(userId, "welcome"),
+        { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+      );
+      return;
+    }
+    await ctx.reply("💬 Use /start to begin.", { reply_markup: mainMenu(userId) });
+    return;
+  }
+
+  if (state.step === "acig_enter_message" && state.chatInGroupData) {
+    state.chatInGroupData.message = text;
+    state.step = "acig_confirm";
+    const data = state.chatInGroupData;
+    const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
+    const previewGroups = selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
+    const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
+    await ctx.reply(
+      `✅ <b>Message Set!</b>\n\n` +
+      `📝 Message: <i>${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}</i>\n\n` +
+      `📋 Groups (${selectedGroups.length}):\n${previewGroups}${moreText}\n\n` +
+      `⏱️ Delay: ${data.delaySeconds}s per group\n` +
+      `🤖 Dono WhatsApp se bhejnha hai\n\n` +
+      `Confirm karo?`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Shuru Karo!", "acig_confirm_start")
+          .text("❌ Cancel", "main_menu"),
+      }
+    );
+    return;
+  }
 
   if (state.step === "awaiting_phone") {
     const phone = text.replace(/\s/g, "");
