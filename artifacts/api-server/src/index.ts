@@ -51,6 +51,32 @@ async function main() {
   startBot();
 }
 
+process.on("uncaughtException", (err: any) => {
+  const msg = err?.message || "";
+  if (
+    msg.includes("Unsupported state or unable to authenticate data") ||
+    msg.includes("aesDecryptGCM") ||
+    msg.includes("noise-handler") ||
+    msg.includes("decodeFrame")
+  ) {
+    console.warn("[WA] Caught WhatsApp crypto error (corrupt session), ignoring:", msg);
+    return;
+  }
+  console.error("[UNCAUGHT EXCEPTION]", err);
+});
+
+process.on("unhandledRejection", (reason: any) => {
+  const msg = reason?.message || String(reason);
+  if (
+    msg.includes("Unsupported state or unable to authenticate data") ||
+    msg.includes("aesDecryptGCM")
+  ) {
+    console.warn("[WA] Caught unhandled WA crypto rejection, ignoring:", msg);
+    return;
+  }
+  console.error("[UNHANDLED REJECTION]", reason);
+});
+
 process.on("SIGTERM", async () => {
   console.log("[SHUTDOWN] SIGTERM received, closing MongoDB...");
   await closeMongoDb();
