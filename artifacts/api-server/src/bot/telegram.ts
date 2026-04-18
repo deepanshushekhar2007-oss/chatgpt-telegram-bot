@@ -448,6 +448,9 @@ interface CigSession {
   sent: number;
   failed: number;
   botMode: "single" | "both";
+  currentGroupIndex: number;
+  cycle: number;
+  nextDelayMs: number;
 }
 
 interface AcfSession {
@@ -461,6 +464,8 @@ interface AcfSession {
   failed: number;
   currentPair: number;
   totalPairs: number;
+  cycle: number;
+  nextDelayMs: number;
 }
 
 const CHAT_FRIEND_PAIRS: [string, string][] = [
@@ -475,6 +480,50 @@ const CHAT_FRIEND_PAIRS: [string, string][] = [
   ["Tu serious kyun rehta hai har waqt?", "Serious nahi hoon yaar, bas aaj neend nahi aayi 😪"],
   ["Chal coffee peete hain baad mein?", "Haan bilkul! 3 baje canteen chalte hain ✅"],
 ];
+
+const CHAT_FRIEND_DELAY_ROTATION_MS = [
+  10 * 1000,
+  60 * 1000,
+  10 * 60 * 1000,
+  20 * 60 * 1000,
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+];
+
+const GROUP_CHAT_DELAY_ROTATION_MS = [
+  5 * 60 * 1000,
+  10 * 60 * 1000,
+  20 * 60 * 1000,
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+];
+
+const AUTO_GROUP_MESSAGES = CHAT_FRIEND_PAIRS.flat();
+
+function pickAutoDelayMs(mode: "friend" | "group"): number {
+  const delays = mode === "friend" ? CHAT_FRIEND_DELAY_ROTATION_MS : GROUP_CHAT_DELAY_ROTATION_MS;
+  return delays[Math.floor(Math.random() * delays.length)];
+}
+
+function formatDelay(ms: number): string {
+  if (ms < 60 * 1000) return `${Math.round(ms / 1000)} sec`;
+  if (ms < 60 * 60 * 1000) return `${Math.round(ms / (60 * 1000))} min`;
+  const hours = ms / (60 * 60 * 1000);
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} hour${hours === 1 ? "" : "s"}`;
+}
+
+async function waitWithCancel(session: { cancelled: boolean; running: boolean }, delayMs: number): Promise<void> {
+  const stepMs = 5000;
+  let waited = 0;
+  while (!session.cancelled && session.running && waited < delayMs) {
+    const remaining = delayMs - waited;
+    const next = Math.min(stepMs, remaining);
+    await sleep(next);
+    waited += next;
+  }
+}
 
 const autoChatSessions: Map<number, AutoChatSession> = new Map();
 const cigSessions: Map<number, CigSession> = new Map();
@@ -3467,12 +3516,12 @@ bot.callbackQuery("auto_chat_stop", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ <b>Auto Chat Band Karo?</b>\n\nKya aap auto chat band karna chahte ho?",
+    "⚠️ <b>Stop Auto Chat?</b>\n\nDo you want to stop auto chat?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Band Karo", "auto_chat_stop_confirm")
-        .text("❌ Wapas Jao", "auto_chat_refresh"),
+        .text("✅ Yes, Stop", "auto_chat_stop_confirm")
+        .text("❌ Go Back", "auto_chat_refresh"),
     }
   );
 });
@@ -3485,7 +3534,7 @@ bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ <b>Auto Chat band kar diya gaya!</b>", {
+  await ctx.editMessageText("⏹️ <b>Auto Chat stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -3501,11 +3550,11 @@ bot.callbackQuery("auto_disconnect_wa", async (ctx) => {
     }); return;
   }
   await ctx.editMessageText(
-    "⚠️ <b>Auto Chat WA Disconnect karo?</b>",
+    "⚠️ <b>Disconnect Auto Chat WA?</b>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan", "auto_disconnect_confirm")
+        .text("✅ Yes", "auto_disconnect_confirm")
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -3611,9 +3660,9 @@ function buildAcigKeyboard(state: UserState): InlineKeyboard {
     kb.text(prev, "acig_prev_page").text(`📄 ${page + 1}/${totalPages}`, "acig_page_info").text(next, "acig_next_page").row();
   }
 
-  kb.text("☑️ Sab Select", "acig_select_all").text("🧹 Clear", "acig_clear_all").row();
+  kb.text("☑️ Select All", "acig_select_all").text("🧹 Clear", "acig_clear_all").row();
   if (selected.size > 0) {
-    kb.text(`✅ Aage Badho (${selected.size} groups)`, "acig_proceed").row();
+    kb.text(`✅ Continue (${selected.size} groups)`, "acig_proceed").row();
   }
   kb.text("🔙 Back", "auto_chat_menu").text("🏠 Menu", "main_menu");
   return kb;
@@ -3675,46 +3724,34 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
-  state.step = "acig_enter_message";
-  const count = state.chatInGroupData.selectedIndices.size;
-  await ctx.editMessageText(
-    `✅ <b>${count} groups select kiye!</b>\n\n` +
-    "📝 Ab wo message bhejo jo in groups me dono WhatsApp se bhejnha hai:",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
-  );
-});
-
-bot.callbackQuery("acig_confirm_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.chatInGroupData || !state.chatInGroupData.message) return;
-
   const data = state.chatInGroupData;
   const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
   const autoUserId = getAutoUserId(String(userId));
 
   const statusMsg = await ctx.editMessageText(
-    "👥 <b>Chat In Group Shuru Ho Gaya!</b>\n\n⏳ Dono WhatsApp se background me messages ja rahe hain...",
+    "👥 <b>Chat In Group Started!</b>\n\n" +
+    "Funny/study messages will rotate across all selected groups until you press Stop.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
   userStates.delete(userId);
-  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, data.message, data.delaySeconds);
+  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups);
 });
 
 function cigProgressText(session: CigSession): string {
-  const total = session.groups.length * (session.botMode === "both" ? 2 : 1);
   const processed = session.sent + session.failed;
-  const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+  const currentGroup = session.groups[session.currentGroupIndex]?.subject || session.groups[0]?.subject || "group";
   return (
-    "👥 <b>Chat In Group Chal Raha Hai...</b>\n\n" +
+    "👥 <b>Chat In Group Running...</b>\n\n" +
+    `🔁 Cycle: <b>${session.cycle}</b>\n` +
+    `📍 Current Group: <b>${esc(currentGroup)}</b>\n` +
     `📤 Sent: <b>${session.sent}</b>\n` +
     `❌ Failed: <b>${session.failed}</b>\n` +
-    `📊 Progress: <b>${percent}%</b> (${processed}/${total})\n` +
-    (session.botMode === "both" ? "🤖 Dono WA se bhej raha hai\n" : "") +
-    "\nRoknay ke liye Stop dabao."
+    `📊 Total Tried: <b>${processed}</b>\n` +
+    (session.nextDelayMs > 0 ? `⏱️ Next Delay: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
+    (session.botMode === "both" ? "🤖 Both WA accounts are rotating\n" : "") +
+    "\nPress Stop to end it."
   );
 }
 
@@ -3724,9 +3761,7 @@ async function runGroupChatDualBackground(
   autoUserId: string,
   chatId: number,
   msgId: number,
-  groups: Array<{ id: string; subject: string }>,
-  message: string,
-  delaySeconds: number
+  groups: Array<{ id: string; subject: string }>
 ): Promise<void> {
   const session: CigSession = {
     running: true,
@@ -3734,19 +3769,32 @@ async function runGroupChatDualBackground(
     chatId,
     msgId,
     groups,
-    message,
+    message: "Auto funny/study rotation",
     sent: 0,
     failed: 0,
     botMode: "both",
+    currentGroupIndex: 0,
+    cycle: 1,
+    nextDelayMs: 0,
   };
   cigSessions.set(userId, session);
 
   try {
-    for (const group of groups) {
+    let groupIndex = 0;
+    let messageIndex = 0;
+    let senderIndex = 0;
+
+    while (!session.cancelled && session.running) {
+      if (!groups.length) break;
+      const group = groups[groupIndex];
+      session.currentGroupIndex = groupIndex;
+      session.cycle = Math.floor(messageIndex / groups.length) + 1;
       if (session.cancelled) break;
 
-      const ok1 = await sendGroupMessage(primaryUserId, group.id, message);
-      if (ok1) session.sent++; else session.failed++;
+      const senderUserId = senderIndex % 2 === 0 ? primaryUserId : autoUserId;
+      const message = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
+      const ok = await sendGroupMessage(senderUserId, group.id, message);
+      if (ok) session.sent++; else session.failed++;
 
       try {
         await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
@@ -3758,23 +3806,12 @@ async function runGroupChatDualBackground(
         });
       } catch {}
 
-      if (session.cancelled) break;
-      if (delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
-
-      const ok2 = await sendGroupMessage(autoUserId, group.id, message);
-      if (ok2) session.sent++; else session.failed++;
-
-      try {
-        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Refresh", "cig_refresh")
-            .text("⏹️ Stop", "cig_stop_btn").row()
-            .text("🏠 Main Menu", "main_menu"),
-        });
-      } catch {}
-
-      if (!session.cancelled && delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
+      groupIndex = (groupIndex + 1) % groups.length;
+      messageIndex++;
+      senderIndex++;
+      session.currentGroupIndex = groupIndex;
+      session.nextDelayMs = pickAutoDelayMs("group");
+      if (!session.cancelled) await waitWithCancel(session, session.nextDelayMs);
     }
   } catch (err: any) {
     console.error(`[ACIG][${userId}] Error:`, err?.message);
@@ -3824,12 +3861,12 @@ bot.callbackQuery("cig_stop_btn", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ <b>Chat In Group Band Karo?</b>\n\nKya aap messages bhejnha band karna chahte ho?",
+    "⚠️ <b>Stop Chat In Group?</b>\n\nDo you want to stop sending messages?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Band Karo", "cig_stop_confirm")
-        .text("❌ Wapas Jao", "cig_refresh"),
+        .text("✅ Yes, Stop", "cig_stop_confirm")
+        .text("❌ Go Back", "cig_refresh"),
     }
   );
 });
@@ -3842,7 +3879,7 @@ bot.callbackQuery("cig_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ <b>Chat In Group band kar diya gaya!</b>", {
+  await ctx.editMessageText("⏹️ <b>Chat In Group stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -3876,10 +3913,10 @@ bot.callbackQuery("acf_start", async (ctx) => {
   const totalPairs = CHAT_FRIEND_PAIRS.length;
 
   const statusMsg = await ctx.editMessageText(
-    "👫 <b>Chat Friend Shuru Ho Gaya!</b>\n\n" +
+    "👫 <b>Chat Friend Started!</b>\n\n" +
     `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
     `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
-    `⏳ ${totalPairs} conversation pairs background me chal rahi hain...`,
+    "⏳ Auto funny/study messages will continue until you press Stop.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
@@ -3889,14 +3926,14 @@ bot.callbackQuery("acf_start", async (ctx) => {
 });
 
 function acfProgressText(session: AcfSession): string {
-  const percent = session.totalPairs > 0 ? Math.floor((session.currentPair / session.totalPairs) * 100) : 0;
   return (
-    "👫 <b>Chat Friend Chal Raha Hai...</b>\n\n" +
+    "👫 <b>Chat Friend Running...</b>\n\n" +
+    `🔁 Cycle: <b>${session.cycle}</b>\n` +
     `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
     `📤 Sent: <b>${session.sent}</b>\n` +
     `❌ Failed: <b>${session.failed}</b>\n` +
-    `📊 Progress: <b>${percent}%</b>\n\n` +
-    "Roknay ke liye Stop dabao."
+    (session.nextDelayMs > 0 ? `⏱️ Next Delay: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
+    "\nPress Stop to end it."
   );
 }
 
@@ -3921,15 +3958,19 @@ async function runChatFriendBackground(
     failed: 0,
     currentPair: 0,
     totalPairs,
+    cycle: 1,
+    nextDelayMs: 0,
   };
   acfSessions.set(userId, session);
 
   try {
-    for (let i = 0; i < CHAT_FRIEND_PAIRS.length; i++) {
+    let i = 0;
+    while (!session.cancelled && session.running) {
       if (session.cancelled) break;
-      session.currentPair = i + 1;
+      session.currentPair = (i % CHAT_FRIEND_PAIRS.length) + 1;
+      session.cycle = Math.floor(i / CHAT_FRIEND_PAIRS.length) + 1;
 
-      const [msg1, msg2] = CHAT_FRIEND_PAIRS[i];
+      const [msg1, msg2] = CHAT_FRIEND_PAIRS[i % CHAT_FRIEND_PAIRS.length];
 
       const ok1 = await sendGroupMessage(primaryUserId, autoJid, msg1);
       if (ok1) session.sent++; else session.failed++;
@@ -3945,7 +3986,8 @@ async function runChatFriendBackground(
       } catch {}
 
       if (session.cancelled) break;
-      await new Promise(r => setTimeout(r, 5000));
+      session.nextDelayMs = pickAutoDelayMs("friend");
+      await waitWithCancel(session, session.nextDelayMs);
 
       const ok2 = await sendGroupMessage(autoUserId, primaryJid, msg2);
       if (ok2) session.sent++; else session.failed++;
@@ -3960,7 +4002,11 @@ async function runChatFriendBackground(
         });
       } catch {}
 
-      if (!session.cancelled) await new Promise(r => setTimeout(r, 5000));
+      if (!session.cancelled) {
+        session.nextDelayMs = pickAutoDelayMs("friend");
+        await waitWithCancel(session, session.nextDelayMs);
+      }
+      i++;
     }
   } catch (err: any) {
     console.error(`[ACF][${userId}] Error:`, err?.message);
@@ -4010,12 +4056,12 @@ bot.callbackQuery("acf_stop_btn", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ <b>Chat Friend Band Karo?</b>",
+    "⚠️ <b>Stop Chat Friend?</b>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Band Karo", "acf_stop_confirm")
-        .text("❌ Wapas Jao", "acf_refresh"),
+        .text("✅ Yes, Stop", "acf_stop_confirm")
+        .text("❌ Go Back", "acf_refresh"),
     }
   );
 });
@@ -4028,7 +4074,7 @@ bot.callbackQuery("acf_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ <b>Chat Friend band kar diya gaya!</b>", {
+  await ctx.editMessageText("⏹️ <b>Chat Friend stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -4136,9 +4182,9 @@ function buildChatGroupKeyboard(state: UserState): InlineKeyboard {
     kb.text(prev, "cig_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cig_page_info").text(next, "cig_next_page").row();
   }
 
-  kb.text("☑️ Sab Select", "cig_select_all").text("🧹 Clear", "cig_clear_all").row();
+  kb.text("☑️ Select All", "cig_select_all").text("🧹 Clear", "cig_clear_all").row();
   if (selected.size > 0) {
-    kb.text(`✅ Aage Badho (${selected.size} groups)`, "cig_proceed").row();
+    kb.text(`✅ Continue (${selected.size} groups)`, "cig_proceed").row();
   }
   kb.text("🏠 Main Menu", "main_menu");
   return kb;
@@ -4296,12 +4342,16 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
     sent: 0,
     failed: 0,
     botMode: "single",
+    currentGroupIndex: 0,
+    cycle: 1,
+    nextDelayMs: 0,
   };
   cigSessions.set(userId, session);
 
   for (let i = 0; i < groups.length; i++) {
     if (session.cancelled) break;
     const group = groups[i];
+    session.currentGroupIndex = i;
     const ok = await sendGroupMessage(waUserId, group.id, message);
     if (ok) session.sent++; else session.failed++;
 
@@ -4823,7 +4873,7 @@ bot.on("message:text", async (ctx) => {
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
-          .text("✅ Shuru Karo!", "acig_confirm_start")
+          .text("✅ Start", "acig_confirm_start")
           .text("❌ Cancel", "main_menu"),
       }
     );
@@ -4954,7 +5004,7 @@ bot.on("message:text", async (ctx) => {
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
-          .text("✅ Haan, Bhejo!", "cig_start_confirm")
+          .text("✅ Yes, Send", "cig_start_confirm")
           .text("❌ Cancel", "cig_cancel_confirm"),
       }
     );
@@ -4977,7 +5027,7 @@ bot.on("message:text", async (ctx) => {
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
-          .text("✅ Shuru Karo!", "auto_chat_confirm_start")
+          .text("✅ Start", "auto_chat_confirm_start")
           .text("❌ Cancel", "main_menu"),
       }
     );

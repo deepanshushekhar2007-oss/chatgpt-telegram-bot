@@ -21,8 +21,8 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 ## Recent Changes
 
 - Auto Chat hides the 2nd WhatsApp connect button after the second account is connected and shows live status with message counts and a stop button.
-- Auto Chat uses random delay rotation across 30 seconds, 1 minute, 5 minutes, 10 minutes, 20 minutes, 30 minutes, and 1 hour.
-- Group Auto Chat supports selecting multiple common groups and rotates Account 1 then Account 2 in the same group before moving to the next group.
+- Chat Friend now runs continuously until stopped and uses random delay rotation across 10 seconds, 1 minute, 10 minutes, 20 minutes, 30 minutes, 1 hour, and 2 hours.
+- Group Auto Chat no longer asks for a manual message; it rotates funny/study messages across all selected common groups until stopped, with 5 minutes to 2 hours random delay rotation.
 - Auto Chat bot screens and `/help` copy are in English while WhatsApp auto-chat messages remain Hinglish/original.
 
 ## Key Commands
