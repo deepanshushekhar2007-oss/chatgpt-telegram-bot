@@ -21,6 +21,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 ## Recent Changes
 
 - Auto Chat hides the 2nd WhatsApp connect button after the second account is connected and shows live status with message counts and a stop button.
+- Auto Chat now requires the 1st/primary WhatsApp to be connected before showing the 2nd WhatsApp connection option.
 - Chat Friend now runs continuously until stopped and uses random delay rotation across 10 seconds, 1 minute, 10 minutes, 20 minutes, 30 minutes, 1 hour, and 2 hours.
 - Chat Friend stop now cancels any pending delay before another message can be sent, and the status message shows the next delay immediately.
 - Group Auto Chat no longer asks for a manual message; it rotates funny/study messages across all selected common groups until stopped, with 5 minutes to 2 hours random delay rotation.

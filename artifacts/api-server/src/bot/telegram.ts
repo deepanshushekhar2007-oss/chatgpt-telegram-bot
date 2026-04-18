@@ -3437,11 +3437,26 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
 
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "🤖 <b>Auto Chat</b>\n\n" +
+      "Primary WhatsApp is not connected yet.\n\n" +
+      "Please connect your 1st WhatsApp first. After that, you can connect the 2nd WhatsApp for Auto Chat.",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("📱 Connect 1st WhatsApp", "connect_wa").row()
+          .text("🏠 Main Menu", "main_menu"),
+      }
+    );
+    return;
+  }
+
   if (!isAutoConnected(String(userId))) {
     await ctx.editMessageText(
       "🤖 <b>Auto Chat</b>\n\n" +
-      "Dusra WhatsApp abhi connect nahi hai.\n\n" +
-      "Auto Chat ke liye ek aur WhatsApp number connect karo:",
+      "Primary WhatsApp is connected.\n\n" +
+      "Now connect your 2nd WhatsApp number for Auto Chat:",
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
