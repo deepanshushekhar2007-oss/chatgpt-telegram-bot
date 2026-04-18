@@ -1182,3 +1182,31 @@ export async function isUserInGroup(
     return false;
   }
 }
+
+export async function sendGroupMessage(
+  userId: string,
+  groupId: string,
+  text: string
+): Promise<boolean> {
+  const session = sessions.get(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.sendMessage(groupId, { text });
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] sendGroupMessage error:`, err?.message);
+    return false;
+  }
+}
+
+export function getAutoUserId(userId: string): string {
+  return `${userId}_auto`;
+}
+
+export function isAutoConnected(userId: string): boolean {
+  return isConnected(getAutoUserId(userId));
+}
+
+export function getAutoConnectedNumber(userId: string): string | null {
+  return getConnectedWhatsAppNumber(getAutoUserId(userId));
+}
