@@ -44,7 +44,7 @@ import {
   isUserBanned,
   hasUserAccess,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 
 const token = process.env["TELEGRAM_BOT_TOKEN"] || "";
 
@@ -1177,7 +1177,7 @@ bot.command("admin", async (ctx) => {
     "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
-    "🧹 <code>/cleansessions</code> — Delete unused sessions",
+    "🧹 <code>/cleansessions [num]</code> — Delete session by number",
 
     { parse_mode: "HTML" }
   );
@@ -1313,29 +1313,25 @@ bot.command("sessions", async (ctx) => {
       return;
     }
 
-    const now = new Date();
-    const staleDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
+    const nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
     let text = `📱 <b>WhatsApp Sessions (${stats.length})</b>\n\n`;
 
-    for (const s of stats) {
+    for (let i = 0; i < stats.length; i++) {
+      const s = stats[i];
       const isLive = activeIds.has(s.userId);
       const statusIcon = isLive ? "🟢" : s.registered ? "🔴" : "⚪";
       const statusLabel = isLive ? "Live" : s.registered ? "Disconnected" : "Unpaired";
-      text += `${statusIcon} <b>${esc(s.phoneNumber)}</b>\n`;
-      text += `   Status: ${statusLabel}\n`;
-      text += `   Last seen: ${esc(s.lastSeen)}\n\n`;
+      const num = i < nums.length ? nums[i] : `[${i+1}]`;
+      text += `${num} ${statusIcon} <b>${esc(s.phoneNumber)}</b>\n`;
+      text += `   Status: ${statusLabel} | Last: ${esc(s.lastSeen)}\n\n`;
     }
 
     const liveCount = stats.filter(s => activeIds.has(s.userId)).length;
     const disconnectedCount = stats.filter(s => !activeIds.has(s.userId) && s.registered).length;
     const unpairedCount = stats.filter(s => !s.registered).length;
 
-    text += `📊 <b>Summary:</b>\n`;
-    text += `  🟢 Live: ${liveCount}\n`;
-    text += `  🔴 Disconnected: ${disconnectedCount}\n`;
-    text += `  ⚪ Unpaired: ${unpairedCount}\n\n`;
-    text += `💡 Use /cleansessions to delete unused sessions`;
+    text += `📊 <b>Summary:</b> 🟢 ${liveCount} Live | 🔴 ${disconnectedCount} Off | ⚪ ${unpairedCount} Unpaired\n\n`;
+    text += `💡 <code>/cleansessions [number]</code> to delete a specific session`;
 
     await ctx.reply(text, { parse_mode: "HTML" });
   } catch (err: any) {
@@ -1346,21 +1342,80 @@ bot.command("sessions", async (ctx) => {
 bot.command("cleansessions", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
 
-  await ctx.reply("🧹 <b>Running session cleanup...</b>", { parse_mode: "HTML" });
+  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
+  const targetNum = args[0] ? parseInt(args[0]) : NaN;
+
+  // --- Delete specific session by number ---
+  if (!isNaN(targetNum) && targetNum > 0) {
+    await ctx.reply(`🔍 <b>Fetching session #${targetNum}...</b>`, { parse_mode: "HTML" });
+    try {
+      const stats = await getSessionStats();
+      if (targetNum > stats.length) {
+        await ctx.reply(`❌ Session #${targetNum} not found. Use /sessions to see the list (total: ${stats.length}).`, { parse_mode: "HTML" });
+        return;
+      }
+      const session = stats[targetNum - 1];
+      const activeIds = getActiveSessionUserIds();
+      const wasLive = activeIds.has(session.userId);
+
+      // Disconnect from WhatsApp if live
+      if (wasLive) {
+        try { await disconnectWhatsApp(session.userId); } catch {}
+      }
+
+      // Delete from MongoDB
+      await clearMongoSession(session.userId);
+
+      // Force GC if available
+      if (typeof (global as any).gc === "function") (global as any).gc();
+
+      const memAfter = process.memoryUsage();
+      const heapMB = (memAfter.heapUsed / 1024 / 1024).toFixed(1);
+      const rssMB = (memAfter.rss / 1024 / 1024).toFixed(1);
+
+      const nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
+      const numIcon = (targetNum - 1) < nums.length ? nums[targetNum - 1] : `#${targetNum}`;
+
+      await ctx.reply(
+        `✅ <b>Session Deleted!</b>\n\n` +
+        `${numIcon} 📱 <b>${esc(session.phoneNumber)}</b>\n` +
+        `🔌 Was Live: ${wasLive ? "Yes (disconnected)" : "No"}\n` +
+        `🗑 MongoDB: Cleaned\n\n` +
+        `🧠 <b>Memory after:</b> RSS ${rssMB} MB | Heap ${heapMB} MB`,
+        { parse_mode: "HTML" }
+      );
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // --- Bulk cleanup: delete stale sessions ---
+  await ctx.reply("🧹 <b>Running bulk cleanup...</b>\n\nDeleting sessions inactive for 7+ days...", { parse_mode: "HTML" });
 
   try {
     const activeIds = getActiveSessionUserIds();
     const result = await cleanupStaleSessions(activeIds, 7);
 
+    if (typeof (global as any).gc === "function") (global as any).gc();
+
+    const memAfter = process.memoryUsage();
+    const heapMB = (memAfter.heapUsed / 1024 / 1024).toFixed(1);
+    const rssMB = (memAfter.rss / 1024 / 1024).toFixed(1);
+
     if (result.deletedSessions === 0) {
-      await ctx.reply("✅ <b>Cleanup Done!</b>\n\nNo stale sessions found. MongoDB is clean.", { parse_mode: "HTML" });
+      await ctx.reply(
+        `✅ <b>Cleanup Done!</b>\n\nNo stale sessions found. MongoDB is clean.\n\n` +
+        `🧠 Memory: RSS ${rssMB} MB | Heap ${heapMB} MB`,
+        { parse_mode: "HTML" }
+      );
     } else {
       await ctx.reply(
-        `✅ <b>Cleanup Done!</b>\n\n` +
+        `✅ <b>Bulk Cleanup Done!</b>\n\n` +
         `🗑 Sessions deleted: <b>${result.deletedSessions}</b>\n` +
         `⚪ Unpaired deleted: <b>${result.deletedUnpaired}</b>\n` +
         `🔑 Keys freed: <b>${result.deletedKeys}</b>\n\n` +
-        `✨ MongoDB cleaned up!`,
+        `🧠 <b>Memory after:</b> RSS ${rssMB} MB | Heap ${heapMB} MB`,
         { parse_mode: "HTML" }
       );
     }
