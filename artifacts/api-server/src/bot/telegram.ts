@@ -1174,10 +1174,8 @@ bot.command("admin", async (ctx) => {
     "🚫 <code>/ban [id]</code> — Ban a user\n" +
     "✅ <code>/unban [id]</code> — Unban a user\n" +
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
-    "📊 <code>/status</code> — View bot statistics
-" +
-    "📱 <code>/sessions</code> — WhatsApp sessions list
-" +
+    "📊 <code>/status</code> — View bot statistics\n" +
+    "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧹 <code>/cleansessions</code> — Delete unused sessions",
 
