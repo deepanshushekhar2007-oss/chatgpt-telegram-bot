@@ -442,6 +442,21 @@ interface AutoChatSession {
 }
 
 const autoChatSessions: Map<number, AutoChatSession> = new Map();
+
+interface CigSession {
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  groups: Array<{ id: string; subject: string }>;
+  message: string;
+  sent: number;
+  failed: number;
+  currentRound: number;
+  delayRotationIndex: number;
+}
+
+const cigSessions: Map<number, CigSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
 const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
@@ -3752,10 +3767,96 @@ function buildChatGroupKeyboard(state: UserState): InlineKeyboard {
   return kb;
 }
 
+function cigProgressText(session: CigSession): string {
+  const total = session.groups.length;
+  const processed = session.sent + session.failed;
+  const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+  const nextDelayMin = AUTO_CHAT_DELAY_ROTATION_MINUTES[session.delayRotationIndex % AUTO_CHAT_DELAY_ROTATION_MINUTES.length];
+  return (
+    "💬 <b>Chat In Group Chal Raha Hai...</b>\n\n" +
+    `🔁 Round: <b>${session.currentRound}</b>\n` +
+    `📤 Sent: <b>${session.sent}</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n` +
+    `📊 Progress: <b>${percent}%</b>\n` +
+    `⏱️ Next Delay: <b>${nextDelayMin} min</b>\n\n` +
+    "Roknay ke liye Stop dabao."
+  );
+}
+
+bot.callbackQuery("cig_refresh", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("✅ <b>Chat In Group ruk gaya.</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  try {
+    await ctx.editMessageText(cigProgressText(session), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔄 Refresh", "cig_refresh")
+        .text("⏹️ Stop", "cig_stop").row()
+        .text("🏠 Main Menu", "main_menu"),
+    });
+  } catch {}
+});
+
+bot.callbackQuery("cig_stop", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (!session?.running) {
+    await ctx.editMessageText("ℹ️ Chat In Group already ruk gaya.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  await ctx.editMessageText(
+    "⚠️ <b>Chat In Group Band Karo?</b>\n\nKya aap chat band karna chahte ho?",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Haan, Band Karo", "cig_stop_confirm")
+        .text("❌ Wapas Jao", "cig_refresh"),
+    }
+  );
+});
+
+bot.callbackQuery("cig_stop_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const session = cigSessions.get(userId);
+  if (session) {
+    session.cancelled = true;
+    session.running = false;
+  }
+  await ctx.editMessageText("⏹️ <b>Chat In Group band kar diya gaya!</b>", {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+  });
+});
+
 bot.callbackQuery("chat_in_group", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
+
+  const runningSession = cigSessions.get(userId);
+  if (runningSession?.running) {
+    await ctx.editMessageText(cigProgressText(runningSession), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔄 Refresh", "cig_refresh")
+        .text("⏹️ Stop", "cig_stop").row()
+        .text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("📱 <b>WhatsApp not connected!</b>\n\nConnect first to use this feature.", {
       parse_mode: "HTML",
@@ -3872,7 +3973,7 @@ bot.callbackQuery("cig_start_confirm", async (ctx) => {
   const data = state.chatInGroupData;
   const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
   const statusMsg = await ctx.editMessageText(
-    `⏳ <b>Message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} done...`,
+    "💬 <b>Chat In Group Shuru Ho Gaya!</b>\n\n⏳ Background me messages ja rahe hain...",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
@@ -3893,42 +3994,67 @@ bot.callbackQuery("cig_cancel_confirm", async (ctx) => {
   });
 });
 
-async function cigSendBackground(userId: number, waUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number): Promise<void> {
-  let sent = 0;
-  let failed = 0;
-  let rotationIndex = 0;
-
-  for (let i = 0; i < groups.length; i++) {
-    const group = groups[i];
-    const ok = await sendGroupMessage(waUserId, group.id, message);
-    if (ok) sent++; else failed++;
-
-    const nextDelayMin = AUTO_CHAT_DELAY_ROTATION_MINUTES[rotationIndex % AUTO_CHAT_DELAY_ROTATION_MINUTES.length];
-
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `📤 <b>Messages bhej raha hun...</b>\n\n` +
-        `✅ Sent: ${sent}\n❌ Failed: ${failed}\n` +
-        `📊 Progress: ${i + 1}/${groups.length}\n` +
-        `⏱️ Next Delay: ${nextDelayMin} min\n\n` +
-        `⏳ Last: ${group.subject}`,
-        { parse_mode: "HTML" }
-      );
-    } catch {}
-
-    if (i < groups.length - 1) {
-      const delayMin = AUTO_CHAT_DELAY_ROTATION_MINUTES[rotationIndex % AUTO_CHAT_DELAY_ROTATION_MINUTES.length];
-      rotationIndex++;
-      await new Promise(r => setTimeout(r, delayMin * 60 * 1000));
-    }
-  }
+async function cigSendBackground(userId: number, waUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, _delaySeconds: number): Promise<void> {
+  const session: CigSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    groups,
+    message,
+    sent: 0,
+    failed: 0,
+    currentRound: 1,
+    delayRotationIndex: 0,
+  };
+  cigSessions.set(userId, session);
 
   try {
-    await bot.api.editMessageText(chatId, msgId,
-      `✅ <b>Done!</b>\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n📊 Total: ${groups.length} groups`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-    );
-  } catch {}
+    for (let round = 1; ; round++) {
+      if (session.cancelled) break;
+      session.currentRound = round;
+
+      for (const group of groups) {
+        if (session.cancelled) break;
+        const ok = await sendGroupMessage(waUserId, group.id, message);
+        if (ok) session.sent++; else session.failed++;
+
+        try {
+          await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🔄 Refresh", "cig_refresh")
+              .text("⏹️ Stop", "cig_stop").row()
+              .text("🏠 Main Menu", "main_menu"),
+          });
+        } catch {}
+
+        if (!session.cancelled) {
+          const delayMin = AUTO_CHAT_DELAY_ROTATION_MINUTES[session.delayRotationIndex % AUTO_CHAT_DELAY_ROTATION_MINUTES.length];
+          session.delayRotationIndex++;
+          await new Promise(r => setTimeout(r, delayMin * 60 * 1000));
+        }
+      }
+
+      if (!session.cancelled) {
+        const delayMin = AUTO_CHAT_DELAY_ROTATION_MINUTES[session.delayRotationIndex % AUTO_CHAT_DELAY_ROTATION_MINUTES.length];
+        session.delayRotationIndex++;
+        await new Promise(r => setTimeout(r, delayMin * 60 * 1000));
+      }
+    }
+  } catch (err: any) {
+    console.error(`[CIG][${userId}] Error:`, err?.message);
+  }
+
+  session.running = false;
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat In Group Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
 }
 
 // ─── Add Members Feature ──────────────────────────────────────────────────────
