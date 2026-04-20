@@ -343,6 +343,7 @@ interface GroupSettings {
   approveJoin: boolean;
   disappearingMessages: number;
   friendNumbers: string[];
+  makeFriendAdmin: boolean;
 }
 
 interface CtcPair {
@@ -1764,7 +1765,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpFileId: null, dpBuffer: null, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [] };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpFileId: null, dpBuffer: null, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -1872,12 +1873,13 @@ async function showGroupFriendsStep(ctx: any) {
   if (!state?.groupSettings) return;
   state.step = "group_enter_friends";
   const friendsText =
-    "👫 <b>Friends Add While Creating</b>\n\nGroup bante waqt kisi friend ko bhi add karna hai?\n\n" +
-    "Number bhejo, ek per line (country code ke saath):\n" +
+    "👫 <b>Add Friends While Creating Group</b>\n\n" +
+    "⚠️ <b>Important:</b> The friend's number must be saved in your contact list on WhatsApp. If the number is not saved, it may not be added.\n\n" +
+    "Send friend numbers, one per line (with country code):\n" +
     "<code>919912345678\n919898765432</code>\n\n" +
-    "Ya +91 ke saath bhi bhej sakte ho:\n" +
+    "You can also send with + prefix:\n" +
     "<code>+919912345678\n+91 9898 765432</code>\n\n" +
-    "Friend add nahi karna to Skip karo.";
+    "If you don't want to add any friend, tap Skip.";
   const friendsMarkup = new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu");
   try {
     await ctx.editMessageText(friendsText, { parse_mode: "HTML", reply_markup: friendsMarkup });
@@ -1886,11 +1888,50 @@ async function showGroupFriendsStep(ctx: any) {
   }
 }
 
+async function showGroupFriendAdminStep(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.groupSettings) return;
+  state.step = "group_confirm_friend_admin";
+  const count = state.groupSettings.friendNumbers.length;
+  const text =
+    `👑 <b>Make Friend Admin?</b>\n\n` +
+    `You have added <b>${count}</b> friend number(s).\n\n` +
+    `Do you want to make the friend(s) <b>Admin</b> in the group after they are added?\n\n` +
+    `• <b>Yes</b> → Friends will be added to the group AND made admin\n` +
+    `• <b>No</b> → Friends will only be added as members (not admin)`;
+  const markup = new InlineKeyboard()
+    .text("✅ Yes, Make Admin", "group_friend_admin_yes")
+    .text("❌ No, Just Add", "group_friend_admin_no");
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: markup });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup });
+  }
+}
+
 bot.callbackQuery("group_skip_friends", async (ctx) => {
   await ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.groupSettings) return;
   state.groupSettings.friendNumbers = [];
+  state.groupSettings.makeFriendAdmin = false;
+  await showGroupSummary(ctx);
+});
+
+bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.groupSettings) return;
+  state.groupSettings.makeFriendAdmin = true;
+  await showGroupSummary(ctx);
+});
+
+bot.callbackQuery("group_friend_admin_no", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.groupSettings) return;
+  state.groupSettings.makeFriendAdmin = false;
   await showGroupSummary(ctx);
 });
 
@@ -1938,7 +1979,9 @@ async function showGroupSummary(ctx: any) {
     `📄 <b>Description:</b> ${gs.description ? esc(gs.description) : "None"}\n` +
     `🖼️ <b>Group DP:</b> ${gs.dpBuffer ? "✅ Yes" : "❌ None"}\n` +
     `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
-    `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n\n` +
+    `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
+    (gs.friendNumbers.length > 0 ? `👑 <b>Make Friend Admin:</b> ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
+    `\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${gs.editGroupInfo ? "✅" : "❌"} Edit Group Info | ${gs.sendMessages ? "✅" : "❌"} Send Messages\n` +
     `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
@@ -2003,7 +2046,7 @@ bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
 
 async function createGroupsBackground(userId: string, numericUserId: number, gs: GroupSettings, chatId: number, msgId: number) {
   const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, approveJoin: gs.approveJoin };
-  const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean }> = [];
+  const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean }> = [];
   const total = gs.finalNames.length;
 
   for (let i = 0; i < total; i++) {
@@ -2028,19 +2071,39 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
         }
         if (gs.dpBuffer) { await new Promise((r) => setTimeout(r, 2000)); await setGroupIcon(userId, result.id, gs.dpBuffer); }
-        // If friends were not added during creation (participantsFailed), try adding them separately with bulk
-        if (gs.friendNumbers.length > 0 && result.participantsFailed) {
-          await new Promise((r) => setTimeout(r, 3000));
-          const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
-          const addedCount = addResults.filter(r => r.success).length;
-          results.push({ name: groupName, link: result.inviteCode, friendsAdded: addedCount, friendsFailed: addedCount < gs.friendNumbers.length });
-        } else {
-          results.push({
-            name: groupName,
-            link: result.inviteCode,
-            friendsAdded: gs.friendNumbers.length > 0 ? (result.addedParticipants ?? 0) : undefined,
-          });
+
+        let finalFriendsAdded = 0;
+        let finalFriendsFailed = false;
+
+        if (gs.friendNumbers.length > 0) {
+          if (result.participantsFailed) {
+            // Creation with participants failed — try adding separately as fallback
+            await new Promise((r) => setTimeout(r, 3000));
+            const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
+            finalFriendsAdded = addResults.filter(r => r.success).length;
+            finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
+          } else {
+            finalFriendsAdded = result.addedParticipants ?? 0;
+          }
+
+          // Promote friends to admin if user chose Yes
+          if (gs.makeFriendAdmin && finalFriendsAdded > 0) {
+            await new Promise((r) => setTimeout(r, 2000));
+            for (const num of gs.friendNumbers) {
+              const jid = `${num.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+              try { await makeGroupAdmin(userId, result.id, jid); } catch {}
+              await new Promise((r) => setTimeout(r, 800));
+            }
+          }
         }
+
+        results.push({
+          name: groupName,
+          link: result.inviteCode,
+          friendsAdded: gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined,
+          friendsFailed: finalFriendsFailed,
+          friendAdmin: gs.makeFriendAdmin && finalFriendsAdded > 0,
+        });
       } else {
         results.push({ name: groupName, link: null, error: "Failed to create" });
       }
@@ -2057,7 +2120,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       );
     } catch {}
 
-    if (i < total - 1) await new Promise((r) => setTimeout(r, 2000));
+    if (i < total - 1) await new Promise((r) => setTimeout(r, 4000));
   }
 
   userStates.delete(numericUserId);
@@ -2074,9 +2137,12 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       let line = `✅ <b>${esc(r.name)}</b>\n🔗 ${r.link}`;
       if (r.friendsAdded !== undefined) {
         if (r.friendsFailed) {
-          line += `\n👫 Friends: ${r.friendsAdded} added (kuch add nahi hue — WhatsApp ne reject kiya)`;
+          line += `\n👫 Friends: ${r.friendsAdded} added (some were not added — rejected by WhatsApp)`;
         } else if (r.friendsAdded > 0) {
           line += `\n👫 Friends: ${r.friendsAdded} added ✅`;
+        }
+        if (r.friendAdmin) {
+          line += ` 👑 Made Admin`;
         }
       }
       message += line + "\n\n";
@@ -6153,9 +6219,9 @@ bot.on("message:text", async (ctx) => {
     }
     if (numbers.length === 0) {
       await ctx.reply(
-        "❌ Koi valid number nahi mila.\n\nSahi formats:\n" +
+        "❌ No valid number found.\n\nAccepted formats:\n" +
         "<code>919912345678\n+919912345678\n+91 9912 345678\n+91 (9912) 345678</code>\n\n" +
-        "Country code (91) zaroori hai. Ya Skip karo.",
+        "Country code (e.g. 91 for India) is required. Or tap Skip.",
         {
           parse_mode: "HTML",
           reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu"),
@@ -6165,7 +6231,7 @@ bot.on("message:text", async (ctx) => {
     }
     state.groupSettings.friendNumbers = numbers;
     await ctx.reply(`✅ <b>${numbers.length} friend number(s) saved!</b>`, { parse_mode: "HTML" });
-    await showGroupSummary(ctx);
+    await showGroupFriendAdminStep(ctx);
     return;
   }
 
