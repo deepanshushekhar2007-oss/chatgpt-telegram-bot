@@ -512,6 +512,8 @@ export async function disconnectWhatsApp(userId: string): Promise<void> {
 export interface GroupResult {
   id: string;
   inviteCode: string;
+  addedParticipants?: number;
+  participantsFailed?: boolean;
 }
 
 export async function createWhatsAppGroup(
@@ -522,15 +524,40 @@ export async function createWhatsAppGroup(
   const session = sessions.get(userId);
   if (!session?.socket || !session.connected) return null;
 
+  // Convert phone numbers to JIDs (handles both raw numbers and already-formatted JIDs)
+  const jids = participants
+    .map(p => p.includes("@") ? p : `${p.replace(/[^0-9]/g, "")}@s.whatsapp.net`)
+    .filter(j => j.split("@")[0].length >= 10);
+
   try {
-    const group = await session.socket.groupCreate(groupName, participants);
+    // Try creating WITH participants first — this bypasses WhatsApp privacy restrictions
+    // (groupCreate adds them as founding members, unlike groupParticipantsUpdate which checks privacy)
+    const group = await session.socket.groupCreate(groupName, jids);
     const inviteCode = await session.socket.groupInviteCode(group.id);
     return {
       id: group.id,
       inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
+      addedParticipants: jids.length,
     };
   } catch (err: any) {
-    console.error(`[WA][${userId}] Group creation error:`, err?.message);
+    console.error(`[WA][${userId}] Group creation error (with participants):`, err?.message);
+    // If creation with participants failed, retry without participants
+    if (jids.length > 0) {
+      try {
+        console.log(`[WA][${userId}] Retrying group creation without participants...`);
+        const group = await session.socket.groupCreate(groupName, []);
+        const inviteCode = await session.socket.groupInviteCode(group.id);
+        return {
+          id: group.id,
+          inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
+          addedParticipants: 0,
+          participantsFailed: true,
+        };
+      } catch (err2: any) {
+        console.error(`[WA][${userId}] Group creation retry also failed:`, err2?.message);
+        return null;
+      }
+    }
     return null;
   }
 }
