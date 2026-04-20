@@ -77,6 +77,14 @@ async function main() {
     setInterval(() => {
       runSessionCleanup("DAILY-CLEANUP");
     }, 24 * 60 * 60 * 1000);
+
+    // Har 5 minute mein GC chalao memory free karne ke liye
+    setInterval(() => {
+      if (typeof (global as any).gc === "function") {
+        (global as any).gc();
+        console.log("[GC] Manual garbage collection done");
+      }
+    }, 5 * 60 * 1000);
   });
 
   startBot();
