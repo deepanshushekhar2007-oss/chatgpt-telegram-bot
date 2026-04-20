@@ -1852,13 +1852,19 @@ async function showGroupFriendsStep(ctx: any) {
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
   state.step = "group_enter_friends";
-  await ctx.reply(
+  const friendsText =
     "👫 <b>Friends Add While Creating</b>\n\nGroup bante waqt kisi friend ko bhi add karna hai?\n\n" +
     "Number bhejo, ek per line (country code ke saath):\n" +
     "<code>919912345678\n919898765432</code>\n\n" +
-    "Friend add nahi karna to Skip karo.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu") }
-  );
+    "Ya +91 ke saath bhi bhej sakte ho:\n" +
+    "<code>+919912345678\n+91 9898 765432</code>\n\n" +
+    "Friend add nahi karna to Skip karo.";
+  const friendsMarkup = new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu");
+  try {
+    await ctx.editMessageText(friendsText, { parse_mode: "HTML", reply_markup: friendsMarkup });
+  } catch {
+    await ctx.reply(friendsText, { parse_mode: "HTML", reply_markup: friendsMarkup });
+  }
 }
 
 bot.callbackQuery("group_skip_friends", async (ctx) => {
@@ -2003,7 +2009,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
         }
         if (gs.dpBuffer) { await new Promise((r) => setTimeout(r, 2000)); await setGroupIcon(userId, result.id, gs.dpBuffer); }
         if (gs.friendNumbers.length > 0) {
-          await new Promise((r) => setTimeout(r, 1500));
+          await new Promise((r) => setTimeout(r, 3000));
           await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
         }
         results.push({ name: groupName, link: result.inviteCode });
@@ -5888,9 +5894,9 @@ bot.on("message:text", async (ctx) => {
   }
 
   if (state.step === "awaiting_phone") {
-    const phone = text.replace(/\s/g, "");
-    if (!/^\+?\d{10,15}$/.test(phone)) {
-      await ctx.reply("❌ Invalid phone number.\nExample: <code>+919942222222</code>", { parse_mode: "HTML" }); return;
+    const phone = "+" + text.replace(/[^0-9]/g, "");
+    if (!/^\+\d{10,15}$/.test(phone)) {
+      await ctx.reply("❌ Invalid phone number.\nExample: <code>+919942222222</code>\nYa: <code>+91 (9999) 222222</code>", { parse_mode: "HTML" }); return;
     }
     userStates.delete(userId);
     const statusMsg = await ctx.reply(
@@ -6105,13 +6111,18 @@ bot.on("message:text", async (ctx) => {
     const numbers: string[] = [];
     for (const line of lines) {
       const cleaned = line.replace(/[^0-9]/g, "");
-      if (cleaned.length >= 7) numbers.push(cleaned);
+      if (cleaned.length >= 10) numbers.push(cleaned);
     }
     if (numbers.length === 0) {
-      await ctx.reply("❌ Koi valid number nahi mila.\nCountry code ke saath bhejo jaise <code>919912345678</code>\n\nYa Skip karo.", {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu"),
-      });
+      await ctx.reply(
+        "❌ Koi valid number nahi mila.\n\nSahi formats:\n" +
+        "<code>919912345678\n+919912345678\n+91 9912 345678\n+91 (9912) 345678</code>\n\n" +
+        "Country code (91) zaroori hai. Ya Skip karo.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu"),
+        }
+      );
       return;
     }
     state.groupSettings.friendNumbers = numbers;
