@@ -1172,27 +1172,35 @@ export async function addGroupParticipantsBulk(
     return phoneNumbers.map(p => ({ phone: p, success: false, error: "WhatsApp not connected" }));
   }
   try {
-    const jids = phoneNumbers.map(p => `${p.replace(/[^0-9]/g, "")}@s.whatsapp.net`);
-    const result = await session.socket.groupParticipantsUpdate(groupId, jids, "add");
+    const cleanedNumbers = phoneNumbers.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 10);
+    const jids = cleanedNumbers.map(p => `${p}@s.whatsapp.net`);
+    let result: any;
+    try {
+      result = await session.socket.groupParticipantsUpdate(groupId, jids, "add");
+    } catch (innerErr: any) {
+      console.error(`[WA][${userId}] groupParticipantsUpdate threw:`, innerErr?.message);
+      await new Promise((r) => setTimeout(r, 2000));
+      result = await session.socket.groupParticipantsUpdate(groupId, jids, "add");
+    }
     const results: Array<{ phone: string; success: boolean; error?: string }> = [];
-    for (let i = 0; i < phoneNumbers.length; i++) {
+    for (let i = 0; i < cleanedNumbers.length; i++) {
       const status = Array.isArray(result) && result[i] ? (result[i] as any) : null;
       if (status) {
         const statusCode = status.status || status.content?.attrs?.type || "";
         const statusStr = String(statusCode).toLowerCase();
         if (statusStr === "200" || statusStr === "success") {
-          results.push({ phone: phoneNumbers[i], success: true });
+          results.push({ phone: cleanedNumbers[i], success: true });
         } else if (statusStr === "403" || statusStr.includes("invite") || statusStr.includes("not-authorized")) {
-          results.push({ phone: phoneNumbers[i], success: false, error: "Invite required" });
+          results.push({ phone: cleanedNumbers[i], success: false, error: "Invite required" });
         } else if (statusStr === "409" || statusStr.includes("exist") || statusStr.includes("conflict")) {
-          results.push({ phone: phoneNumbers[i], success: false, error: "Already in group" });
+          results.push({ phone: cleanedNumbers[i], success: false, error: "Already in group" });
         } else if (statusStr === "404" || statusStr.includes("not-exist") || statusStr.includes("not on whatsapp")) {
-          results.push({ phone: phoneNumbers[i], success: false, error: "Not on WhatsApp" });
+          results.push({ phone: cleanedNumbers[i], success: false, error: "Not on WhatsApp" });
         } else {
-          results.push({ phone: phoneNumbers[i], success: false, error: `Status: ${statusStr}` });
+          results.push({ phone: cleanedNumbers[i], success: false, error: `Status: ${statusStr}` });
         }
       } else {
-        results.push({ phone: phoneNumbers[i], success: true });
+        results.push({ phone: cleanedNumbers[i], success: true });
       }
     }
     return results;
