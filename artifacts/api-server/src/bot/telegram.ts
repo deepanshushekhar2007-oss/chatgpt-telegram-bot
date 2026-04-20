@@ -32,6 +32,7 @@ import {
   isAutoConnected,
   getAutoConnectedNumber,
   getActiveSessionUserIds,
+  setGroupDisappearingMessages,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -340,6 +341,8 @@ interface GroupSettings {
   sendMessages: boolean;
   addMembers: boolean;
   approveJoin: boolean;
+  disappearingMessages: number;
+  friendNumbers: string[];
 }
 
 interface CtcPair {
@@ -401,6 +404,8 @@ interface UserState {
     groupLink: string;
     groupId: string;
     groupName: string;
+    groups: Array<{ link: string; id: string; name: string }>;
+    multiGroup: boolean;
     friendNumbers: string[];
     adminContacts: Array<{ name: string; phone: string }>;
     navyContacts: Array<{ name: string; phone: string }>;
@@ -408,6 +413,14 @@ interface UserState {
     totalToAdd: number;
     mode: "one_by_one" | "together" | "";
     delaySeconds: number;
+    cancelled: boolean;
+  };
+  editSettingsData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    settings: GroupSettings;
     cancelled: boolean;
   };
   broadcastData?: {
@@ -825,7 +838,8 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("🔍 CTC Checker", "ctc_checker").text("🔗 Get Link", "get_link").row()
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
-    .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row();
+    .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
+    .text("⚙️ Edit Settings", "edit_settings").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -1731,7 +1745,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpFileId: null, dpBuffer: null, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpFileId: null, dpBuffer: null, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [] };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -1790,18 +1804,68 @@ bot.callbackQuery("settings_done", async (ctx) => {
   await ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.groupSettings) return;
-  state.step = "group_dp";
+  state.step = "group_disappearing";
+  const dmLabel = (v: number) => {
+    if (v === 86400) return "✅ 24 Hours";
+    if (v === 604800) return "✅ 7 Days";
+    if (v === 7776000) return "✅ 90 Days";
+    return "✅ Off";
+  };
+  const cur = state.groupSettings.disappearingMessages;
   await ctx.editMessageText(
-    "🖼️ <b>Group Profile Photo</b>\n\nSend a photo to use as group DP.\nOr skip to create groups without a photo.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_dp_skip").text("❌ Cancel", "main_menu") }
+    "⏳ <b>Disappearing Messages</b>\n\nGroup mein messages kitne time baad automatically delete hone chahiye?\n\n" +
+    `Current: <b>${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(cur === 86400 ? "✅ 24 Hours" : "🕐 24 Hours", "gdm_24h").text(cur === 604800 ? "✅ 7 Days" : "📅 7 Days", "gdm_7d").row()
+        .text(cur === 7776000 ? "✅ 90 Days" : "📆 90 Days", "gdm_90d").text(cur === 0 ? "✅ Off" : "🔕 Off", "gdm_off").row()
+        .text("❌ Cancel", "main_menu"),
+    }
   );
 });
+
+for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 7776000], ["gdm_off", 0]] as const) {
+  bot.callbackQuery(cb, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = userStates.get(ctx.from.id);
+    if (!state?.groupSettings) return;
+    state.groupSettings.disappearingMessages = dur;
+    state.step = "group_dp";
+    await ctx.editMessageText(
+      "🖼️ <b>Group Profile Photo</b>\n\nGroup DP ke liye photo bhejo.\nDP nahi lagana to Skip karo.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_dp_skip").text("❌ Cancel", "main_menu") }
+    );
+  });
+}
 
 bot.callbackQuery("group_dp_skip", async (ctx) => {
   await ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.groupSettings) return;
   state.groupSettings.dpFileId = null; state.groupSettings.dpBuffer = null;
+  await showGroupFriendsStep(ctx);
+});
+
+async function showGroupFriendsStep(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.groupSettings) return;
+  state.step = "group_enter_friends";
+  await ctx.reply(
+    "👫 <b>Friends Add While Creating</b>\n\nGroup bante waqt kisi friend ko bhi add karna hai?\n\n" +
+    "Number bhejo, ek per line (country code ke saath):\n" +
+    "<code>919912345678\n919898765432</code>\n\n" +
+    "Friend add nahi karna to Skip karo.",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu") }
+  );
+}
+
+bot.callbackQuery("group_skip_friends", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.groupSettings) return;
+  state.groupSettings.friendNumbers = [];
   await showGroupSummary(ctx);
 });
 
@@ -1836,17 +1900,20 @@ bot.callbackQuery("naming_custom", async (ctx) => {
 });
 
 async function showGroupSummary(ctx: any) {
-  const userId = ctx.from.id;
+  const userId = ctx.from?.id ?? ctx.chat?.id;
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
   const gs = state.groupSettings;
   const namesList = gs.finalNames.map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   state.step = "group_confirm";
+  const dmText = gs.disappearingMessages === 86400 ? "24 Hours" : gs.disappearingMessages === 604800 ? "7 Days" : gs.disappearingMessages === 7776000 ? "90 Days" : "Off";
   const text =
     "📋 <b>Group Creation Summary</b>\n\n" +
     `📝 <b>Names (${gs.finalNames.length}):</b>\n${namesList}\n\n` +
     `📄 <b>Description:</b> ${gs.description ? esc(gs.description) : "None"}\n` +
-    `🖼️ <b>Group DP:</b> ${gs.dpBuffer ? "✅ Yes" : "❌ None"}\n\n` +
+    `🖼️ <b>Group DP:</b> ${gs.dpBuffer ? "✅ Yes" : "❌ None"}\n` +
+    `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
+    `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${gs.editGroupInfo ? "✅" : "❌"} Edit Group Info | ${gs.sendMessages ? "✅" : "❌"} Send Messages\n` +
     `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
@@ -1930,7 +1997,15 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       if (result) {
         await new Promise((r) => setTimeout(r, 1500));
         await applyGroupSettings(userId, result.id, perms, gs.description);
+        if (gs.disappearingMessages > 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+          await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
+        }
         if (gs.dpBuffer) { await new Promise((r) => setTimeout(r, 2000)); await setGroupIcon(userId, result.id, gs.dpBuffer); }
+        if (gs.friendNumbers.length > 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+          await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
+        }
         results.push({ name: groupName, link: result.inviteCode });
       } else {
         results.push({ name: groupName, link: null, error: "Failed to create" });
@@ -4823,6 +4898,407 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
   }
 }
 
+// ─── Edit Settings Feature ────────────────────────────────────────────────────
+
+const ES_PAGE_SIZE = 20;
+
+function buildEditSettingsGroupKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const allGroups = state.editSettingsData!.allGroups;
+  const selected = state.editSettingsData!.selectedIndices;
+  const page = state.editSettingsData!.page;
+  const totalPages = Math.max(1, Math.ceil(allGroups.length / ES_PAGE_SIZE));
+  const start = page * ES_PAGE_SIZE;
+  const end = Math.min(start + ES_PAGE_SIZE, allGroups.length);
+  for (let i = start; i < end; i++) {
+    const g = allGroups[i];
+    const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `es_tog_${i}`).row();
+  }
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "es_prev_page").text(`📄 ${page + 1}/${totalPages}`, "es_page_info").text(next, "es_next_page").row();
+  }
+  if (allGroups.length > 1) kb.text("☑️ Select All", "es_select_all").text("🧹 Clear All", "es_clear_all").row();
+  if (selected.size > 0) kb.text(`▶️ Continue (${selected.size} selected)`, "es_continue").row();
+  kb.text("🔙 Back", "edit_settings").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
+function editSettingsKeyboard(gs: GroupSettings): InlineKeyboard {
+  const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
+  return new InlineKeyboard()
+    .text(`📝 Edit Info: ${on(gs.editGroupInfo)}`, "es_tog_editInfo").text(`💬 Send Msgs: ${on(gs.sendMessages)}`, "es_tog_sendMsg").row()
+    .text(`➕ Add Members: ${on(gs.addMembers)}`, "es_tog_addMembers").text(`🔐 Approve: ${on(gs.approveJoin)}`, "es_tog_approveJoin").row()
+    .text("💾 Save Settings", "es_settings_done");
+}
+
+function editSettingsText(gs: GroupSettings): string {
+  const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
+  return (
+    "⚙️ <b>Edit Group Settings</b>\n\n" +
+    "<b>👥 Members can:</b>\n" +
+    `📝 Edit Group Info: ${on(gs.editGroupInfo)}\n` +
+    `💬 Send Messages: ${on(gs.sendMessages)}\n` +
+    `➕ Add Members: ${on(gs.addMembers)}\n\n` +
+    "<b>👑 Admins:</b>\n" +
+    `🔐 Approve New Members: ${on(gs.approveJoin)}\n\n` +
+    "Tap to toggle each setting:"
+  );
+}
+
+bot.callbackQuery("edit_settings", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
+  const allGroups = await getAllGroups(String(userId));
+  const adminGroups = allGroups.filter(g => g.isAdmin);
+  if (!adminGroups.length) {
+    await ctx.editMessageText("📭 Aap kisi bhi group mein admin nahi hain.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    }); return;
+  }
+  const simpleGroups = adminGroups.map(g => ({ id: g.id, subject: g.subject }));
+  const patterns = detectSimilarGroups(simpleGroups);
+  userStates.set(userId, {
+    step: "edit_settings_menu",
+    editSettingsData: {
+      allGroups: simpleGroups, patterns, selectedIndices: new Set(), page: 0,
+      settings: defaultGroupSettings(), cancelled: false,
+    },
+  });
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "es_similar").text("📋 All Groups", "es_show_all").row();
+  else kb.text("📋 All Groups", "es_show_all").row();
+  kb.text("🏠 Main Menu", "main_menu");
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n📊 Admin Groups: ${adminGroups.length}\n` +
+    (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
+    `\n📌 Choose an option:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("es_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  const { patterns } = state.editSettingsData;
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "edit_settings").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `es_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", "edit_settings").text("🏠 Menu", "main_menu");
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery(/^es_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.editSettingsData.patterns[idx];
+  if (!pattern) return;
+  const patternIds = new Set(pattern.groups.map(g => g.id));
+  state.editSettingsData.selectedIndices = new Set();
+  for (let i = 0; i < state.editSettingsData.allGroups.length; i++) {
+    if (patternIds.has(state.editSettingsData.allGroups[i].id)) state.editSettingsData.selectedIndices.add(i);
+  }
+  state.step = "edit_settings_select";
+  state.editSettingsData.page = 0;
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_show_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.step = "edit_settings_select";
+  state.editSettingsData.page = 0;
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>Tap to select/deselect</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery(/^es_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.editSettingsData.allGroups.length) return;
+  if (state.editSettingsData.selectedIndices.has(idx)) state.editSettingsData.selectedIndices.delete(idx);
+  else state.editSettingsData.selectedIndices.add(idx);
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>${state.editSettingsData.selectedIndices.size > 0 ? `${state.editSettingsData.selectedIndices.size} selected` : "None selected"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.selectedIndices = new Set(state.editSettingsData.allGroups.map((_, i) => i));
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n${state.editSettingsData.allGroups.length} groups selected.\n\nSab select ho gaye:`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.selectedIndices = new Set();
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\nSab clear. Group(s) select karo:`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  if (state.editSettingsData.page > 0) state.editSettingsData.page--;
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  const totalPages = Math.ceil(state.editSettingsData.allGroups.length / ES_PAGE_SIZE);
+  if (state.editSettingsData.page < totalPages - 1) state.editSettingsData.page++;
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("es_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
+
+bot.callbackQuery("es_continue", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  if (state.editSettingsData.selectedIndices.size === 0) {
+    await ctx.answerCallbackQuery({ text: "⚠️ Koi group select nahi!" }); return;
+  }
+  state.step = "edit_settings_permissions";
+  const gs = state.editSettingsData.settings;
+  await ctx.editMessageText(editSettingsText(gs), { parse_mode: "HTML", reply_markup: editSettingsKeyboard(gs) });
+});
+
+for (const [cb, field] of [
+  ["es_tog_editInfo", "editGroupInfo"], ["es_tog_sendMsg", "sendMessages"],
+  ["es_tog_addMembers", "addMembers"], ["es_tog_approveJoin", "approveJoin"],
+] as const) {
+  bot.callbackQuery(cb, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = userStates.get(ctx.from.id);
+    if (!state?.editSettingsData) return;
+    (state.editSettingsData.settings as any)[field] = !(state.editSettingsData.settings as any)[field];
+    await ctx.editMessageText(editSettingsText(state.editSettingsData.settings), { parse_mode: "HTML", reply_markup: editSettingsKeyboard(state.editSettingsData.settings) });
+  });
+}
+
+bot.callbackQuery("es_settings_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  const cur = state.editSettingsData.settings.disappearingMessages;
+  state.step = "edit_settings_disappearing";
+  await ctx.editMessageText(
+    "⏳ <b>Disappearing Messages</b>\n\nMessages kitne time baad delete honge?\n\n" +
+    `Current: <b>${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(cur === 86400 ? "✅ 24 Hours" : "🕐 24 Hours", "es_dm_24h").text(cur === 604800 ? "✅ 7 Days" : "📅 7 Days", "es_dm_7d").row()
+        .text(cur === 7776000 ? "✅ 90 Days" : "📆 90 Days", "es_dm_90d").text(cur === 0 ? "✅ Off" : "🔕 Off", "es_dm_off").row()
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d", 7776000], ["es_dm_off", 0]] as const) {
+  bot.callbackQuery(cb, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const state = userStates.get(ctx.from.id);
+    if (!state?.editSettingsData) return;
+    state.editSettingsData.settings.disappearingMessages = dur;
+    state.step = "edit_settings_dp";
+    await ctx.editMessageText(
+      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_dp_skip").text("❌ Cancel", "main_menu") }
+    );
+  });
+}
+
+bot.callbackQuery("es_dp_skip", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.settings.dpBuffer = null;
+  state.step = "edit_settings_desc";
+  await ctx.editMessageText(
+    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("es_desc_skip", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.settings.description = "";
+  await showEditSettingsReview(ctx);
+});
+
+async function showEditSettingsReview(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.editSettingsData) return;
+  const { settings, allGroups, selectedIndices } = state.editSettingsData;
+  state.step = "edit_settings_review";
+  const selectedGroups = Array.from(selectedIndices).map(i => allGroups[i]);
+  const groupList = selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
+  const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
+  const dmText = settings.disappearingMessages === 86400 ? "24 Hours" : settings.disappearingMessages === 604800 ? "7 Days" : settings.disappearingMessages === 7776000 ? "90 Days" : "Off";
+  const on = (v: boolean) => v ? "✅" : "❌";
+  const reviewText =
+    "📋 <b>Edit Settings — Review</b>\n\n" +
+    `📋 <b>Groups (${selectedGroups.length}):</b>\n${groupList}${moreText}\n\n` +
+    `📄 Description: ${settings.description ? esc(settings.description) : "Skip"}\n` +
+    `🖼️ DP: ${settings.dpBuffer ? "✅ Change" : "❌ Skip"}\n` +
+    `⏳ Disappearing: ${dmText}\n\n` +
+    "⚙️ <b>Permissions:</b>\n" +
+    `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
+    `${on(settings.addMembers)} Add Members | ${on(settings.approveJoin)} Approve Join\n\n` +
+    "✅ Confirm karke sab groups mein apply karo:";
+  const kb = new InlineKeyboard().text("✅ Apply to All Groups", "es_apply_confirm").text("❌ Cancel", "main_menu");
+  try { await ctx.editMessageText(reviewText, { parse_mode: "HTML", reply_markup: kb }); }
+  catch { await ctx.reply(reviewText, { parse_mode: "HTML", reply_markup: kb }); }
+}
+
+bot.callbackQuery("es_apply_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.editSettingsData) return;
+  const { settings, allGroups, selectedIndices } = state.editSettingsData;
+  const selectedGroups = Array.from(selectedIndices).map(i => allGroups[i]);
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  state.editSettingsData.cancelled = false;
+  state.step = "edit_settings_applying";
+  await ctx.editMessageText(
+    `⏳ <b>Settings Apply Ho Rahi Hain...</b>\n\n🔄 0/${selectedGroups.length} done`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") }
+  );
+  void applyEditSettingsBackground(String(userId), userId, settings, selectedGroups, chatId, msgId);
+});
+
+bot.callbackQuery("es_cancel_apply", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.editMessageText(
+    "⚠️ <b>Cancel karna chahte hain?</b>\n\nJo groups process ho chuke hain unko revert nahi kiya jayega.",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Haan, Cancel", "es_cancel_confirm")
+        .text("▶️ Continue", "es_cancel_dismiss"),
+    }
+  );
+});
+
+bot.callbackQuery("es_cancel_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "🛑 Cancelled!" });
+  const state = userStates.get(ctx.from.id);
+  if (state?.editSettingsData) state.editSettingsData.cancelled = true;
+  await ctx.editMessageText("🛑 <b>Apply cancelled.</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu") });
+});
+
+bot.callbackQuery("es_cancel_dismiss", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
+});
+
+async function applyEditSettingsBackground(
+  userId: string, numericUserId: number,
+  settings: GroupSettings,
+  groups: Array<{ id: string; subject: string }>,
+  chatId: number, msgId: number
+) {
+  const perms: GroupPermissions = { editGroupInfo: settings.editGroupInfo, sendMessages: settings.sendMessages, addMembers: settings.addMembers, approveJoin: settings.approveJoin };
+  const results: Array<{ name: string; ok: boolean; error?: string }> = [];
+  const total = groups.length;
+
+  for (let i = 0; i < total; i++) {
+    const state = userStates.get(numericUserId);
+    if (state?.editSettingsData?.cancelled) {
+      for (let j = i; j < total; j++) results.push({ name: groups[j].subject, ok: false, error: "Cancelled" });
+      break;
+    }
+    const group = groups[i];
+    try {
+      await applyGroupSettings(userId, group.id, perms, settings.description);
+      if (settings.disappearingMessages >= 0) {
+        await new Promise(r => setTimeout(r, 800));
+        await setGroupDisappearingMessages(userId, group.id, settings.disappearingMessages);
+      }
+      if (settings.dpBuffer) {
+        await new Promise(r => setTimeout(r, 1500));
+        await setGroupIcon(userId, group.id, settings.dpBuffer);
+      }
+      results.push({ name: group.subject, ok: true });
+    } catch (err: any) {
+      results.push({ name: group.subject, ok: false, error: err?.message || "Unknown error" });
+    }
+    const done = i + 1;
+    const lines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)}` : `❌ ${esc(r.name)}`).join("\n");
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Apply Ho Rahi Hain: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
+        { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") : undefined }
+      );
+    } catch {}
+    if (i < total - 1) await new Promise(r => setTimeout(r, 2000));
+  }
+
+  userStates.delete(numericUserId);
+  const ok = results.filter(r => r.ok).length;
+  const cancelled = results.some(r => r.error === "Cancelled");
+  const header = cancelled ? `🛑 <b>Cancelled (${ok}/${total} done)</b>` : `🎉 <b>Done! (${ok}/${total} applied)</b>`;
+  const finalLines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)} (skipped)` : `❌ ${esc(r.name)}: ${esc(r.error || "")}`).join("\n");
+  try {
+    await bot.api.editMessageText(chatId, msgId, `${header}\n\n${finalLines}`, {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+  } catch {}
+}
+
 // ─── Add Members Feature ──────────────────────────────────────────────────────
 
 bot.callbackQuery("add_members", async (ctx) => {
@@ -4840,14 +5316,18 @@ bot.callbackQuery("add_members", async (ctx) => {
     step: "add_members_enter_link",
     addMembersData: {
       groupLink: "", groupId: "", groupName: "",
+      groups: [], multiGroup: false,
       friendNumbers: [], adminContacts: [], navyContacts: [], memberContacts: [],
       totalToAdd: 0, mode: "", delaySeconds: 15, cancelled: false,
     },
   });
   await ctx.editMessageText(
     "➕ <b>Add Members to Group</b>\n\n" +
-    "🔗 <b>Step 1:</b> Send the WhatsApp group link where you want to add members.\n\n" +
-    "Example: <code>https://chat.whatsapp.com/ABC123xyz</code>",
+    "🔗 <b>Step 1:</b> WhatsApp group link(s) bhejo.\n\n" +
+    "✅ <b>Single group:</b> Ek link (Friend + Admin/Navy/Member VCF support)\n" +
+    "✅ <b>Multiple groups:</b> Multiple links, ek per line (sirf Friend numbers)\n\n" +
+    "Example single:\n<code>https://chat.whatsapp.com/ABC123xyz</code>\n\n" +
+    "Example multiple:\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -4858,6 +5338,13 @@ bot.callbackQuery("am_skip_friends", async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
   state.addMembersData.friendNumbers = [];
+  if (state.addMembersData.multiGroup) {
+    await ctx.editMessageText(
+      "❌ <b>Multiple groups mode mein friend numbers zaroori hain!</b>\n\nFriend numbers ke bina kuch add nahi hoga.\n\nFriend numbers bhejo ya feature restart karo.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Restart", "add_members").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
   state.step = "add_members_admin_vcf";
   await ctx.editMessageText(
     "👑 <b>Step 3: Admin VCF File</b>\n\n" +
@@ -4969,18 +5456,32 @@ async function showAddMembersReview(ctx: any, userId: number) {
   const d = state.addMembersData;
   state.step = "add_members_confirm";
   const modeText = d.mode === "one_by_one" ? `1 by 1 (${d.delaySeconds}s delay)` : "All Together";
-  const reviewText =
-    "📋 <b>Add Members — Final Review</b>\n\n" +
-    `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
-    `📋 Group ID: <code>${esc(d.groupId)}</code>\n\n` +
-    `👫 Friends: ${d.friendNumbers.length}\n` +
-    `👑 Admin VCF: ${d.adminContacts.length}\n` +
-    `⚓ Navy VCF: ${d.navyContacts.length}\n` +
-    `👥 Member VCF: ${d.memberContacts.length}\n` +
-    `━━━━━━━━━━━━━━━━━━\n` +
-    `🔢 Total to add: <b>${d.totalToAdd}</b>\n` +
-    `⚙️ Mode: <b>${modeText}</b>\n\n` +
-    `⚠️ Confirm karke Start karo:`;
+  let reviewText: string;
+  if (d.multiGroup) {
+    const groupList = d.groups.slice(0, 5).map(g => `• ${esc(g.name)}`).join("\n");
+    const moreGroups = d.groups.length > 5 ? `\n... +${d.groups.length - 5} more` : "";
+    reviewText =
+      "📋 <b>Add Members — Final Review (Multi-Group)</b>\n\n" +
+      `📋 <b>Groups (${d.groups.length}):</b>\n${groupList}${moreGroups}\n\n` +
+      `👫 Friends: ${d.friendNumbers.length}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🔢 Per group: <b>${d.friendNumbers.length}</b> friends\n` +
+      `⚙️ Mode: <b>${modeText}</b>\n\n` +
+      `⚠️ Confirm karke Start karo:`;
+  } else {
+    reviewText =
+      "📋 <b>Add Members — Final Review</b>\n\n" +
+      `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+      `📋 Group ID: <code>${esc(d.groupId)}</code>\n\n` +
+      `👫 Friends: ${d.friendNumbers.length}\n` +
+      `👑 Admin VCF: ${d.adminContacts.length}\n` +
+      `⚓ Navy VCF: ${d.navyContacts.length}\n` +
+      `👥 Member VCF: ${d.memberContacts.length}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `🔢 Total to add: <b>${d.totalToAdd}</b>\n` +
+      `⚙️ Mode: <b>${modeText}</b>\n\n` +
+      `⚠️ Confirm karke Start karo:`;
+  }
   const kb = {
     parse_mode: "HTML" as const,
     reply_markup: new InlineKeyboard()
@@ -5004,6 +5505,18 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
 
   addMembersCancelRequests.delete(userId);
   d.cancelled = false;
+
+  if (d.multiGroup) {
+    const statusMsg = await ctx.editMessageText(
+      `⏳ <b>Multi-Group Adding Shuru...</b>\n\n` +
+      `📋 Groups: ${d.groups.length}\n` +
+      `👫 Friends per group: ${d.friendNumbers.length}\n\n` +
+      `⌛ Starting...`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
+    );
+    void startAddMembersMultiGroup(userId, d.groups, d.friendNumbers, d.delaySeconds, chatId, statusMsg.message_id);
+    return;
+  }
 
   const inGroup = await isUserInGroup(String(userId), d.groupId);
   if (!inGroup) {
@@ -5036,6 +5549,64 @@ bot.callbackQuery("am_cancel_adding", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "⛔ Adding stopped!" });
   addMembersCancelRequests.add(ctx.from.id);
 });
+
+async function startAddMembersMultiGroup(
+  userId: number,
+  groups: Array<{ link: string; id: string; name: string }>,
+  friendNumbers: string[],
+  delaySeconds: number,
+  chatId: number,
+  msgId: number
+) {
+  const contacts = friendNumbers.map(n => n.replace(/[^0-9]/g, "")).filter(n => n.length >= 7);
+  const lines: string[] = [];
+
+  for (const group of groups) {
+    if (addMembersCancelRequests.has(userId)) {
+      lines.push(`⛔ Cancelled — ${esc(group.name)} aur remaining skip.`);
+      break;
+    }
+    lines.push(`\n⏳ <b>${esc(group.name)}</b> — Adding...`);
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Multi-Group Adding...</b>\n${lines.join("\n")}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
+      );
+    } catch {}
+
+    const inGroup = await isUserInGroup(String(userId), group.id);
+    if (!inGroup) {
+      const joinResult = await joinGroupWithLink(String(userId), group.link);
+      if (!joinResult.success) {
+        lines[lines.length - 1] = `❌ <b>${esc(group.name)}</b> — Join fail: ${esc(joinResult.error || "Unknown")}`;
+        continue;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const result = await addGroupParticipantsBulk(String(userId), group.id, contacts);
+    const addedCount = Array.isArray(result) ? result.filter(r => r.success).length : contacts.length;
+    lines[lines.length - 1] = `✅ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
+
+    if (delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
+  }
+
+  addMembersCancelRequests.delete(userId);
+  userStates.delete(userId);
+
+  const summary = lines.join("\n");
+  try {
+    await bot.api.editMessageText(chatId, msgId,
+      `🎉 <b>Multi-Group Adding Done!</b>\n\n${summary}`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+  } catch {
+    await bot.api.sendMessage(chatId,
+      `🎉 <b>Multi-Group Adding Done!</b>\n\n${summary}`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+  }
+}
 
 function normalizePhoneForJid(raw: string): string {
   // Remove all non-digit chars (strip +, spaces, dashes, etc.)
@@ -5521,6 +6092,34 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  if (state.step === "edit_settings_desc") {
+    if (!state.editSettingsData) return;
+    state.editSettingsData.settings.description = text.toLowerCase() === "skip" ? "" : text;
+    await showEditSettingsReview(ctx);
+    return;
+  }
+
+  if (state.step === "group_enter_friends") {
+    if (!state.groupSettings) return;
+    const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const numbers: string[] = [];
+    for (const line of lines) {
+      const cleaned = line.replace(/[^0-9]/g, "");
+      if (cleaned.length >= 7) numbers.push(cleaned);
+    }
+    if (numbers.length === 0) {
+      await ctx.reply("❌ Koi valid number nahi mila.\nCountry code ke saath bhejo jaise <code>919912345678</code>\n\nYa Skip karo.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu"),
+      });
+      return;
+    }
+    state.groupSettings.friendNumbers = numbers;
+    await ctx.reply(`✅ <b>${numbers.length} friend number(s) saved!</b>`, { parse_mode: "HTML" });
+    await showGroupSummary(ctx);
+    return;
+  }
+
   if (state.step === "join_enter_links") {
     if (!state.joinData) return;
     const cleanLinks = extractLinksFromText(text);
@@ -5650,29 +6249,37 @@ bot.on("message:text", async (ctx) => {
       await ctx.reply("❌ No valid WhatsApp group link found.\nExample: <code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" });
       return;
     }
-    const link = cleanLinks[0];
-    const statusMsg = await ctx.reply("⏳ Group info fetch kar raha hun...", { parse_mode: "HTML" });
-    const groupInfo = await getGroupIdFromLink(String(userId), link);
-    if (!groupInfo) {
-      try { await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch {}
+    const isMulti = cleanLinks.length > 1;
+    const statusMsg = await ctx.reply(`⏳ ${isMulti ? `${cleanLinks.length} groups` : "Group"} info fetch kar raha hun...`, { parse_mode: "HTML" });
+    const groups: Array<{ link: string; id: string; name: string }> = [];
+    let failedLinks = 0;
+    for (const link of cleanLinks) {
+      const groupInfo = await getGroupIdFromLink(String(userId), link);
+      if (groupInfo) groups.push({ link, id: groupInfo.id, name: groupInfo.subject });
+      else failedLinks++;
+    }
+    try { await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch {}
+    if (!groups.length) {
       await ctx.reply(
-        "❌ <b>Group info nahi mil paya!</b>\n\nCheck karein:\n• Link sahi hai\n• WhatsApp connected hai\n• Link expired nahi hai",
+        "❌ <b>Kisi bhi group ka info nahi mila!</b>\n\nCheck karein:\n• Links sahi hain\n• WhatsApp connected hai\n• Links expired nahi hain",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Try Again", "add_members").text("🏠 Menu", "main_menu") }
       );
       return;
     }
-    state.addMembersData.groupLink = link;
-    state.addMembersData.groupId = groupInfo.id;
-    state.addMembersData.groupName = groupInfo.subject;
+    state.addMembersData.groups = groups;
+    state.addMembersData.multiGroup = isMulti;
+    state.addMembersData.groupLink = groups[0].link;
+    state.addMembersData.groupId = groups[0].id;
+    state.addMembersData.groupName = groups[0].name;
     state.step = "add_members_friend_numbers";
-    try { await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch {}
+    const groupPreview = groups.map(g => `✅ ${esc(g.name)}`).join("\n");
+    const failNote = failedLinks > 0 ? `\n⚠️ ${failedLinks} link(s) fetch nahi hui.` : "";
     await ctx.reply(
-      `✅ <b>Group found!</b>\n\n` +
-      `📋 Name: <b>${esc(groupInfo.subject)}</b>\n` +
-      `🔗 ID: <code>${esc(groupInfo.id)}</code>\n\n` +
+      `✅ <b>${groups.length} Group(s) found!</b>${failNote}\n\n${groupPreview}\n\n` +
       `👫 <b>Step 2: Friend Numbers</b>\n\n` +
       `Apne friend ke contact numbers bhejo (one per line)\n` +
       `Example:\n<code>919912345678\n919898765432</code>\n\n` +
+      (isMulti ? `⚠️ Multiple groups mode: Sirf friend numbers support hoga (sab groups mein add honge).\n\n` : "") +
       `Agar friend add nahi karna to Skip karo.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_friends").text("❌ Cancel", "main_menu") }
     );
@@ -5694,14 +6301,31 @@ bot.on("message:text", async (ctx) => {
       return;
     }
     state.addMembersData.friendNumbers = numbers;
-    state.step = "add_members_admin_vcf";
-    await ctx.reply(
-      `✅ <b>${numbers.length} friend number(s) saved!</b>\n\n` +
-      `👑 <b>Step 3: Admin VCF File</b>\n\n` +
-      `📁 Send Admin VCF file (.vcf)\n\n` +
-      `Agar admin ka VCF nahi hai to Skip karo.`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_admin").text("❌ Cancel", "main_menu") }
-    );
+    if (state.addMembersData.multiGroup) {
+      const d = state.addMembersData;
+      d.adminContacts = []; d.navyContacts = []; d.memberContacts = [];
+      d.totalToAdd = numbers.length;
+      state.step = "add_members_choose_mode";
+      const groupList = d.groups.map(g => `• ${esc(g.name)}`).join("\n");
+      await ctx.reply(
+        `✅ <b>${numbers.length} friend number(s) saved!</b>\n\n` +
+        `📋 <b>Groups (${d.groups.length}):</b>\n${groupList}\n\n` +
+        `🔢 Total friends to add: <b>${numbers.length}</b> (har group mein)\n\n` +
+        `⚙️ Adding mode choose karo:\n\n` +
+        `👆 <b>Add 1 by 1</b> — Ek ek karke (safe)\n` +
+        `👥 <b>Add Together</b> — Sab ek saath (fast)`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("👆 Add 1 by 1", "am_mode_one_by_one").text("👥 Together", "am_mode_together") }
+      );
+    } else {
+      state.step = "add_members_admin_vcf";
+      await ctx.reply(
+        `✅ <b>${numbers.length} friend number(s) saved!</b>\n\n` +
+        `👑 <b>Step 3: Admin VCF File</b>\n\n` +
+        `📁 Send Admin VCF file (.vcf)\n\n` +
+        `Agar admin ka VCF nahi hai to Skip karo.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_admin").text("❌ Cancel", "main_menu") }
+      );
+    }
     return;
   }
 
@@ -5763,17 +6387,38 @@ bot.callbackQuery("rm_confirm_with_exclude", async (ctx) => {
 bot.on("message:photo", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state || state.step !== "group_dp" || !state.groupSettings) return;
-  try {
-    const photos = ctx.message.photo;
-    const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
-    if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
-    state.groupSettings.dpBuffer = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-    state.groupSettings.dpFileId = photos[photos.length - 1].file_id;
-    await ctx.reply("✅ <b>Group DP saved!</b>", { parse_mode: "HTML" });
-    await showGroupSummary(ctx);
-  } catch (err: any) {
-    await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+  if (!state) return;
+
+  if (state.step === "group_dp" && state.groupSettings) {
+    try {
+      const photos = ctx.message.photo;
+      const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
+      if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
+      state.groupSettings.dpBuffer = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      state.groupSettings.dpFileId = photos[photos.length - 1].file_id;
+      await ctx.reply("✅ <b>Group DP saved!</b>", { parse_mode: "HTML" });
+      await showGroupFriendsStep(ctx);
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  if (state.step === "edit_settings_dp" && state.editSettingsData) {
+    try {
+      const photos = ctx.message.photo;
+      const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
+      if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
+      state.editSettingsData.settings.dpBuffer = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      state.step = "edit_settings_desc";
+      await ctx.reply("✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nDescription bhejo ya skip karo.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu"),
+      });
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+    }
+    return;
   }
 });
 
