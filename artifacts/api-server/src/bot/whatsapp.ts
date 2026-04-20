@@ -529,36 +529,66 @@ export async function createWhatsAppGroup(
     .map(p => p.includes("@") ? p : `${p.replace(/[^0-9]/g, "")}@s.whatsapp.net`)
     .filter(j => j.split("@")[0].length >= 10);
 
-  try {
-    // Try creating WITH participants first — this bypasses WhatsApp privacy restrictions
-    // (groupCreate adds them as founding members, unlike groupParticipantsUpdate which checks privacy)
-    const group = await session.socket.groupCreate(groupName, jids);
-    const inviteCode = await session.socket.groupInviteCode(group.id);
-    return {
-      id: group.id,
-      inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
-      addedParticipants: jids.length,
-    };
-  } catch (err: any) {
-    console.error(`[WA][${userId}] Group creation error (with participants):`, err?.message);
-    // If creation with participants failed, retry without participants
-    if (jids.length > 0) {
-      try {
-        console.log(`[WA][${userId}] Retrying group creation without participants...`);
-        const group = await session.socket.groupCreate(groupName, []);
-        const inviteCode = await session.socket.groupInviteCode(group.id);
-        return {
-          id: group.id,
-          inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
-          addedParticipants: 0,
-          participantsFailed: true,
-        };
-      } catch (err2: any) {
-        console.error(`[WA][${userId}] Group creation retry also failed:`, err2?.message);
-        return null;
+  // Helper to attempt groupCreate with exponential backoff
+  async function tryCreate(participantList: string[], attempt = 1): Promise<{ id: string; participants?: boolean } | null> {
+    try {
+      const group = await session.socket!.groupCreate(groupName, participantList);
+      return { id: group.id, participants: participantList.length > 0 };
+    } catch (err: any) {
+      const msg = err?.message || "";
+      console.error(`[WA][${userId}] groupCreate attempt ${attempt} failed:`, msg);
+      if (attempt < 3) {
+        const delay = attempt * 3000;
+        console.log(`[WA][${userId}] Retrying groupCreate in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        return tryCreate(participantList, attempt + 1);
+      }
+      return null;
+    }
+  }
+
+  // Step 1: Try creating WITH participants (bypasses WhatsApp privacy restrictions at creation time)
+  let groupId: string | null = null;
+  let participantsFailed = false;
+
+  if (jids.length > 0) {
+    const res = await tryCreate(jids);
+    if (res) {
+      groupId = res.id;
+    } else {
+      // Step 2: If that failed, try creating WITHOUT participants
+      console.log(`[WA][${userId}] Retrying group creation without participants...`);
+      await new Promise(r => setTimeout(r, 2000));
+      const res2 = await tryCreate([]);
+      if (res2) {
+        groupId = res2.id;
+        participantsFailed = true;
       }
     }
-    return null;
+  } else {
+    const res = await tryCreate([]);
+    if (res) groupId = res.id;
+  }
+
+  if (!groupId) return null;
+
+  try {
+    const inviteCode = await session.socket.groupInviteCode(groupId);
+    return {
+      id: groupId,
+      inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
+      addedParticipants: participantsFailed ? 0 : jids.length,
+      participantsFailed,
+    };
+  } catch (err: any) {
+    console.error(`[WA][${userId}] groupInviteCode error:`, err?.message);
+    // Group was created but invite code failed — still return without invite link
+    return {
+      id: groupId,
+      inviteCode: "",
+      addedParticipants: participantsFailed ? 0 : jids.length,
+      participantsFailed,
+    };
   }
 }
 
