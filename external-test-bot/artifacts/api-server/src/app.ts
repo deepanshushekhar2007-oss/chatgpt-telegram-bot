@@ -3,7 +3,6 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
-import { telegramWebhookPath, telegramWebhookHandler } from "./bot/telegram";
 
 const app: Express = express();
 
@@ -27,10 +26,6 @@ app.use(
   }),
 );
 app.use(cors());
-
-// Telegram webhook MUST be mounted BEFORE express.json so grammy can parse the raw body itself.
-app.post(telegramWebhookPath, telegramWebhookHandler);
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
