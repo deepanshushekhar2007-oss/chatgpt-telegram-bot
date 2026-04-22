@@ -46,6 +46,17 @@ import {
   hasUserAccess,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
+import {
+  LANG_LABELS,
+  LANG_PROMPT,
+  LANG_CONFIRM,
+  isValidLang,
+  getUserLang,
+  setUserLang,
+  preloadLangCache,
+  makeTranslateTransformer,
+  type LangCode,
+} from "./i18n";
 
 const token = process.env["TELEGRAM_BOT_TOKEN"] || "";
 
@@ -55,6 +66,10 @@ const OWNER_USERNAME = "@SPIDYWS";
 const BOT_DISPLAY_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
 
 const bot = new Bot(token || "placeholder");
+
+// Auto-translate outgoing messages based on each user's selected language.
+// If the user's language is "default", text passes through unchanged.
+bot.api.config.use(makeTranslateTransformer());
 
 type TelegramButtonStyle = "primary" | "success" | "danger";
 
@@ -891,6 +906,39 @@ bot.command("start", async (ctx) => {
     mainMenuText(userId, "welcome"),
     { parse_mode: "HTML", reply_markup: mainMenu(userId) }
   );
+});
+
+bot.command("language", async (ctx) => {
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) return;
+  const lang = await getUserLang(userId);
+  const kb = new InlineKeyboard()
+    .text(LANG_LABELS.default, "lang_set:default").row()
+    .text(LANG_LABELS.en, "lang_set:en")
+    .text(LANG_LABELS.hi, "lang_set:hi").row()
+    .text(LANG_LABELS.id, "lang_set:id")
+    .text(LANG_LABELS.zh, "lang_set:zh");
+  // The transformer does NOT translate this prompt because it is already
+  // pre-localized to the user's currently selected language.
+  await ctx.reply(LANG_PROMPT[lang], { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery(/^lang_set:(.+)$/, async (ctx) => {
+  const code = ctx.match![1];
+  if (!isValidLang(code)) {
+    await ctx.answerCallbackQuery({ text: "Invalid language", show_alert: true });
+    return;
+  }
+  const userId = ctx.from!.id;
+  await setUserLang(userId, code as LangCode);
+  await ctx.answerCallbackQuery({ text: "✅ " + LANG_LABELS[code as LangCode] });
+  // Show a confirmation pre-localized to the selected language.
+  try {
+    await ctx.editMessageText(LANG_CONFIRM[code as LangCode], { parse_mode: "HTML" });
+  } catch {
+    await ctx.reply(LANG_CONFIRM[code as LangCode], { parse_mode: "HTML" });
+  }
 });
 
 bot.command("help", async (ctx) => {
@@ -6688,6 +6736,8 @@ export function startBot() {
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
   });
+
+  void preloadLangCache();
 
   bot.catch((err) => {
     const e = err.error as any;
