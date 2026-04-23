@@ -32,6 +32,7 @@ import {
   isAutoConnected,
   getAutoConnectedNumber,
   getActiveSessionUserIds,
+  setDisconnectNotifier,
   setGroupDisappearingMessages,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
@@ -335,8 +336,7 @@ interface GroupSettings {
   count: number;
   finalNames: string[];
   namingMode: "auto" | "custom";
-  dpFileId: string | null;
-  dpBuffer: Buffer | null;
+  dpBuffers: Buffer[];
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
@@ -412,9 +412,14 @@ interface UserState {
     navyContacts: Array<{ name: string; phone: string }>;
     memberContacts: Array<{ name: string; phone: string }>;
     totalToAdd: number;
-    mode: "one_by_one" | "together" | "";
+    mode: "one_by_one" | "together" | "custom" | "";
     delaySeconds: number;
     cancelled: boolean;
+    customBatchFriend?: number;
+    customBatchAdmin?: number;
+    customBatchNavy?: number;
+    customBatchMember?: number;
+    customStep?: "friend" | "admin" | "navy" | "member" | "done";
   };
   editSettingsData?: {
     allGroups: Array<{ id: string; subject: string }>;
@@ -914,7 +919,9 @@ bot.command("help", async (ctx) => {
     `• Ek saath kaafi saare WhatsApp groups banao\n` +
     `• Custom ya auto-numbered names (e.g. Group 1, Group 2...)\n` +
     `• Group description set kar sakte ho\n` +
-    `• Group DP (icon/photo) set karo ya skip karo\n` +
+    `• 🖼️ Multiple Group DPs (max 50): 1 DP do to sab groups mein same lagega.\n` +
+    `  Multiple DPs do to 1st DP→1st group, 2nd DP→2nd group...\n` +
+    `  Groups DPs se zyada hue to DPs rotate ho jayenge.\n` +
     `• Permissions: kaun message, kaun add kar sakta hai, approval mode\n` +
     `• ⏳ Disappearing Messages: 24 Hours / 7 Days / 90 Days / Off\n` +
     `• 👫 Friends Add: Group bante waqt seedha friends ko add karo\n` +
@@ -969,9 +976,20 @@ bot.command("help", async (ctx) => {
     `• Single group: Link do → Friend numbers + Admin/Navy/Member VCF do\n` +
     `• Multiple groups: Ek se zyada links ek per line do → sirf Friend numbers bhejo\n` +
     `  → Sabhi groups mein ek saath add ho jayenge\n` +
-    `• Add 1 by 1 (safe, with delay) ya Add Together (fast, ek baar mein)\n` +
-    `• Live progress dikhta hai, beech mein cancel kar sakte ho\n` +
-    `• Invite/Cancel errors automatic skip hote hain\n\n` +
+    `• 3 modes:\n` +
+    `   👆 Add 1 by 1 (safe, with delay)\n` +
+    `   👥 Add Together (fast, ek baar mein)\n` +
+    `   🎯 Custom — har category ke liye apni pace (1-1, 2-2, 3-3 ya All)\n` +
+    `• Sirf wahi categories show hoti hain jinka VCF ya numbers diya ho\n` +
+    `  (e.g. Admin VCF nahi diya to Admin option nahi dikhega)\n` +
+    `• Fail hone par specific reason dikhta hai:\n` +
+    `   • Privacy block / invite required\n` +
+    `   • Number not on WhatsApp\n` +
+    `   • Already in group / Recently left\n` +
+    `   • Rate limit hit\n` +
+    `   • WhatsApp ban / restricted\n` +
+    `   • Group/account limit reached\n` +
+    `• Live progress dikhta hai, beech mein cancel kar sakte ho\n\n` +
 
     `⚙️ 12. Edit Settings\n` +
     `• Admin groups scan hote hain → Similar Groups ya All Groups choose karo\n` +
@@ -1008,7 +1026,9 @@ bot.command("help", async (ctx) => {
     `• Group mein "Approval required" mode ON hona chahiye\n` +
     `• 1 by 1 Approval ke liye bhi admin hona zaroori hai\n` +
     `• Connect WhatsApp mein number kisi bhi format mein de sakte ho\n` +
-    `  (+91 9999-999999, +919999999999 — sab chalega)`;
+    `  (+91 9999-999999, +919999999999 — sab chalega)\n` +
+    `• 🔌 Agar aapka WhatsApp disconnect ho jaye to aapko ek alert message milega\n` +
+    `  (English mein, aapke WhatsApp number ke saath)`;
 
   const helpText =
     `👤 <b>Owner:</b> ${OWNER_USERNAME}\n\n` +
@@ -1765,7 +1785,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpFileId: null, dpBuffer: null, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -1853,7 +1873,12 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
     state.groupSettings.disappearingMessages = dur;
     state.step = "group_dp";
     await ctx.editMessageText(
-      "🖼️ <b>Group Profile Photo</b>\n\nGroup DP ke liye photo bhejo.\nDP nahi lagana to Skip karo.",
+      "🖼️ <b>Group Profile Photo(s)</b>\n\n" +
+      "Ek ya zyada photos bhejo (max 50).\n\n" +
+      "• 1 photo bhejoge → sab groups mein wahi DP lagega\n" +
+      "• N photos bhejoge → 1st DP → 1st group, 2nd DP → 2nd group, ... agar groups zyada hain to DPs rotate honge\n\n" +
+      "Photos ek ek karke bhejo. Saare bhej do to <b>✅ Done</b> dabao.\n" +
+      "DP nahi lagana to <b>⏭️ Skip</b> karo.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_dp_skip").text("❌ Cancel", "main_menu") }
     );
   });
@@ -1863,7 +1888,14 @@ bot.callbackQuery("group_dp_skip", async (ctx) => {
   await ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.groupSettings) return;
-  state.groupSettings.dpFileId = null; state.groupSettings.dpBuffer = null;
+  state.groupSettings.dpBuffers = [];
+  await showGroupFriendsStep(ctx);
+});
+
+bot.callbackQuery("group_dp_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.groupSettings) return;
   await showGroupFriendsStep(ctx);
 });
 
@@ -1977,7 +2009,7 @@ async function showGroupSummary(ctx: any) {
     "📋 <b>Group Creation Summary</b>\n\n" +
     `📝 <b>Names (${gs.finalNames.length}):</b>\n${namesList}\n\n` +
     `📄 <b>Description:</b> ${gs.description ? esc(gs.description) : "None"}\n` +
-    `🖼️ <b>Group DP:</b> ${gs.dpBuffer ? "✅ Yes" : "❌ None"}\n` +
+    `🖼️ <b>Group DPs:</b> ${gs.dpBuffers.length > 0 ? `${gs.dpBuffers.length} photo(s)${gs.dpBuffers.length === 1 ? " (sab groups mein same)" : " (rotate honge)"}` : "❌ None"}\n` +
     `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
     `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
     (gs.friendNumbers.length > 0 ? `👑 <b>Make Friend Admin:</b> ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
@@ -2070,7 +2102,11 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           await new Promise((r) => setTimeout(r, 1000));
           await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
         }
-        if (gs.dpBuffer) { await new Promise((r) => setTimeout(r, 2000)); await setGroupIcon(userId, result.id, gs.dpBuffer); }
+        if (gs.dpBuffers.length > 0) {
+          const dpBuf = gs.dpBuffers[i % gs.dpBuffers.length];
+          await new Promise((r) => setTimeout(r, 2000));
+          await setGroupIcon(userId, result.id, dpBuf);
+        }
 
         let finalFriendsAdded = 0;
         let finalFriendsFailed = false;
@@ -5270,7 +5306,7 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
   await ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
-  state.editSettingsData.settings.dpBuffer = null;
+  state.editSettingsData.settings.dpBuffers = [];
   state.step = "edit_settings_desc";
   await ctx.editMessageText(
     "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
@@ -5301,7 +5337,7 @@ async function showEditSettingsReview(ctx: any) {
     "📋 <b>Edit Settings — Review</b>\n\n" +
     `📋 <b>Groups (${selectedGroups.length}):</b>\n${groupList}${moreText}\n\n` +
     `📄 Description: ${settings.description ? esc(settings.description) : "Skip"}\n` +
-    `🖼️ DP: ${settings.dpBuffer ? "✅ Change" : "❌ Skip"}\n` +
+    `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Change" : "❌ Skip"}\n` +
     `⏳ Disappearing: ${dmText}\n\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
@@ -5377,9 +5413,10 @@ async function applyEditSettingsBackground(
         await new Promise(r => setTimeout(r, 800));
         await setGroupDisappearingMessages(userId, group.id, settings.disappearingMessages);
       }
-      if (settings.dpBuffer) {
+      if (settings.dpBuffers.length > 0) {
+        const dpBuf = settings.dpBuffers[i % settings.dpBuffers.length];
         await new Promise(r => setTimeout(r, 1500));
-        await setGroupIcon(userId, group.id, settings.dpBuffer);
+        await setGroupIcon(userId, group.id, dpBuf);
       }
       results.push({ name: group.subject, ok: true });
     } catch (err: any) {
@@ -5510,13 +5547,15 @@ bot.callbackQuery("am_skip_members", async (ctx) => {
     return;
   }
   state.step = "add_members_total_count";
+  const availLines: string[] = [];
+  if (d.friendNumbers.length > 0) availLines.push(`👫 Friends: ${d.friendNumbers.length}`);
+  if (d.adminContacts.length > 0) availLines.push(`👑 Admin: ${d.adminContacts.length}`);
+  if (d.navyContacts.length > 0) availLines.push(`⚓ Navy: ${d.navyContacts.length}`);
+  if (d.memberContacts.length > 0) availLines.push(`👥 Members: ${d.memberContacts.length}`);
   await ctx.editMessageText(
     "🔢 <b>Step 6: Total Members to Add</b>\n\n" +
     `📊 Available contacts:\n` +
-    `👫 Friends: ${d.friendNumbers.length}\n` +
-    `👑 Admin: ${d.adminContacts.length}\n` +
-    `⚓ Navy: ${d.navyContacts.length}\n` +
-    `👥 Members: ${d.memberContacts.length}\n` +
+    `${availLines.join("\n")}\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
     `📋 Total available: <b>${totalAvailable}</b>\n\n` +
     `🔢 Kitna members add karna hai total? (Number bhejo)`,
@@ -5560,12 +5599,127 @@ bot.callbackQuery("am_mode_together", async (ctx) => {
   await showAddMembersReview(ctx, userId);
 });
 
+// ─── Custom Add Mode ───────────────────────────────────────────────────────
+function customCategoryOrder(d: NonNullable<UserState["addMembersData"]>): Array<"friend" | "admin" | "navy" | "member"> {
+  const order: Array<"friend" | "admin" | "navy" | "member"> = [];
+  if (d.friendNumbers.length > 0) order.push("friend");
+  if (d.adminContacts.length > 0) order.push("admin");
+  if (d.navyContacts.length > 0) order.push("navy");
+  if (d.memberContacts.length > 0) order.push("member");
+  return order;
+}
+
+function categoryLabel(c: "friend" | "admin" | "navy" | "member"): string {
+  return c === "friend" ? "👫 Friend" : c === "admin" ? "👑 Admin" : c === "navy" ? "⚓ Navy" : "👥 Member";
+}
+
+function categoryCount(d: NonNullable<UserState["addMembersData"]>, c: "friend" | "admin" | "navy" | "member"): number {
+  return c === "friend" ? d.friendNumbers.length : c === "admin" ? d.adminContacts.length : c === "navy" ? d.navyContacts.length : d.memberContacts.length;
+}
+
+async function showCustomBatchPrompt(ctx: any, userId: number) {
+  const state = userStates.get(userId);
+  if (!state?.addMembersData) return;
+  const d = state.addMembersData;
+  const order = customCategoryOrder(d);
+  // Find next category not yet set
+  let nextCat: "friend" | "admin" | "navy" | "member" | null = null;
+  for (const c of order) {
+    const key = c === "friend" ? "customBatchFriend" : c === "admin" ? "customBatchAdmin" : c === "navy" ? "customBatchNavy" : "customBatchMember";
+    if (d[key] === undefined) { nextCat = c; break; }
+  }
+  if (!nextCat) {
+    state.addMembersData.delaySeconds = 5;
+    await showAddMembersReview(ctx, userId);
+    return;
+  }
+  state.addMembersData.customStep = nextCat;
+  state.step = "add_members_custom_batch";
+  const cnt = categoryCount(d, nextCat);
+  const text =
+    `🎯 <b>Custom Pace — ${categoryLabel(nextCat)}</b>\n\n` +
+    `Available: <b>${cnt}</b> contacts\n\n` +
+    `Ek baar mein kitne add karein?`;
+  const kb = new InlineKeyboard()
+    .text("1-1", "am_cb_1").text("2-2", "am_cb_2").text("3-3", "am_cb_3").row()
+    .text("✅ All Together", "am_cb_all").text("❌ Cancel", "main_menu");
+  try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb }); }
+  catch { await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }); }
+}
+
+bot.callbackQuery("am_mode_custom", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.addMembersData) return;
+  state.addMembersData.mode = "custom";
+  // reset custom batches
+  state.addMembersData.customBatchFriend = undefined;
+  state.addMembersData.customBatchAdmin = undefined;
+  state.addMembersData.customBatchNavy = undefined;
+  state.addMembersData.customBatchMember = undefined;
+  await showCustomBatchPrompt(ctx, userId);
+});
+
+for (const [cb, val] of [["am_cb_1", 1], ["am_cb_2", 2], ["am_cb_3", 3], ["am_cb_all", -1]] as const) {
+  bot.callbackQuery(cb, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from.id;
+    const state = userStates.get(userId);
+    if (!state?.addMembersData?.customStep) return;
+    const d = state.addMembersData;
+    const cat = d.customStep!;
+    const total = categoryCount(d, cat);
+    const batch = val === -1 ? total : val;
+    if (cat === "friend") d.customBatchFriend = batch;
+    else if (cat === "admin") d.customBatchAdmin = batch;
+    else if (cat === "navy") d.customBatchNavy = batch;
+    else d.customBatchMember = batch;
+    await showCustomBatchPrompt(ctx, userId);
+  });
+}
+
+// Map low-level WhatsApp errors to user-friendly English reasons
+function formatAddError(errMsg: string): string {
+  const msg = errMsg.toLowerCase();
+  if (msg.includes("already")) return "Already in group";
+  if (msg.includes("not on whatsapp") || msg.includes("not-exist") || msg.includes("404")) return "Number not on WhatsApp";
+  if (msg.includes("recently")) return "Recently left the group — can't add right now";
+  if (msg.includes("invite") || msg.includes("not-authorized") || msg.includes("403")) return "Privacy block — invite required (contact must allow being added)";
+  if (msg.includes("rate") || msg.includes("429") || msg.includes("too many")) return "Rate limit hit — adding too fast";
+  if (msg.includes("ban") || msg.includes("forbidden")) return "Action blocked — your WhatsApp may be banned/restricted";
+  if (msg.includes("not connected") || msg.includes("disconnected")) return "WhatsApp disconnected";
+  if (msg.includes("limit")) return "Group/account limit reached";
+  if (msg.includes("timeout")) return "Request timed out";
+  return errMsg;
+}
+
+function isSkippableError(errMsg: string): boolean {
+  const m = errMsg.toLowerCase();
+  return m.includes("already") || m.includes("not on whatsapp") || m.includes("recently");
+}
+
 async function showAddMembersReview(ctx: any, userId: number) {
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
   const d = state.addMembersData;
   state.step = "add_members_confirm";
-  const modeText = d.mode === "one_by_one" ? `1 by 1 (${d.delaySeconds}s delay)` : "All Together";
+  const modeText =
+    d.mode === "one_by_one" ? `1 by 1 (${d.delaySeconds}s delay)` :
+    d.mode === "together" ? "All Together" :
+    "Custom (per category pace)";
+  let customLines = "";
+  if (d.mode === "custom") {
+    const order = customCategoryOrder(d);
+    const parts: string[] = [];
+    for (const c of order) {
+      const cnt = categoryCount(d, c);
+      const batch = c === "friend" ? d.customBatchFriend : c === "admin" ? d.customBatchAdmin : c === "navy" ? d.customBatchNavy : d.customBatchMember;
+      const paceText = !batch ? "?" : batch >= cnt ? "All together" : `${batch}-${batch}`;
+      parts.push(`  • ${categoryLabel(c)} (${cnt}) → ${paceText}`);
+    }
+    customLines = `\n🎯 <b>Custom pace:</b>\n${parts.join("\n")}\n`;
+  }
   let reviewText: string;
   if (d.multiGroup) {
     const groupList = d.groups.slice(0, 5).map(g => `• ${esc(g.name)}`).join("\n");
@@ -5576,20 +5730,22 @@ async function showAddMembersReview(ctx: any, userId: number) {
       `👫 Friends: ${d.friendNumbers.length}\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `🔢 Per group: <b>${d.friendNumbers.length}</b> friends\n` +
-      `⚙️ Mode: <b>${modeText}</b>\n\n` +
+      `⚙️ Mode: <b>${modeText}</b>${customLines}\n\n` +
       `⚠️ Confirm karke Start karo:`;
   } else {
+    const catLines: string[] = [];
+    if (d.friendNumbers.length > 0) catLines.push(`👫 Friends: ${d.friendNumbers.length}`);
+    if (d.adminContacts.length > 0) catLines.push(`👑 Admin VCF: ${d.adminContacts.length}`);
+    if (d.navyContacts.length > 0) catLines.push(`⚓ Navy VCF: ${d.navyContacts.length}`);
+    if (d.memberContacts.length > 0) catLines.push(`👥 Member VCF: ${d.memberContacts.length}`);
     reviewText =
       "📋 <b>Add Members — Final Review</b>\n\n" +
       `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
       `📋 Group ID: <code>${esc(d.groupId)}</code>\n\n` +
-      `👫 Friends: ${d.friendNumbers.length}\n` +
-      `👑 Admin VCF: ${d.adminContacts.length}\n` +
-      `⚓ Navy VCF: ${d.navyContacts.length}\n` +
-      `👥 Member VCF: ${d.memberContacts.length}\n` +
+      `${catLines.join("\n")}\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `🔢 Total to add: <b>${d.totalToAdd}</b>\n` +
-      `⚙️ Mode: <b>${modeText}</b>\n\n` +
+      `⚙️ Mode: <b>${modeText}</b>${customLines}\n\n` +
       `⚠️ Confirm karke Start karo:`;
   }
   const kb = {
@@ -5650,6 +5806,8 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
 
   if (d.mode === "one_by_one") {
     await startAddMembersOneByOne(ctx, userId, chatId);
+  } else if (d.mode === "custom") {
+    await startAddMembersCustom(ctx, userId, chatId);
   } else {
     await startAddMembersTogether(ctx, userId, chatId);
   }
@@ -5789,16 +5947,14 @@ async function startAddMembersOneByOne(ctx: any, userId: number, chatId: number)
         results.push(`✅ +${contact.phone} (${contact.category})`);
       } else {
         const errMsg = res.error || "Failed";
-        if (
-          errMsg.includes("Already") ||
-          errMsg.includes("Not on WhatsApp") ||
-          errMsg.includes("Recently left")
-        ) {
+        const friendly = formatAddError(errMsg);
+        if (isSkippableError(errMsg)) {
           skipped++;
-          results.push(`⏭️ +${contact.phone} — ${errMsg}`);
+          results.push(`⏭️ +${contact.phone} (${contact.category}) — ${friendly}`);
         } else {
-          added++;
-          results.push(`✅ +${contact.phone} (${contact.category}) — Pending`);
+          // Real failure — surface specific reason instead of marking as added
+          skipped++;
+          results.push(`❌ +${contact.phone} (${contact.category}) — ${friendly}`);
         }
       }
 
@@ -5898,16 +6054,13 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
           resultLines.push(`✅ +${r.phone} (${cat})`);
         } else {
           const errMsg = r.error || "Failed";
-          if (
-            errMsg.includes("Already") ||
-            errMsg.includes("Not on WhatsApp") ||
-            errMsg.includes("Recently left")
-          ) {
+          const friendly = formatAddError(errMsg);
+          if (isSkippableError(errMsg)) {
             skipped++;
-            resultLines.push(`⏭️ +${r.phone} — ${errMsg} (${cat})`);
+            resultLines.push(`⏭️ +${r.phone} (${cat}) — ${friendly}`);
           } else {
-            added++;
-            resultLines.push(`✅ +${r.phone} (${cat}) — Pending`);
+            skipped++;
+            resultLines.push(`❌ +${r.phone} (${cat}) — ${friendly}`);
           }
         }
       }
@@ -5941,6 +6094,133 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
         );
       } catch {}
     }
+  })();
+}
+
+async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
+  const state = userStates.get(userId);
+  if (!state?.addMembersData) return;
+  const d = state.addMembersData;
+
+  // Build per-category contact lists, preserving uniqueness across the whole flow
+  const seen = new Set<string>();
+  function buildList(rawList: string[], category: string): Array<{ phone: string; category: string }> {
+    const out: Array<{ phone: string; category: string }> = [];
+    for (const raw of rawList) {
+      const phone = normalizePhoneForJid(raw);
+      if (phone.length >= 7 && !seen.has(phone)) {
+        seen.add(phone);
+        out.push({ phone, category });
+      }
+    }
+    return out;
+  }
+
+  const order = customCategoryOrder(d);
+  const categoryData: Array<{ cat: string; contacts: Array<{ phone: string; category: string }>; batch: number }> = [];
+  for (const c of order) {
+    const label = c === "friend" ? "Friend" : c === "admin" ? "Admin" : c === "navy" ? "Navy" : "Member";
+    const raws =
+      c === "friend" ? d.friendNumbers :
+      c === "admin" ? d.adminContacts.map(x => x.phone) :
+      c === "navy" ? d.navyContacts.map(x => x.phone) :
+      d.memberContacts.map(x => x.phone);
+    const contacts = buildList(raws, label);
+    const batch =
+      c === "friend" ? (d.customBatchFriend ?? contacts.length) :
+      c === "admin" ? (d.customBatchAdmin ?? contacts.length) :
+      c === "navy" ? (d.customBatchNavy ?? contacts.length) :
+      (d.customBatchMember ?? contacts.length);
+    categoryData.push({ cat: label, contacts, batch: Math.max(1, batch) });
+  }
+
+  const totalAvailable = categoryData.reduce((s, x) => s + x.contacts.length, 0);
+  const totalToAdd = Math.min(d.totalToAdd, totalAvailable);
+
+  const statusMsg = await ctx.editMessageText(
+    `⏳ <b>Custom Adding Shuru...</b>\n\n` +
+    `🔢 Target: 0/${totalToAdd}\n` +
+    `⌛ Starting...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
+  );
+  const msgId = statusMsg.message_id;
+
+  void (async () => {
+    let added = 0;
+    let skipped = 0;
+    let attempted = 0;
+    let cancelled = false;
+    const results: string[] = [];
+
+    outer: for (const cd of categoryData) {
+      if (added >= totalToAdd) break;
+      if (cd.contacts.length === 0) continue;
+      results.push(`\n🔹 <b>${cd.cat}</b> (${cd.contacts.length}, batch=${cd.batch >= cd.contacts.length ? "all" : cd.batch})`);
+      let i = 0;
+      while (i < cd.contacts.length && added < totalToAdd) {
+        if (addMembersCancelRequests.has(userId)) { cancelled = true; break outer; }
+        if (!isConnected(String(userId))) {
+          results.push("⚠️ WhatsApp disconnected — stopping.");
+          break outer;
+        }
+
+        const slice = cd.contacts.slice(i, i + cd.batch);
+        const phones = slice.map(s => s.phone);
+        attempted += phones.length;
+
+        const batchResults = await addGroupParticipantsBulk(String(userId), d.groupId, phones);
+        for (let k = 0; k < batchResults.length; k++) {
+          const r = batchResults[k];
+          if (r.success) {
+            added++;
+            results.push(`✅ +${r.phone} (${cd.cat})`);
+          } else {
+            const errMsg = r.error || "Failed";
+            const friendly = formatAddError(errMsg);
+            skipped++;
+            const icon = isSkippableError(errMsg) ? "⏭️" : "❌";
+            results.push(`${icon} +${r.phone} (${cd.cat}) — ${friendly}`);
+          }
+          if (added >= totalToAdd) break;
+        }
+
+        i += cd.batch;
+
+        const lastResults = results.slice(-10).join("\n");
+        try {
+          await bot.api.editMessageText(chatId, msgId,
+            `⏳ <b>Custom Adding...</b>\n\n` +
+            `🔢 Progress: ${added}/${totalToAdd}\n` +
+            `✅ Added: ${added} | ⏭️/❌ Skipped: ${skipped} | 📊 Tried: ${attempted}\n\n` +
+            `📋 Recent:\n${lastResults}\n\n` +
+            (i < cd.contacts.length && added < totalToAdd ? `⏱️ Next batch in 5s...` : ""),
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
+          );
+        } catch {}
+
+        if (i < cd.contacts.length && added < totalToAdd && !addMembersCancelRequests.has(userId)) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+    }
+
+    addMembersCancelRequests.delete(userId);
+    userStates.delete(userId);
+
+    const summary =
+      `${cancelled ? "⛔" : "✅"} <b>Custom Add ${cancelled ? "Cancelled" : "Complete"}!</b>\n\n` +
+      `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+      `✅ Successfully Added: <b>${added}</b>\n` +
+      `⏭️/❌ Skipped/Failed: <b>${skipped}</b>\n` +
+      `📊 Total Attempted: <b>${attempted}</b>\n` +
+      (cancelled ? `\n⛔ <b>User ne adding cancel kar diya.</b>` : "");
+
+    try {
+      await bot.api.editMessageText(chatId, msgId, summary, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
   })();
 }
 
@@ -6428,8 +6708,11 @@ bot.on("message:text", async (ctx) => {
         `🔢 Total friends to add: <b>${numbers.length}</b> (har group mein)\n\n` +
         `⚙️ Adding mode choose karo:\n\n` +
         `👆 <b>Add 1 by 1</b> — Ek ek karke (safe)\n` +
-        `👥 <b>Add Together</b> — Sab ek saath (fast)`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("👆 Add 1 by 1", "am_mode_one_by_one").text("👥 Together", "am_mode_together") }
+        `👥 <b>Add Together</b> — Sab ek saath (fast)\n` +
+        `🎯 <b>Custom</b> — Apni pace set karo (1-1, 2-2, ya all)`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard()
+          .text("👆 Add 1 by 1", "am_mode_one_by_one").text("👥 Together", "am_mode_together").row()
+          .text("🎯 Custom", "am_mode_custom").text("❌ Cancel", "main_menu") }
       );
     } else {
       state.step = "add_members_admin_vcf";
@@ -6463,12 +6746,14 @@ bot.on("message:text", async (ctx) => {
       `🔢 <b>Total ${count} members add honge.</b>\n\n` +
       `⚙️ Adding mode choose karo:\n\n` +
       `👆 <b>Add 1 by 1</b> — Ek ek karke add karega (safe, slow)\n` +
-      `👥 <b>Add Together</b> — Sab ek saath add karega (fast)\n`,
+      `👥 <b>Add Together</b> — Sab ek saath add karega (fast)\n` +
+      `🎯 <b>Custom</b> — Per category pace set karo (1-1, 2-2, 3-3 ya All)\n`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
           .text("👆 Add 1 by 1", "am_mode_one_by_one")
           .text("👥 Add Together", "am_mode_together").row()
+          .text("🎯 Custom", "am_mode_custom")
           .text("❌ Cancel", "main_menu"),
       }
     );
@@ -6506,13 +6791,28 @@ bot.on("message:photo", async (ctx) => {
 
   if (state.step === "group_dp" && state.groupSettings) {
     try {
+      if (state.groupSettings.dpBuffers.length >= 50) {
+        await ctx.reply("⚠️ <b>Max 50 DPs reached.</b> Done dabake aage badho.", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
+        });
+        return;
+      }
       const photos = ctx.message.photo;
       const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
       if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
-      state.groupSettings.dpBuffer = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-      state.groupSettings.dpFileId = photos[photos.length - 1].file_id;
-      await ctx.reply("✅ <b>Group DP saved!</b>", { parse_mode: "HTML" });
-      await showGroupFriendsStep(ctx);
+      const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      state.groupSettings.dpBuffers.push(buf);
+      const count = state.groupSettings.dpBuffers.length;
+      await ctx.reply(
+        `✅ <b>DP ${count} saved!</b>\n\n` +
+        `Aur photos bhej sakte ho (max 50), ya <b>✅ Done</b> dabake aage badho.\n` +
+        `Total ab tak: <b>${count}</b>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
+        }
+      );
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
     }
@@ -6524,7 +6824,8 @@ bot.on("message:photo", async (ctx) => {
       const photos = ctx.message.photo;
       const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
       if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
-      state.editSettingsData.settings.dpBuffer = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      state.editSettingsData.settings.dpBuffers = [buf];
       state.step = "edit_settings_desc";
       await ctx.reply("✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nDescription bhejo ya skip karo.", {
         parse_mode: "HTML",
@@ -6684,6 +6985,32 @@ export function startBot() {
     console.log("[BOT] TELEGRAM_BOT_TOKEN not set — bot disabled. Set it to enable the Telegram bot.");
     return;
   }
+
+  // Register a global disconnect notifier so users get a Telegram alert in English
+  // (with their WhatsApp number) whenever any of their WhatsApp sessions disconnects —
+  // including sessions that were silently restored on bot startup.
+  setDisconnectNotifier((sessionUserId, reason, phoneNumber) => {
+    // Auto-Chat sessions use IDs like `${telegramId}_auto`; map to the actual Telegram user.
+    const isAuto = sessionUserId.endsWith("_auto");
+    const telegramIdStr = isAuto ? sessionUserId.replace(/_auto$/, "") : sessionUserId;
+    const telegramId = Number(telegramIdStr);
+    if (!Number.isFinite(telegramId)) return;
+    const phoneText = phoneNumber ? phoneNumber : "(unknown)";
+    const accountLabel = isAuto ? "Auto Chat WhatsApp" : "WhatsApp";
+    const message =
+      `⚠️ <b>${accountLabel} Disconnected</b>\n\n` +
+      `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
+      `Reason: ${esc(reason || "Unknown")}\n\n` +
+      `Please reconnect to continue using the bot.`;
+    void bot.api.sendMessage(telegramId, message, {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(isAuto ? "🤖 Reconnect Auto WA" : "📱 Reconnect WhatsApp", isAuto ? "connect_auto_wa" : "connect_wa")
+        .text("🏠 Menu", "main_menu"),
+    }).catch((err) => {
+      console.error(`[BOT][NOTIFY-DISCONNECT] Failed to notify ${telegramId}:`, err?.message);
+    });
+  });
 
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);

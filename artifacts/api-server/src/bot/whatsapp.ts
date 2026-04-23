@@ -490,6 +490,21 @@ export function getConnectedWhatsAppNumber(userId: string): string | null {
   return socketDigits.length >= 7 ? `+${socketDigits}` : null;
 }
 
+// Optional callback that gets invoked whenever a session disconnects.
+// Used to push English-language Telegram alerts to the user with their phone number.
+let disconnectNotifier: ((userId: string, reason: string, phoneNumber: string | null) => void) | null = null;
+
+export function setDisconnectNotifier(fn: (userId: string, reason: string, phoneNumber: string | null) => void): void {
+  disconnectNotifier = fn;
+}
+
+export function notifyDisconnect(userId: string, reason: string): void {
+  try {
+    const phone = getConnectedWhatsAppNumber(userId) ?? sessions.get(userId)?.phoneNumber ?? null;
+    disconnectNotifier?.(userId, reason, phone);
+  } catch {}
+}
+
 export async function restoreWhatsAppSessions(): Promise<void> {
   const storedSessions = await listStoredWhatsAppSessions();
   console.log(`[WA][RESTORE] Found ${storedSessions.length} saved WhatsApp session(s)`);
@@ -527,7 +542,10 @@ export async function restoreWhatsAppSessions(): Promise<void> {
         () => {},
         () => {},
         () => console.log(`[WA][RESTORE][${stored.userId}] Session restored`),
-        (reason) => console.log(`[WA][RESTORE][${stored.userId}] Restore disconnected: ${reason}`),
+        (reason) => {
+          console.log(`[WA][RESTORE][${stored.userId}] Restore disconnected: ${reason}`);
+          notifyDisconnect(stored.userId, reason);
+        },
         session
       );
     } catch (err: any) {
