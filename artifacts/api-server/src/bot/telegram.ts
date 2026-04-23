@@ -46,19 +46,6 @@ import {
   hasUserAccess,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
-import {
-  LANG_LABELS,
-  LANG_PROMPT,
-  LANG_CONFIRM,
-  isValidLang,
-  getUserLang,
-  setUserLang,
-  preloadLangCache,
-  makeTranslateTransformer,
-  translatePlainText,
-  SKIP_TRANSLATE_MARKER,
-  type LangCode,
-} from "./i18n";
 
 const token = process.env["TELEGRAM_BOT_TOKEN"] || "";
 
@@ -69,19 +56,10 @@ const BOT_DISPLAY_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
 
 const bot = new Bot(token || "placeholder");
 
-// Auto-translate outgoing messages based on each user's selected language.
-// If the user's language is "default", text passes through unchanged.
-bot.api.config.use(makeTranslateTransformer());
-
 type TelegramButtonStyle = "primary" | "success" | "danger";
 
 function getButtonStyle(text: string, callbackData?: string): TelegramButtonStyle {
   const value = `${text} ${callbackData || ""}`.toLowerCase();
-
-  // Default language button (English+Hindi) → green
-  if (value.includes("lang_set:default")) {
-    return "success";
-  }
 
   if (
     value.includes("cancel") ||
@@ -94,9 +72,7 @@ function getButtonStyle(text: string, callbackData?: string): TelegramButtonStyl
     value.includes("clear") ||
     value.includes("stop") ||
     value.includes("❌") ||
-    value.includes("🗑") ||
-    value.includes("🇮🇩") ||
-    value.includes("🇨🇳")
+    value.includes("🗑")
   ) {
     return "danger";
   }
@@ -917,44 +893,6 @@ bot.command("start", async (ctx) => {
   );
 });
 
-bot.command("language", async (ctx) => {
-  const userId = ctx.from!.id;
-  await trackUser(userId);
-  if (await isBanned(userId)) return;
-  const lang = await getUserLang(userId);
-  const kb = new InlineKeyboard()
-    .text(LANG_LABELS.default, "lang_set:default").row()
-    .text(LANG_LABELS.en, "lang_set:en")
-    .text(LANG_LABELS.hi, "lang_set:hi").row()
-    .text(LANG_LABELS.id, "lang_set:id")
-    .text(LANG_LABELS.zh, "lang_set:zh");
-  // Prefix with SKIP_TRANSLATE_MARKER so the auto-translator leaves both the
-  // text AND the keyboard buttons untouched. The prompt is already pre-localized
-  // and the keyboard labels (language names) must stay in their original language
-  // so users can identify which option to select.
-  await ctx.reply(SKIP_TRANSLATE_MARKER + LANG_PROMPT[lang], { parse_mode: "HTML", reply_markup: kb });
-});
-
-bot.callbackQuery(/^lang_set:(.+)$/, async (ctx) => {
-  const code = ctx.match![1];
-  if (!isValidLang(code)) {
-    await ctx.answerCallbackQuery({ text: "Invalid language", show_alert: true });
-    return;
-  }
-  const userId = ctx.from!.id;
-  await setUserLang(userId, code as LangCode);
-  await ctx.answerCallbackQuery({ text: "✅ " + LANG_LABELS[code as LangCode] });
-  // Show a confirmation pre-localized to the selected language.
-  // Prefix with SKIP_TRANSLATE_MARKER so the transformer does not re-translate
-  // text that is already in the correct target language.
-  const confirmText = SKIP_TRANSLATE_MARKER + LANG_CONFIRM[code as LangCode];
-  try {
-    await ctx.editMessageText(confirmText, { parse_mode: "HTML" });
-  } catch {
-    await ctx.reply(confirmText, { parse_mode: "HTML" });
-  }
-});
-
 bot.command("help", async (ctx) => {
   const userId = ctx.from!.id;
   await trackUser(userId);
@@ -1072,35 +1010,15 @@ bot.command("help", async (ctx) => {
     `• Connect WhatsApp mein number kisi bhi format mein de sakte ho\n` +
     `  (+91 9999-999999, +919999999999 — sab chalega)`;
 
-  // Manually translate the codeBlock contents (plain text — no HTML risk),
-  // then escape and wrap in <pre> so the user sees the same monospace box
-  // format. Prefix with SKIP_TRANSLATE_MARKER so the auto-translator does
-  // NOT touch the already-formatted HTML.
-  const lang = await getUserLang(userId);
-  const translatedCodeBlock =
-    lang === "default" ? codeBlock : await translatePlainText(codeBlock, lang);
-  const translatedOwnerLabel =
-    lang === "default" ? "Owner" : await translatePlainText("Owner", lang);
-
   const helpText =
-    SKIP_TRANSLATE_MARKER +
-    `👤 <b>${esc(translatedOwnerLabel)}:</b> ${esc(OWNER_USERNAME)}\n\n` +
-    `<pre>${esc(translatedCodeBlock)}</pre>\n\n` +
-    `👤 <b>${esc(translatedOwnerLabel)}:</b> ${esc(OWNER_USERNAME)}`;
+    `👤 <b>Owner:</b> ${OWNER_USERNAME}\n\n` +
+    `<pre>${codeBlock}</pre>\n\n` +
+    `👤 <b>Owner:</b> ${OWNER_USERNAME}`;
 
-  try {
-    await ctx.reply(helpText, {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
-  } catch (err: any) {
-    console.error("[help] HTML send failed, falling back to plain text:", err?.message);
-    await ctx.reply(
-      SKIP_TRANSLATE_MARKER +
-        `👤 ${translatedOwnerLabel}: ${OWNER_USERNAME}\n\n${translatedCodeBlock}\n\n👤 ${translatedOwnerLabel}: ${OWNER_USERNAME}`,
-      { reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-    );
-  }
+  await ctx.reply(helpText, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+  });
 });
 
 async function checkAccessMiddleware(ctx: any): Promise<boolean> {
@@ -6770,8 +6688,6 @@ export function startBot() {
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
   });
-
-  void preloadLangCache();
 
   bot.catch((err) => {
     const e = err.error as any;
