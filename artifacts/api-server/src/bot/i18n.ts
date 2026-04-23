@@ -90,13 +90,24 @@ function cachePut(key: string, value: string) {
   translateCache.set(key, value);
 }
 
+// Map our internal lang codes to the codes Google Translate expects.
+// Critically, Chinese must be sent as "zh-CN" (Simplified) — bare "zh" is
+// rejected/ignored by the gtx endpoint.
+function mapLangForGoogle(target: string): string {
+  switch (target) {
+    case "zh": return "zh-CN";
+    case "zh-tw": return "zh-TW";
+    default: return target;
+  }
+}
+
 // POST-based translation — supports much longer text than GET (no URL limit).
 function googleTranslateOnce(text: string, target: string): Promise<string> {
   return new Promise((resolve) => {
     const params = new URLSearchParams({
       client: "gtx",
       sl: "auto",
-      tl: target,
+      tl: mapLangForGoogle(target),
       dt: "t",
     });
     const url = `https://translate.googleapis.com/translate_a/single?${params.toString()}`;
