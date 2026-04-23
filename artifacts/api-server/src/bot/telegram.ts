@@ -928,9 +928,11 @@ bot.command("language", async (ctx) => {
     .text(LANG_LABELS.hi, "lang_set:hi").row()
     .text(LANG_LABELS.id, "lang_set:id")
     .text(LANG_LABELS.zh, "lang_set:zh");
-  // The transformer does NOT translate this prompt because it is already
-  // pre-localized to the user's currently selected language.
-  await ctx.reply(LANG_PROMPT[lang], { parse_mode: "HTML", reply_markup: kb });
+  // Prefix with SKIP_TRANSLATE_MARKER so the auto-translator leaves both the
+  // text AND the keyboard buttons untouched. The prompt is already pre-localized
+  // and the keyboard labels (language names) must stay in their original language
+  // so users can identify which option to select.
+  await ctx.reply(SKIP_TRANSLATE_MARKER + LANG_PROMPT[lang], { parse_mode: "HTML", reply_markup: kb });
 });
 
 bot.callbackQuery(/^lang_set:(.+)$/, async (ctx) => {
@@ -943,10 +945,13 @@ bot.callbackQuery(/^lang_set:(.+)$/, async (ctx) => {
   await setUserLang(userId, code as LangCode);
   await ctx.answerCallbackQuery({ text: "✅ " + LANG_LABELS[code as LangCode] });
   // Show a confirmation pre-localized to the selected language.
+  // Prefix with SKIP_TRANSLATE_MARKER so the transformer does not re-translate
+  // text that is already in the correct target language.
+  const confirmText = SKIP_TRANSLATE_MARKER + LANG_CONFIRM[code as LangCode];
   try {
-    await ctx.editMessageText(LANG_CONFIRM[code as LangCode], { parse_mode: "HTML" });
+    await ctx.editMessageText(confirmText, { parse_mode: "HTML" });
   } catch {
-    await ctx.reply(LANG_CONFIRM[code as LangCode], { parse_mode: "HTML" });
+    await ctx.reply(confirmText, { parse_mode: "HTML" });
   }
 });
 
