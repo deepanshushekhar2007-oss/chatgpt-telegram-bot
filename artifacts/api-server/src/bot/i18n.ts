@@ -217,14 +217,78 @@ function splitForTranslation(text: string): string[] {
   return chunks;
 }
 
+// Fallback translator using MyMemory API (free, more reliable on cloud IPs).
+// Used when the primary Google Translate endpoint is blocked or unavailable.
+function myMemoryTranslate(
+  text: string,
+  target: string
+): Promise<{ text: string; ok: boolean }> {
+  return new Promise((resolve) => {
+    const tl = mapLangForGoogle(target);
+    // Map language codes to MyMemory format
+    const myMemoryLang = tl === "zh-CN" ? "zh" : tl;
+    const url =
+      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=auto|${myMemoryLang}`;
+    const reqOpts = {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "application/json",
+      },
+    };
+    const req = https.request(url, reqOpts, (res) => {
+      let buf = "";
+      res.on("data", (c) => (buf += c));
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          console.error(`[i18n] MyMemory HTTP ${res.statusCode} (tl=${tl})`);
+          return resolve({ text, ok: false });
+        }
+        try {
+          const data = JSON.parse(buf);
+          const out =
+            data?.responseData?.translatedText ||
+            data?.matches?.[0]?.translation;
+          if (!out || out === text) return resolve({ text, ok: false });
+          resolve({ text: out, ok: true });
+        } catch (e: any) {
+          console.error(`[i18n] MyMemory parse error (tl=${tl}):`, e?.message);
+          resolve({ text, ok: false });
+        }
+      });
+    });
+    req.on("error", (e: any) => {
+      console.error(`[i18n] MyMemory network error (tl=${tl}):`, e?.message);
+      resolve({ text, ok: false });
+    });
+    req.setTimeout(8000, () => {
+      console.error(`[i18n] MyMemory timeout (tl=${tl})`);
+      try { req.destroy(); } catch {}
+      resolve({ text, ok: false });
+    });
+    req.end();
+  });
+}
+
+
 async function googleTranslate(
   text: string,
   target: string
 ): Promise<{ text: string; ok: boolean }> {
   const chunks = splitForTranslation(text);
-  if (chunks.length === 1) return googleTranslateOnce(text, target);
+  if (chunks.length === 1) {
+    const r = await googleTranslateOnce(text, target);
+    if (r.ok) return r;
+    // Primary API failed — try MyMemory as fallback.
+    return myMemoryTranslate(text, target);
+  }
   const results = await Promise.all(
-    chunks.map((c) => googleTranslateOnce(c, target))
+    chunks.map(async (c) => {
+      const r = await googleTranslateOnce(c, target);
+      if (r.ok) return r;
+      return myMemoryTranslate(c, target);
+    })
   );
   return {
     text: results.map((r) => r.text).join("\n"),
