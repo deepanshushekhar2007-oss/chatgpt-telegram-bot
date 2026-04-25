@@ -5238,13 +5238,39 @@ function autoChatProgressText(session: AutoChatSession): string {
   );
 }
 
+// ── Memory & concurrency tuning for low-RAM hosts (e.g. Render free 512MB) ──
+// These can be tuned via env vars without code changes.
+const MAX_CONCURRENT_AUTOCHAT = Number(process.env.MAX_CONCURRENT_AUTOCHAT || "150");
+const MAX_GROUPS_PER_AUTOCHAT = Number(process.env.MAX_GROUPS_PER_AUTOCHAT || "500");
+const AUTOCHAT_PROGRESS_THROTTLE_MS = Number(process.env.AUTOCHAT_PROGRESS_THROTTLE_MS || "8000");
+let activeAutoChatCount = 0;
+
 async function runAutoChatBackground(userId: number, autoUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number, repeatCount: number): Promise<void> {
+  // Backpressure: if too many auto-chats are already running, refuse politely
+  // instead of pushing the host into OOM.
+  if (activeAutoChatCount >= MAX_CONCURRENT_AUTOCHAT) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Server is busy</b>\n\n` +
+        `Abhi <b>${activeAutoChatCount}</b> users ka Auto Chat chal raha hai (max <b>${MAX_CONCURRENT_AUTOCHAT}</b> ek saath allowed).\n\n` +
+        `Thodi der baad firse try karein. 🙏`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
+  // Safety cap: avoid storing huge group arrays in RAM per user.
+  const cappedGroups = groups.length > MAX_GROUPS_PER_AUTOCHAT
+    ? groups.slice(0, MAX_GROUPS_PER_AUTOCHAT)
+    : groups;
+
   const session: AutoChatSession = {
     running: true,
     cancelled: false,
     chatId,
     msgId,
-    groups,
+    groups: cappedGroups,
     message,
     delaySeconds,
     repeatCount,
@@ -5254,6 +5280,28 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     rotationIndex: 0,
   };
   autoChatSessions.set(userId, session);
+  activeAutoChatCount++;
+
+  // Throttled progress updater — reduces Telegram API calls dramatically when
+  // many users are running simultaneously. Always edits on `force=true`
+  // (round changes, completion, errors) and otherwise at most once per
+  // AUTOCHAT_PROGRESS_THROTTLE_MS.
+  let lastProgressAt = 0;
+  const progressKb = new InlineKeyboard()
+    .text("🔄 Refresh", "auto_chat_refresh")
+    .text("⏹️ Stop", "auto_chat_stop").row()
+    .text("🏠 Main Menu", "main_menu");
+  const tryUpdateProgress = async (force = false): Promise<void> => {
+    const now = Date.now();
+    if (!force && now - lastProgressAt < AUTOCHAT_PROGRESS_THROTTLE_MS) return;
+    lastProgressAt = now;
+    try {
+      await bot.api.editMessageText(chatId, msgId, autoChatProgressText(session), {
+        parse_mode: "HTML",
+        reply_markup: progressKb,
+      });
+    } catch {}
+  };
 
   const maxRounds = repeatCount === 0 ? Infinity : repeatCount;
 
@@ -5261,24 +5309,25 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     for (let round = 1; round <= maxRounds; round++) {
       if (session.cancelled) break;
       session.currentRound = round;
+      await tryUpdateProgress(true); // force update at the start of every round
 
-      for (const group of groups) {
+      for (const group of cappedGroups) {
         if (session.cancelled) break;
-        const ok = await sendGroupMessage(autoUserId, group.id, message);
+
+        let ok = false;
+        try {
+          ok = await sendGroupMessage(autoUserId, group.id, message);
+        } catch (err: any) {
+          // Never let a single send crash the whole loop.
+          console.error(`[AUTO_CHAT][${userId}] sendGroupMessage error:`, err?.message);
+          ok = false;
+        }
         if (ok) session.sent++; else session.failed++;
 
         const delayMs = getSequentialDelayMs(session.rotationIndex);
         session.rotationIndex++;
 
-        try {
-          await bot.api.editMessageText(chatId, msgId, autoChatProgressText(session), {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("🔄 Refresh", "auto_chat_refresh")
-              .text("⏹️ Stop", "auto_chat_stop").row()
-              .text("🏠 Main Menu", "main_menu"),
-          });
-        } catch {}
+        await tryUpdateProgress(); // throttled — won't spam Telegram API
 
         if (!session.cancelled) {
           await waitWithCancel(session, delayMs);
@@ -5293,16 +5342,25 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     }
   } catch (err: any) {
     console.error(`[AUTO_CHAT][${userId}] Error:`, err?.message);
-  }
+  } finally {
+    session.running = false;
+    activeAutoChatCount = Math.max(0, activeAutoChatCount - 1);
 
-  session.running = false;
-  if (!session.cancelled) {
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `✅ <b>Auto Chat Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-      );
-    } catch {}
+    if (!session.cancelled) {
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          `✅ <b>Auto Chat Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+        );
+      } catch {}
+    }
+
+    // Free per-user state once the loop is fully done so the Map doesn't grow
+    // unboundedly for long-running deployments.
+    setTimeout(() => {
+      const cur = autoChatSessions.get(userId);
+      if (cur && !cur.running) autoChatSessions.delete(userId);
+    }, 30_000); // small grace period so user can still see status if they tap Refresh
   }
 }
 
