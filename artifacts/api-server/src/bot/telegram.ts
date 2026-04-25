@@ -10,6 +10,7 @@ import {
   joinGroupWithLink,
   getGroupPendingRequests,
   getGroupPendingRequestsJids,
+  getGroupPendingRequestsDetailed,
   checkContactsInGroup,
   getGroupIdFromLink,
   GroupPermissions,
@@ -3906,19 +3907,31 @@ async function approveAdminSpecificBackground(
       );
     } catch {}
 
-    const pendingJids = await getGroupPendingRequestsJids(userId, group.id);
-    // Match pending JIDs whose local part matches one of the supplied phones.
-    // (LID-mode groups don't expose phone in JID; those won't match — we report them as not found.)
+    const pending = await getGroupPendingRequestsDetailed(userId, group.id);
+    // Build a last-10-digits index so we tolerate missing/extra country codes on either side.
+    const targetByLast10 = new Map<string, string>();
+    for (const t of normalizedTargets) {
+      const last10 = t.slice(-10);
+      if (last10.length >= 7) targetByLast10.set(last10, t);
+    }
     const matched: Array<{ jid: string; phone: string }> = [];
     const matchedTargets = new Set<string>();
-    for (const jid of pendingJids) {
-      const local = jid.split("@")[0].replace(/:\d+$/, "");
-      if (/^\d+$/.test(local) && normalizedTargets.has(local)) {
-        matched.push({ jid, phone: local });
-        matchedTargets.add(local);
+    for (const p of pending) {
+      const phone = (p.phone || "").replace(/[^0-9]/g, "");
+      if (!phone) continue; // LID without resolvable phone — skip (will be reported below)
+      let hitTarget = "";
+      if (normalizedTargets.has(phone)) hitTarget = phone;
+      else {
+        const last10 = phone.slice(-10);
+        if (last10.length >= 7 && targetByLast10.has(last10)) hitTarget = targetByLast10.get(last10)!;
+      }
+      if (hitTarget) {
+        matched.push({ jid: p.jid, phone });
+        matchedTargets.add(hitTarget);
       }
     }
     const notFound = Array.from(normalizedTargets).filter(p => !matchedTargets.has(p));
+    const unresolvedLidCount = pending.filter(p => !p.phone && p.jid.endsWith("@lid")).length;
 
     const groupLines: string[] = [];
     let approved = 0, approveFailed = 0;
@@ -3952,6 +3965,9 @@ async function approveAdminSpecificBackground(
 
     for (const np of notFound) {
       groupLines.push(`  ⚠️ +${np} — Not in pending list`);
+    }
+    if (unresolvedLidCount > 0) {
+      groupLines.push(`  ℹ️ ${unresolvedLidCount} pending member(s) hidden their phone (LID-only) — could not match by number`);
     }
 
     let madeAdmin = 0, adminFailed = 0;

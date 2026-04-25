@@ -805,6 +805,40 @@ export async function getGroupPendingRequestsJids(
   }
 }
 
+// Returns pending requests with both raw JID (for approval calls) and resolved phone
+// (for matching against user-supplied numbers). Handles both @s.whatsapp.net and @lid JIDs.
+export async function getGroupPendingRequestsDetailed(
+  userId: string,
+  groupId: string
+): Promise<Array<{ jid: string; phone: string }>> {
+  const session = sessions.get(userId);
+  if (!session?.socket || !session.connected) return [];
+  try {
+    const requests = await session.socket.groupRequestParticipantsList(groupId);
+    if (requests.length > 0) {
+      console.log(`[WA][${userId}] getGroupPendingRequestsDetailed first raw:`, JSON.stringify(requests[0]));
+    }
+    return requests
+      .map((r: any) => {
+        const rawJid: string = r.jid || "";
+        const jid = rawJid.replace(/:\d+@/, "@");
+        let phone = "";
+        // For @lid jids the local part is NOT a phone number — try the phoneNumber field instead.
+        if (jid.endsWith("@lid")) {
+          const phoneJid: string = r.phoneNumber || r.phone_number || r.lidPhoneNumber || "";
+          phone = extractPhoneFromJid(phoneJid);
+        } else {
+          phone = extractPhoneFromJid(jid);
+        }
+        return { jid, phone };
+      })
+      .filter((x: any) => !!x.jid);
+  } catch (err: any) {
+    console.error(`[WA][${userId}] getGroupPendingRequestsDetailed error:`, err?.message);
+    return [];
+  }
+}
+
 // Extract the numeric phone from a WhatsApp JID
 // "919898989898@s.whatsapp.net" → "919898989898"
 // "919898989898:2@s.whatsapp.net" → "919898989898"
