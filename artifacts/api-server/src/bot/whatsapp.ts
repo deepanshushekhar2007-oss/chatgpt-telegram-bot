@@ -52,7 +52,14 @@ async function clearSessionData(userId: string): Promise<void> {
 
 function closeSocketSafe(sock: ReturnType<typeof makeWASocket> | null): void {
   if (!sock) return;
+  // 1) End the underlying websocket
   try { sock.end(undefined); } catch {}
+  // 2) Drop all event listeners so closures (creds.update, connection.update,
+  //    saveCreds reference, etc.) become unreachable and GC-able. Without this,
+  //    every reconnect leaks one full set of listeners and their captured
+  //    state — over hours this is a major source of OOM on small hosts.
+  try { (sock.ev as any)?.removeAllListeners?.(); } catch {}
+  try { (sock as any).ws?.removeAllListeners?.(); } catch {}
 }
 
 async function createSocket(
@@ -217,7 +224,12 @@ async function createSocket(
     }
 
     const { connection, lastDisconnect, qr } = update;
-    console.log(`[WA][${userId}] Update gen=${myGenId}: connection=${connection}`);
+    // Only log when there's a real connection state change. The frequent
+    // `connection=undefined` updates (qr/isNewLogin/etc) are noise that
+    // floods stdout and was hurting RAM/IO on small hosts.
+    if (connection) {
+      console.log(`[WA][${userId}] Update gen=${myGenId}: connection=${connection}`);
+    }
 
     if (pairingMode === "qr" && qr && !session.connected) {
       const expiresAt = Date.now() + 60000;

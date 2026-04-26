@@ -7,6 +7,41 @@ import { cleanupStaleSessions } from "./bot/mongo-auth-state";
 import https from "https";
 import http from "http";
 
+// ─── Suppress libsignal's verbose console.log spam ──────────────────────────
+// The `libsignal-protocol-nodejs` library (used internally by baileys) prints
+// every signal session it touches via bare `console.log(obj)` calls. Each one
+// triggers util.inspect() on a heavy SessionEntry object containing multiple
+// Buffers — causing repeated heap spikes, GC pressure, and gigabytes of log
+// output per day. On a 512MB Render host this alone fills RAM in a few hours.
+// We patch console.log/info to drop those specific messages while keeping our
+// own logs intact.
+(() => {
+  const origLog = console.log.bind(console);
+  const origInfo = console.info.bind(console);
+  const isLibsignalNoise = (args: any[]): boolean => {
+    if (args.length === 0) return false;
+    const first = args[0];
+    if (typeof first !== "string") return false;
+    return (
+      first.startsWith("Closing session:") ||
+      first.startsWith("Removing old closed session:") ||
+      first.startsWith("Closing open session in favor") ||
+      first.startsWith("Deleting session:") ||
+      first.startsWith("Deleting all sessions for") ||
+      first.startsWith("Deleting old session record") ||
+      first.startsWith("Old session, restoring to current state")
+    );
+  };
+  console.log = (...args: any[]) => {
+    if (isLibsignalNoise(args)) return;
+    origLog(...args);
+  };
+  console.info = (...args: any[]) => {
+    if (isLibsignalNoise(args)) return;
+    origInfo(...args);
+  };
+})();
+
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
@@ -78,12 +113,18 @@ async function main() {
       runSessionCleanup("DAILY-CLEANUP");
     }, 24 * 60 * 60 * 1000);
 
-    // Har 5 minute mein GC chalao memory free karne ke liye
+    // Har 5 minute mein GC chalao memory free karne ke liye + heap usage log
+    const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(0)}MB`;
     setInterval(() => {
+      const before = process.memoryUsage();
       if (typeof (global as any).gc === "function") {
         (global as any).gc();
-        console.log("[GC] Manual garbage collection done");
       }
+      const after = process.memoryUsage();
+      console.log(
+        `[MEM] rss=${fmtMb(after.rss)} heap=${fmtMb(after.heapUsed)}/${fmtMb(after.heapTotal)} ` +
+        `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
+      );
     }, 5 * 60 * 1000);
   });
 
