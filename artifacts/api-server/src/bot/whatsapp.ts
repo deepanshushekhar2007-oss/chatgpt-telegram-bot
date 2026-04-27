@@ -658,50 +658,83 @@ export async function createWhatsAppGroup(
   const session = sessions.get(userId);
   if (!session?.socket || !session.connected) return null;
 
-  // Convert phone numbers to JIDs (handles both raw numbers and already-formatted JIDs)
-  const jids = participants
-    .map(p => p.includes("@") ? p : `${p.replace(/[^0-9]/g, "")}@s.whatsapp.net`)
-    .filter(j => j.split("@")[0].length >= 10);
+  // Clean numbers (digits only) and build raw JIDs.
+  const cleanedNumbers = participants
+    .map(p => p.includes("@") ? p.split("@")[0] : p.replace(/[^0-9]/g, ""))
+    .filter(n => n.length >= 10);
+  const rawJids = cleanedNumbers.map(n => `${n}@s.whatsapp.net`);
 
-  // Helper to attempt groupCreate with exponential backoff
-  async function tryCreate(participantList: string[], attempt = 1): Promise<{ id: string; participants?: boolean } | null> {
+  // ── Validate numbers via onWhatsApp BEFORE creating ──
+  // Why: groupCreate(name, [bad_jid, ...]) throws an error and rejects the
+  // whole creation. With 2–3 friend numbers, even one invalid/non-WA number
+  // would cascade into 3 failed retries, triggering WhatsApp rate-limits and
+  // also breaking the fallback empty-group attempt. Validating first means we
+  // only pass JIDs that we know exist on WhatsApp, dramatically reducing the
+  // chance of failure on small batches.
+  let validJids: string[] = rawJids;
+  if (cleanedNumbers.length > 0) {
     try {
-      const group = await session.socket!.groupCreate(groupName, participantList);
-      return { id: group.id, participants: participantList.length > 0 };
-    } catch (err: any) {
-      const msg = err?.message || "";
-      console.error(`[WA][${userId}] groupCreate attempt ${attempt} failed:`, msg);
-      if (attempt < 3) {
-        const delay = attempt * 3000;
-        console.log(`[WA][${userId}] Retrying groupCreate in ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-        return tryCreate(participantList, attempt + 1);
+      const checkResults = await (session.socket as any).onWhatsApp(...cleanedNumbers);
+      if (Array.isArray(checkResults)) {
+        const verifiedJids = checkResults
+          .filter((r: any) => r && r.exists && r.jid)
+          .map((r: any) => String(r.jid));
+        if (verifiedJids.length > 0) {
+          validJids = verifiedJids;
+        } else {
+          // None of the supplied numbers exist on WhatsApp — create empty.
+          validJids = [];
+        }
+        console.log(`[WA][${userId}] onWhatsApp check: ${verifiedJids.length}/${cleanedNumbers.length} valid`);
       }
-      return null;
+    } catch (err: any) {
+      console.error(`[WA][${userId}] onWhatsApp check failed, using raw jids:`, err?.message);
+      // Fall back to using raw jids — better to try than abort.
     }
   }
 
-  // Step 1: Try creating WITH participants (bypasses WhatsApp privacy restrictions at creation time)
-  let groupId: string | null = null;
-  let participantsFailed = false;
-
-  if (jids.length > 0) {
-    const res = await tryCreate(jids);
-    if (res) {
-      groupId = res.id;
-    } else {
-      // Step 2: If that failed, try creating WITHOUT participants
-      console.log(`[WA][${userId}] Retrying group creation without participants...`);
-      await new Promise(r => setTimeout(r, 2000));
-      const res2 = await tryCreate([]);
-      if (res2) {
-        groupId = res2.id;
-        participantsFailed = true;
+  async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string } | null> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const group = await session.socket!.groupCreate(groupName, participantList);
+        return { id: group.id };
+      } catch (err: any) {
+        console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
+        if (attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, attempt * 2500));
+        }
       }
     }
-  } else {
-    const res = await tryCreate([]);
-    if (res) groupId = res.id;
+    return null;
+  }
+
+  let groupId: string | null = null;
+  let participantsFailed = false;
+  let addedAtCreation = 0;
+
+  // Step 1: Try ONCE with the validated participants (no retry — failure here
+  // usually means a bad participant, retrying with the same list won't help
+  // and just burns rate-limit budget).
+  if (validJids.length > 0) {
+    const res = await tryCreate(validJids, 1);
+    if (res) {
+      groupId = res.id;
+      addedAtCreation = validJids.length;
+    }
+  }
+
+  // Step 2: If we don't have a group yet (either no valid jids, or creation
+  // with participants failed), create an empty group with up to 3 attempts.
+  if (!groupId) {
+    if (validJids.length > 0 || rawJids.length > 0) {
+      // Brief cool-off after a failed create attempt to avoid rate-limit.
+      await new Promise(r => setTimeout(r, 2500));
+    }
+    const res2 = await tryCreate([], 3);
+    if (res2) {
+      groupId = res2.id;
+      if (rawJids.length > 0) participantsFailed = true;
+    }
   }
 
   if (!groupId) return null;
@@ -711,16 +744,15 @@ export async function createWhatsAppGroup(
     return {
       id: groupId,
       inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
-      addedParticipants: participantsFailed ? 0 : jids.length,
+      addedParticipants: addedAtCreation,
       participantsFailed,
     };
   } catch (err: any) {
     console.error(`[WA][${userId}] groupInviteCode error:`, err?.message);
-    // Group was created but invite code failed — still return without invite link
     return {
       id: groupId,
       inviteCode: "",
-      addedParticipants: participantsFailed ? 0 : jids.length,
+      addedParticipants: addedAtCreation,
       participantsFailed,
     };
   }
@@ -1396,43 +1428,105 @@ export async function addGroupParticipantsBulk(
   if (!session?.socket || !session.connected) {
     return phoneNumbers.map(p => ({ phone: p, success: false, error: "WhatsApp not connected" }));
   }
+
+  const cleanedNumbers = phoneNumbers.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 10);
+  if (cleanedNumbers.length === 0) {
+    return phoneNumbers.map(p => ({ phone: p, success: false, error: "Invalid number" }));
+  }
+  const jids = cleanedNumbers.map(p => `${p}@s.whatsapp.net`);
+
+  // ── Pre-validate via onWhatsApp to filter out unreachable numbers ──
+  // Same reason as createWhatsAppGroup: a single bad jid in the bulk call can
+  // cause the whole groupParticipantsUpdate to throw, marking ALL numbers as
+  // failed — even the valid ones.
+  let toAdd = cleanedNumbers.map((n, i) => ({ phone: n, jid: jids[i] }));
+  const skipped: Array<{ phone: string; reason: string }> = [];
   try {
-    const cleanedNumbers = phoneNumbers.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 10);
-    const jids = cleanedNumbers.map(p => `${p}@s.whatsapp.net`);
-    let result: any;
-    try {
-      result = await session.socket.groupParticipantsUpdate(groupId, jids, "add");
-    } catch (innerErr: any) {
-      console.error(`[WA][${userId}] groupParticipantsUpdate threw:`, innerErr?.message);
-      await new Promise((r) => setTimeout(r, 2000));
-      result = await session.socket.groupParticipantsUpdate(groupId, jids, "add");
+    const checkResults = await (session.socket as any).onWhatsApp(...cleanedNumbers);
+    if (Array.isArray(checkResults)) {
+      const validJidSet = new Set(
+        checkResults.filter((r: any) => r && r.exists && r.jid).map((r: any) => String(r.jid))
+      );
+      const next: typeof toAdd = [];
+      for (const item of toAdd) {
+        if (validJidSet.has(item.jid)) {
+          next.push(item);
+        } else {
+          skipped.push({ phone: item.phone, reason: "Not on WhatsApp" });
+        }
+      }
+      if (next.length > 0) toAdd = next;
+      console.log(`[WA][${userId}] addBulk onWhatsApp: ${next.length}/${cleanedNumbers.length} valid, ${skipped.length} skipped`);
     }
-    const results: Array<{ phone: string; success: boolean; error?: string }> = [];
-    for (let i = 0; i < cleanedNumbers.length; i++) {
-      const status = Array.isArray(result) && result[i] ? (result[i] as any) : null;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] addBulk onWhatsApp check failed, proceeding:`, err?.message);
+  }
+
+  function classify(statusStr: string): { success: boolean; error?: string } {
+    const s = statusStr.toLowerCase();
+    if (s === "200" || s === "success") return { success: true };
+    if (s === "403" || s.includes("invite") || s.includes("not-authorized")) {
+      return { success: false, error: "Invite required" };
+    }
+    if (s === "409" || s.includes("exist") || s.includes("conflict")) {
+      return { success: false, error: "Already in group" };
+    }
+    if (s === "404" || s.includes("not-exist") || s.includes("not on whatsapp")) {
+      return { success: false, error: "Not on WhatsApp" };
+    }
+    return { success: false, error: `Status: ${s || "unknown"}` };
+  }
+
+  // ── Try bulk update first ──
+  let bulkResult: any = null;
+  let bulkThrew = false;
+  try {
+    bulkResult = await session.socket.groupParticipantsUpdate(groupId, toAdd.map(i => i.jid), "add");
+  } catch (err: any) {
+    console.error(`[WA][${userId}] groupParticipantsUpdate bulk threw:`, err?.message);
+    bulkThrew = true;
+  }
+
+  const finalResults: Array<{ phone: string; success: boolean; error?: string }> = [];
+
+  if (!bulkThrew) {
+    for (let i = 0; i < toAdd.length; i++) {
+      const status = Array.isArray(bulkResult) && bulkResult[i] ? (bulkResult[i] as any) : null;
       if (status) {
         const statusCode = status.status || status.content?.attrs?.type || "";
-        const statusStr = String(statusCode).toLowerCase();
-        if (statusStr === "200" || statusStr === "success") {
-          results.push({ phone: cleanedNumbers[i], success: true });
-        } else if (statusStr === "403" || statusStr.includes("invite") || statusStr.includes("not-authorized")) {
-          results.push({ phone: cleanedNumbers[i], success: false, error: "Invite required" });
-        } else if (statusStr === "409" || statusStr.includes("exist") || statusStr.includes("conflict")) {
-          results.push({ phone: cleanedNumbers[i], success: false, error: "Already in group" });
-        } else if (statusStr === "404" || statusStr.includes("not-exist") || statusStr.includes("not on whatsapp")) {
-          results.push({ phone: cleanedNumbers[i], success: false, error: "Not on WhatsApp" });
-        } else {
-          results.push({ phone: cleanedNumbers[i], success: false, error: `Status: ${statusStr}` });
-        }
+        finalResults.push({ phone: toAdd[i].phone, ...classify(String(statusCode)) });
       } else {
-        results.push({ phone: cleanedNumbers[i], success: true });
+        // No status entry -> assume success
+        finalResults.push({ phone: toAdd[i].phone, success: true });
       }
     }
-    return results;
-  } catch (err: any) {
-    console.error(`[WA][${userId}] Bulk add error:`, err?.message);
-    return phoneNumbers.map(p => ({ phone: p, success: false, error: err?.message || "Failed" }));
+  } else {
+    // ── Fallback: bulk threw, so try one-by-one to isolate the bad jids ──
+    // This rescues the valid numbers when one bad number poisoned the bulk.
+    for (const item of toAdd) {
+      try {
+        const r = await session.socket.groupParticipantsUpdate(groupId, [item.jid], "add");
+        const status = Array.isArray(r) && r.length > 0 ? (r[0] as any) : null;
+        if (status) {
+          const statusCode = status.status || status.content?.attrs?.type || "";
+          finalResults.push({ phone: item.phone, ...classify(String(statusCode)) });
+        } else {
+          finalResults.push({ phone: item.phone, success: true });
+        }
+      } catch (err: any) {
+        const msg = err?.message || "Failed";
+        console.error(`[WA][${userId}] single add failed for ${item.phone}:`, msg);
+        finalResults.push({ phone: item.phone, success: false, error: msg });
+      }
+      await new Promise(r => setTimeout(r, 1200));
+    }
   }
+
+  // Append skipped numbers (filtered out by onWhatsApp check)
+  for (const sk of skipped) {
+    finalResults.push({ phone: sk.phone, success: false, error: sk.reason });
+  }
+  return finalResults;
 }
 
 export async function isUserInGroup(
