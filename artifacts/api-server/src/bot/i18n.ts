@@ -177,24 +177,108 @@ function restore(text: string, tokens: string[]): string {
 }
 
 // ── Google Translate (free endpoint) ───────────────────────────────────────
-async function gtTranslate(text: string, gtCode: string): Promise<string> {
-  // Use POST to support longer text (the GET endpoint is capped ~2KB by URL length).
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(gtCode)}&dt=t`;
+// We use the unofficial free Google Translate endpoints. From cloud IPs (e.g.
+// Render) these can be rate-limited (HTTP 429) or briefly blocked, especially
+// when many strings translate in parallel after a feature opens. To stay
+// reliable we:
+//   1. Send a browser-like User-Agent (a bare Node fetch with no UA gets
+//      blocked aggressively).
+//   2. Bound global concurrency with a semaphore so we never fire more than a
+//      handful of Google calls at the same time.
+//   3. Retry on failure across two distinct endpoints with backoff.
+//   4. Use `dj=1` for a clean JSON response shape (and fall back to the legacy
+//      array form if a particular endpoint ignores it).
+const GT_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36";
+
+type GtEndpoint = "gtx" | "at";
+
+async function gtTranslateOnce(text: string, gtCode: string, endpoint: GtEndpoint): Promise<string> {
+  // Two separate hostnames/clients — when one rate-limits, the other often
+  // still works because Google enforces quotas per (host, client) tuple.
+  const url =
+    endpoint === "gtx"
+      ? `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(gtCode)}&dt=t&dj=1`
+      : `https://translate.google.com/translate_a/single?client=at&sl=auto&tl=${encodeURIComponent(gtCode)}&dt=t&dj=1`;
   const body = `q=${encodeURIComponent(text)}`;
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": GT_USER_AGENT,
+      "Accept": "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
     body,
   });
-  if (!res.ok) throw new Error(`GT ${res.status}`);
+  if (!res.ok) throw new Error(`GT ${endpoint} ${res.status}`);
   const data: any = await res.json();
-  if (!Array.isArray(data) || !Array.isArray(data[0])) return text;
-  // data[0] is array of segments: each segment is [translated, original, ...]
-  let out = "";
-  for (const seg of data[0]) {
-    if (Array.isArray(seg) && typeof seg[0] === "string") out += seg[0];
+  // dj=1 → object form: { sentences: [{ trans, orig, ... }, ...] }
+  if (data && Array.isArray(data.sentences)) {
+    let out = "";
+    for (const s of data.sentences) if (typeof s.trans === "string") out += s.trans;
+    return out || text;
   }
-  return out || text;
+  // Legacy array form: data[0] = array of segments [[translated, orig, ...], ...]
+  if (Array.isArray(data) && Array.isArray(data[0])) {
+    let out = "";
+    for (const seg of data[0]) if (Array.isArray(seg) && typeof seg[0] === "string") out += seg[0];
+    return out || text;
+  }
+  return text;
+}
+
+// Tiny semaphore to cap concurrent outbound translation calls. Without this
+// every feature open can fan out 10–20 parallel requests and trip Google's
+// free-tier rate limiter.
+const GT_MAX_CONCURRENCY = 3;
+let gtActive = 0;
+const gtWaitQueue: Array<() => void> = [];
+
+async function gtAcquire(): Promise<void> {
+  if (gtActive < GT_MAX_CONCURRENCY) {
+    gtActive++;
+    return;
+  }
+  await new Promise<void>((resolve) => gtWaitQueue.push(resolve));
+  gtActive++;
+}
+
+function gtRelease(): void {
+  gtActive--;
+  const next = gtWaitQueue.shift();
+  if (next) next();
+}
+
+async function gtTranslate(text: string, gtCode: string): Promise<string> {
+  // 4 attempts across 2 endpoints with mild jittered backoff. Total worst-case
+  // wall time ~2.5s, which is fine since we only get here on cache miss.
+  const ATTEMPTS: GtEndpoint[] = ["gtx", "at", "gtx", "at"];
+  const BACKOFF_MS = [0, 250, 700, 1500];
+  await gtAcquire();
+  try {
+    let lastErr: any;
+    for (let i = 0; i < ATTEMPTS.length; i++) {
+      if (BACKOFF_MS[i] > 0) {
+        const jitter = Math.floor(Math.random() * 150);
+        await new Promise((r) => setTimeout(r, BACKOFF_MS[i] + jitter));
+      }
+      try {
+        return await gtTranslateOnce(text, gtCode, ATTEMPTS[i]);
+      } catch (err: any) {
+        lastErr = err;
+        // 4xx other than 429 → don't bother retrying with same endpoint
+        const msg = String(err?.message || "");
+        if (/\s4\d\d$/.test(msg) && !/429$/.test(msg)) {
+          // try the other endpoint at most once more
+          continue;
+        }
+      }
+    }
+    throw lastErr ?? new Error("GT all attempts failed");
+  } finally {
+    gtRelease();
+  }
 }
 
 // In-flight request dedup so concurrent users translating the same string
@@ -270,7 +354,7 @@ export async function translateInlineKeyboard(rm: any, lang: Language): Promise<
 // Used by the language picker to warm the cache before showing the main menu,
 // so the first interaction in the new language feels instant.
 export const COMMON_UI_STRINGS: string[] = [
-  // Buttons (most-used)
+  // ── Top-level navigation buttons ─────────────────────────────────────────
   "🏠 Main Menu",
   "🏠 Menu",
   "🔙 Back",
@@ -278,6 +362,15 @@ export const COMMON_UI_STRINGS: string[] = [
   "⏭️ Skip",
   "✅ Yes",
   "❌ No",
+  "✅ Confirm",
+  "▶️ Continue",
+  "⏹️ Stop",
+  "⏪ Prev",
+  "⏩ Next",
+  "🔄 Refresh",
+  "📤 Export",
+  "📥 Import",
+  // ── Main feature buttons ─────────────────────────────────────────────────
   "📱 Connect WhatsApp",
   "📱 Connect",
   "🔌 Disconnect",
@@ -294,12 +387,52 @@ export const COMMON_UI_STRINGS: string[] = [
   "➕ Add Members",
   "⚙️ Edit Settings",
   "🤖 Auto Chat",
-  // Common inline copy
+  // ── Selection / pagination helpers (used by every list-based feature) ───
+  "☑️ Select All",
+  "🧹 Clear All",
+  "🧹 Clear",
+  "✅ Apply",
+  "✅ Apply to All Groups",
+  "🔍 Similar Groups",
+  "📋 All Groups",
+  "📌 Select an option:",
+  "📌 Choose an option:",
+  "Choose an option below:",
+  "Choose an option:",
+  "Tap to select/deselect",
+  "None selected",
+  "Use Prev/Next to change page",
+  // ── Status / progress copy ───────────────────────────────────────────────
+  "Processing...",
+  "Please wait...",
+  "Done!",
+  "Loading menu...",
+  "Fetching...",
+  "Sending...",
+  "Connecting...",
+  "Disconnecting...",
+  // ── Feature panel headers + counters ─────────────────────────────────────
   "✨ <b>Main Menu</b>",
   "👋 <b>Welcome!</b>",
-  "Choose an option below:",
-  "Processing...",
-  "Done!",
+  "📋 <b>Pending List</b>",
+  "⚙️ <b>Edit Settings</b>",
+  "🔍 <b>Similar Group Patterns</b>",
+  "📊 Groups with pending:",
+  "⏳ Total Pending:",
+  "🔍 Similar Patterns:",
+  "📊 Admin Groups:",
+  "👑 admin group(s)",
+  "Group(s) select karo:",
+  "Select groups to show copy-format pending list:",
+  "Tap a pattern to select those groups:",
+  "Fetching pending requests for all admin groups...",
+  "No pending requests found in any group.",
+  "⚠️ No similar group patterns found.",
+  // ── Common error / status messages ───────────────────────────────────────
+  "❌ WhatsApp not connected.",
+  "✅ <b>WhatsApp Connected!</b>",
+  "📭 Aap kisi bhi group mein admin nahi hain.",
+  "Sab clear. Group(s) select karo:",
 ];
 
 export async function warmUpLanguage(
