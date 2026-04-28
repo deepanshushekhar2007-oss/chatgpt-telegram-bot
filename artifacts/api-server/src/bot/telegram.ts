@@ -41,6 +41,7 @@ import {
   ensureSessionLoaded,
   hasStoredWhatsAppSession,
   waitForWhatsAppConnected,
+  sweepIdleSessions,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -75,6 +76,7 @@ import {
   notr,
   isNotr,
   stripNotr,
+  clearTranslationCaches,
 } from "./i18n";
 
 const token = process.env["TELEGRAM_BOT_TOKEN"] || "";
@@ -2560,6 +2562,7 @@ bot.command("admin", async (ctx) => {
     "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
+    "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
     "🎁 <b>Refer Mode:</b>\n" +
     "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
@@ -3015,6 +3018,148 @@ function buildMemBar(pct: number): string {
   const empty = 10 - filled;
   return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
+
+// /cleanram — admin-only aggressive memory purge.
+// Clears every cache that's safe to drop without breaking active users:
+//   • i18n translation cache + negative cache (will re-translate on demand)
+//   • /help pagination state (users will re-paginate)
+//   • Expired QR pairings (active QR scans untouched)
+//   • Stale userActivity entries (anyone idle > USER_IDLE_DISCONNECT_MS)
+//   • All cancel-request flag sets
+//   • Idle WhatsApp sockets via sweepIdleSessions (doesn't kick live users)
+//   • newSessionFlag (per-update flag, safe to clear)
+// Then forces 3 GC passes (V8 needs multiple to reclaim across heap regions)
+// and reports before/after RSS so you can see exactly how much was freed.
+//
+// SAFE: Does NOT touch userStates of users with ongoing flows, in-flight
+// translation promises, autoChat/cig/acf sessions, or live WA sockets that
+// have been active recently. Those would break user experience.
+bot.command("cleanram", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+
+  const memBefore = process.memoryUsage();
+  const rssBefore = memBefore.rss / 1024 / 1024;
+  const heapBefore = memBefore.heapUsed / 1024 / 1024;
+
+  const statusMsg = await ctx.reply("🧹 <b>Cleaning RAM...</b>\n\nClearing caches and running garbage collection...", { parse_mode: "HTML" });
+
+  // 1. Translation caches (biggest non-session leak source)
+  const i18nCleared = clearTranslationCaches();
+
+  // 2. /help pagination
+  const helpPagesCleared = helpPages.size;
+  helpPages.clear();
+  helpPagesLastTouched.clear();
+
+  // 3. Expired QR pairings (keep active scans alive)
+  let qrCleared = 0;
+  for (const [userId, state] of qrPairings) {
+    if (state.expired) {
+      if (state.interval) clearInterval(state.interval);
+      qrPairings.delete(userId);
+      qrCleared++;
+    }
+  }
+
+  // 4. Stale userStates — only ones not in a long-running session AND
+  //    idle past the disconnect window. Safe because the user has clearly
+  //    walked away; they'll start fresh on next /start.
+  const longRunning = new Set<number>([
+    ...autoChatSessions.keys(),
+    ...cigSessions.keys(),
+    ...acfSessions.keys(),
+  ]);
+  let userStatesCleared = 0;
+  for (const [userId, state] of userStates) {
+    if (longRunning.has(userId)) continue;
+    if (isUserActive(userId)) continue;
+    if (state.groupSettings) state.groupSettings.dpBuffers = [];
+    if (state.editSettingsData) state.editSettingsData.settings.dpBuffers = [];
+    userStates.delete(userId);
+    userStatesCleared++;
+  }
+
+  // 5. Stale userActivity entries
+  let activityCleared = 0;
+  const activityCutoff = Date.now() - USER_IDLE_DISCONNECT_MS * 2;
+  for (const [userId, a] of userActivity) {
+    if (a.lastActivityAt < activityCutoff) {
+      userActivity.delete(userId);
+      activityCleared++;
+    }
+  }
+
+  // 6. Cancel-request flag sets
+  const cancelCleared = joinCancelRequests.size + getLinkCancelRequests.size +
+    addMembersCancelRequests.size + removeMembersCancelRequests.size;
+  joinCancelRequests.clear();
+  getLinkCancelRequests.clear();
+  addMembersCancelRequests.clear();
+  removeMembersCancelRequests.clear();
+
+  // 7. newSessionFlag
+  const newSessionCleared = newSessionFlag.size;
+  newSessionFlag.clear();
+
+  // 8. Idle WhatsApp sockets (does not kick recently-active users)
+  let waEvicted = 0;
+  let waTotal = 0;
+  try {
+    const sweep = sweepIdleSessions();
+    waEvicted = sweep.evicted;
+    waTotal = sweep.total;
+  } catch {}
+
+  // 9. Force GC multiple times. V8 collects in regions; one pass often
+  //    leaves freshly-orphaned objects un-reclaimed. 3 passes with a tiny
+  //    yield in between gives the collector time to compact.
+  if (typeof (global as any).gc === "function") {
+    for (let i = 0; i < 3; i++) {
+      (global as any).gc();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  const memAfter = process.memoryUsage();
+  const rssAfter = memAfter.rss / 1024 / 1024;
+  const heapAfter = memAfter.heapUsed / 1024 / 1024;
+  const rssDelta = rssBefore - rssAfter;
+  const heapDelta = heapBefore - heapAfter;
+
+  const fmt = (n: number) => n.toFixed(1);
+  const sign = (n: number) => (n >= 0 ? "−" : "+"); // we report freed as positive
+  const totalEntries = i18nCleared.memCleared + i18nCleared.negCleared +
+    helpPagesCleared + qrCleared + userStatesCleared + activityCleared +
+    cancelCleared + newSessionCleared;
+
+  const text =
+    `✅ <b>RAM Cleanup Done!</b>\n\n` +
+    `📦 <b>RAM (RSS):</b>\n` +
+    `  Before: ${fmt(rssBefore)} MB\n` +
+    `  After:  ${fmt(rssAfter)} MB\n` +
+    `  Freed:  <b>${sign(rssDelta)}${fmt(Math.abs(rssDelta))} MB</b>\n\n` +
+    `🔵 <b>Heap:</b>\n` +
+    `  Before: ${fmt(heapBefore)} MB\n` +
+    `  After:  ${fmt(heapAfter)} MB\n` +
+    `  Freed:  <b>${sign(heapDelta)}${fmt(Math.abs(heapDelta))} MB</b>\n\n` +
+    `🗑 <b>Cache entries cleared:</b> ${totalEntries}\n` +
+    `  • Translation cache: ${i18nCleared.memCleared}\n` +
+    `  • Translation neg-cache: ${i18nCleared.negCleared}\n` +
+    `  • /help pagination: ${helpPagesCleared}\n` +
+    `  • Idle user states: ${userStatesCleared}\n` +
+    `  • Stale activity: ${activityCleared}\n` +
+    `  • Expired QR pairings: ${qrCleared}\n` +
+    `  • Cancel flags: ${cancelCleared}\n` +
+    `  • New-session flags: ${newSessionCleared}\n\n` +
+    `📱 <b>WhatsApp sockets:</b> ${waEvicted} idle evicted (${waTotal} live remain)\n\n` +
+    `💡 <i>Active users, ongoing flows, and live WhatsApp sessions were not touched.</i>`;
+
+  try {
+    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, text, { parse_mode: "HTML" });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML" });
+  }
+});
 
 bot.callbackQuery("broadcast_cancel", async (ctx) => {
   await ctx.answerCallbackQuery("Broadcast cancelled.");

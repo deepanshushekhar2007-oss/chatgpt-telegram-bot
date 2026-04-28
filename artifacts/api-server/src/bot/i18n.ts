@@ -341,6 +341,18 @@ setInterval(() => {
   }
 }, NEG_CACHE_SWEEP_MS);
 
+// Manual purge — used by the admin /cleanram command. Drops the translation
+// success cache and the negative cache so any held memory is released
+// immediately. Does NOT touch `inflight` (those are pending promises that
+// must resolve to keep current users responsive).
+export function clearTranslationCaches(): { memCleared: number; negCleared: number } {
+  const memCleared = memCache.size;
+  const negCleared = negCacheUntil.size;
+  memCache.clear();
+  negCacheUntil.clear();
+  return { memCleared, negCleared };
+}
+
 export async function translate(text: string, lang: Language): Promise<string> {
   if (!text || lang === "default") return text;
   const meta = LANGUAGES[lang as Exclude<Language, "default">];
