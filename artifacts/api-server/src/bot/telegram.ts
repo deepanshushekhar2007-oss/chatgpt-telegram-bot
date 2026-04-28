@@ -215,17 +215,19 @@ bot.use(async (ctx, next) => {
     // background so it's ready by the time they tap a feature button.
     void ensureWhatsAppRestored(userId);
 
-    // Auto-redirect to main menu when a feature button is tapped while
-    // WhatsApp is disconnected (typical 30-min idle case). Without this the
-    // user has to manually /start every time after idle. We edit the same
-    // message into the main menu (with a small "reconnecting" hint), kick
-    // off the restore in the background, and skip the original handler so
-    // it doesn't show its own "❌ WhatsApp not connected" error. The user
-    // sees the menu, can re-tap their button after a couple seconds, and
-    // by then the socket is up. Connect / menu / language flows are
-    // exempted because they handle the disconnected state on purpose.
+    // Auto-reconnect-and-resume when a feature button is tapped while
+    // WhatsApp is disconnected (typical 30-min idle case). We edit the
+    // message in-place to a "🔄 Reconnecting..." status, silently wait
+    // for the background restore (already kicked off above) to finish,
+    // and then let the original handler run normally — so the user does
+    // NOT have to re-tap the button. Connect / menu / language /
+    // force-sub callbacks are exempted because they handle the
+    // disconnected state on purpose. We deliberately do NOT pre-answer
+    // the callback query — the handler will answer it itself once it
+    // runs. Telegram keeps the per-button spinner visible until then,
+    // which is exactly the loading feedback we want.
     const cbData = ctx.callbackQuery?.data;
-    const skipRedirect = !cbData
+    const skipReconnect = !cbData
       || cbData === "connect_wa"
       || cbData === "main_menu"
       || cbData.startsWith("connect_")
@@ -233,20 +235,55 @@ bot.use(async (ctx, next) => {
       || cbData.startsWith("logout_")
       || cbData.startsWith("lang_")
       || cbData.startsWith("force_sub_");
-    if (cbData && !skipRedirect && !isConnected(String(userId))) {
+    if (cbData && !skipReconnect && !isConnected(String(userId))) {
       let hasStored = false;
       try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
       if (hasStored) {
-        try { await ctx.answerCallbackQuery({ text: "🔄 Reconnecting WhatsApp, ek second ruko..." }); } catch {}
+        // Edit text only (no reply_markup specified → original inline
+        // keyboard is preserved). The handler that runs after reconnect
+        // will overwrite this text with its real UI.
+        let statusEdited = false;
         try {
           await ctx.editMessageText(
             `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
-            `<i>Aap idle the to disconnect ho gaya tha. 5-10 second ruko, phir wapas button dabao.</i>\n\n` +
-            mainMenuText(userId, "menu"),
-            { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+            `<i>Aap idle the to disconnect ho gaya tha. ` +
+            `5-15 second mein apne aap button kaam karega.</i>`,
+            { parse_mode: "HTML" }
           );
+          statusEdited = true;
         } catch {}
-        return;
+
+        let connected = false;
+        try {
+          connected = await waitForWhatsAppConnected(String(userId), {
+            timeoutMs: 30_000,
+            pollMs: 500,
+          });
+        } catch {}
+
+        if (!connected) {
+          // Timeout — let the user know and answer the spinner so it
+          // doesn't keep spinning on their tapped button.
+          try {
+            await ctx.answerCallbackQuery({
+              text: "❌ Reconnect failed. /start dabao aur dobara try karo.",
+              show_alert: true,
+            });
+          } catch {}
+          if (statusEdited) {
+            try {
+              await ctx.editMessageText(
+                `❌ <b>WhatsApp reconnect timed out</b>\n\n` +
+                `<i>Server slow ho sakta hai. /start dabao aur dobara try karo.</i>`,
+                { parse_mode: "HTML" }
+              );
+            } catch {}
+          }
+          return;
+        }
+        // Connected — fall through to the normal handler dispatch below.
+        // The handler will edit this same message with its real UI and
+        // call answerCallbackQuery itself.
       }
     }
 
