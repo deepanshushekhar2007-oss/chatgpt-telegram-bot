@@ -2310,7 +2310,14 @@ bot.command("memory", async (ctx) => {
   const heapTotal = parseFloat(toMB(mem.heapTotal));
   const rss = parseFloat(toMB(mem.rss));
   const external = parseFloat(toMB(mem.external));
-  const heapPct = Math.round((heapUsed / heapTotal) * 100);
+
+  // IMPORTANT: heapTotal is the heap Node has currently allocated, NOT its
+  // max. Node grows it on demand up to --max-old-space-size (default 460 MB
+  // here). Computing % against heapTotal gives misleading "97% Critical"
+  // readings even when there's plenty of room left to grow. Always compare
+  // heapUsed to the real max-old-space-size limit for a meaningful figure.
+  const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "460");
+  const heapPct = Math.min(100, Math.round((heapUsed / HEAP_LIMIT_MB) * 100));
 
   // Render free tier = 512 MB total. We compute against that so the bar shows
   // real "how close are we to OOM" pressure, not just heap-vs-heap.
@@ -2332,7 +2339,7 @@ bot.command("memory", async (ctx) => {
     `🧠 <b>Server Live Stats</b>\n\n` +
     `📦 <b>RAM (RSS):</b> ${rss} MB / ${RENDER_LIMIT_MB} MB\n` +
     `${rssBar} ${rssPct}%  ${rssStatus}\n\n` +
-    `🔵 <b>Heap:</b> ${heapUsed} MB / ${heapTotal} MB\n` +
+    `🔵 <b>Heap:</b> ${heapUsed} MB / ${HEAP_LIMIT_MB} MB <i>(allocated: ${heapTotal} MB)</i>\n` +
     `${heapBar} ${heapPct}%  ${heapStatus}\n` +
     `🧩 <b>External:</b> ${external} MB\n\n` +
     `👥 <b>Active Sessions:</b>\n` +
@@ -2343,7 +2350,7 @@ bot.command("memory", async (ctx) => {
     `  🗂️ User states in memory: <b>${userStates.size}</b>\n` +
     `  📷 QR pairings active: <b>${qrPairings.size}</b>\n\n` +
     `⏱️ <b>Uptime:</b> ${uptimeStr}\n` +
-    `💡 Heap limit: 460 MB (--max-old-space-size)\n` +
+    `💡 Heap limit: ${HEAP_LIMIT_MB} MB (--max-old-space-size)\n` +
     `🧹 Cleanup: every ${Math.round(MEMORY_CLEANUP_INTERVAL_MS / 60000)} min`;
 
   await ctx.reply(text, { parse_mode: "HTML" });
