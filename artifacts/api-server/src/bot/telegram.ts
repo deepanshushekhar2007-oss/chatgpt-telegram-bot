@@ -622,7 +622,7 @@ async function sendReferRequired(ctx: any, userId: number): Promise<void> {
 function trialStartedMessage(expiresAt: number): string {
   return (
     `🎁 <b>Welcome! You've unlocked a 24-hour free trial.</b>\n\n` +
-    `For the next 24 hours you can use every feature of this bot — except <b>Auto Chat</b>, which still requires admin approval like before.\n\n` +
+    `For the next 24 hours you can enjoy free access to the bot.\n\n` +
     `⏰ <b>Trial ends in:</b> ${formatRemaining(expiresAt)}\n\n` +
     `When the trial ends, you can either refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`
   );
