@@ -171,14 +171,22 @@ export async function getUserAccessState(
   }
 
   if (data.referMode) {
+    const now = Date.now();
     const trial = data.freeTrials[String(userId)];
-    if (trial && trial.expiresAt > Date.now()) {
-      return { kind: "trial", expiresAt: trial.expiresAt };
-    }
     const ref = data.referralAccess[String(userId)];
-    if (ref && ref.expiresAt > Date.now()) {
-      return { kind: "referral", expiresAt: ref.expiresAt };
+    const trialActive = trial && trial.expiresAt > now;
+    const refActive = ref && ref.expiresAt > now;
+    // Whichever window expires LATEST is what the user actually has.
+    // We always surface the longest-living window so referral days that
+    // stack on top of an active trial aren't hidden by the trial UI.
+    if (trialActive && refActive) {
+      if (ref!.expiresAt >= trial!.expiresAt) {
+        return { kind: "referral", expiresAt: ref!.expiresAt };
+      }
+      return { kind: "trial", expiresAt: trial!.expiresAt };
     }
+    if (trialActive) return { kind: "trial", expiresAt: trial!.expiresAt };
+    if (refActive) return { kind: "referral", expiresAt: ref!.expiresAt };
     return { kind: "none" };
   }
 
@@ -265,12 +273,20 @@ export async function recordReferral(
 
   data.referredBy[String(refereeId)] = referrerId;
 
-  // Referrer access stacks — if they already have time left, extend it;
-  // otherwise start fresh from now.
+  // Referrer access stacks. The new day is added on TOP of every access
+  // window the referrer currently has — their own trial, any earlier
+  // referral days, and admin-granted access — so 1 referral always
+  // means a real +24h, never silently overlapping an existing window.
   if (referrerId !== adminUserId) {
     const now = Date.now();
     const existingRef = data.referralAccess[String(referrerId)];
-    const baseFrom = existingRef && existingRef.expiresAt > now ? existingRef.expiresAt : now;
+    const referrerTrial = data.freeTrials[String(referrerId)];
+    const referrerGrant = data.accessList[String(referrerId)];
+    const candidates = [now];
+    if (existingRef && existingRef.expiresAt > now) candidates.push(existingRef.expiresAt);
+    if (referrerTrial && referrerTrial.expiresAt > now) candidates.push(referrerTrial.expiresAt);
+    if (referrerGrant && referrerGrant.expiresAt > now) candidates.push(referrerGrant.expiresAt);
+    const baseFrom = Math.max(...candidates);
     const newExpires = baseFrom + accessMs;
     const totalReferred = (existingRef?.totalReferred ?? 0) + 1;
     data.referralAccess[String(referrerId)] = { expiresAt: newExpires, totalReferred };
