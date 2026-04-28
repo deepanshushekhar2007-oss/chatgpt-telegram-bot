@@ -1742,3 +1742,37 @@ export function getAutoConnectedNumber(userId: string): string | null {
 export function getActiveSessionUserIds(): Set<string> {
   return new Set(sessions.keys());
 }
+
+// Check whether a user has WhatsApp credentials saved in MongoDB. Used by
+// /start to decide whether to show the "connecting WhatsApp" progress bar.
+// Returns false on any DB error so we never block the menu on transient issues.
+export async function hasStoredWhatsAppSession(userId: string): Promise<boolean> {
+  try {
+    const all = await listStoredWhatsAppSessions();
+    return all.some((s) => s.userId === userId);
+  } catch {
+    return false;
+  }
+}
+
+// Returns true once the user's WhatsApp socket is fully connected, polling at
+// `pollMs` intervals up to `timeoutMs`. Used to drive the live progress bar.
+// If the session isn't already loading, this triggers ensureSessionLoaded().
+export async function waitForWhatsAppConnected(
+  userId: string,
+  opts: { timeoutMs?: number; pollMs?: number } = {}
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 30000;
+  const pollMs = opts.pollMs ?? 500;
+  if (isConnected(userId)) return true;
+  // Kick off lazy restore in background — safe to call even if already loading.
+  const restorePromise = ensureSessionLoaded(userId).catch(() => false);
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (isConnected(userId)) return true;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  // Final check after restorePromise settles in case it just finished.
+  await restorePromise;
+  return isConnected(userId);
+}
