@@ -36,6 +36,7 @@ import {
   getActiveSessionUserIds,
   setDisconnectNotifier,
   setGroupDisappearingMessages,
+  ensureSessionLoaded,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1463,6 +1464,14 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
       await ctx.reply(`🔒 <b>Subscription Required!</b>\n\nContact owner: ${OWNER_USERNAME}`, { parse_mode: "HTML" });
     }
     return false;
+  }
+  // Lazy-restore WhatsApp session if user has stored creds but the live
+  // socket was evicted (idle/memory pressure). No-op (<1ms) if already loaded.
+  // ~5s on cold restore but only happens once per eviction cycle.
+  try {
+    await ensureSessionLoaded(String(userId));
+  } catch (err: any) {
+    console.warn(`[WA][LAZY-RESTORE][${userId}] failed:`, err?.message);
   }
   return true;
 }
