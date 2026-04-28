@@ -116,9 +116,9 @@ async function main() {
       runSessionCleanup("DAILY-CLEANUP");
     }, 24 * 60 * 60 * 1000);
 
-    // Har 1 minute mein idle WhatsApp sockets close karo (memory pressure
-    // kam karne ke liye). Ye 30 min se idle sessions ko evict karta hai aur
-    // RSS jab >380MB ho to LRU se aur close karta hai. User wapas aaye to
+    // Har 30 sec mein idle WhatsApp sockets close karo (memory pressure
+    // kam karne ke liye). Ye 10 min se idle sessions ko evict karta hai aur
+    // RSS jab >300MB ho to LRU se aur close karta hai. User wapas aaye to
     // session lazy-restore ho jayegi.
     setInterval(() => {
       try {
@@ -129,12 +129,20 @@ async function main() {
       } catch (err: any) {
         console.error(`[WA][SWEEP] failed:`, err?.message);
       }
-    }, 60 * 1000);
+    }, 30 * 1000);
 
-    // Har 5 minute mein GC chalao memory free karne ke liye + heap usage log
+    // Har 2 minute mein GC chalao memory free karne ke liye + heap usage log.
+    // Agar RSS 250MB se upar hai to forced sweep + GC bhi chalega — chhote
+    // hosts (Render free 512MB) pe yeh OOM se bachata hai.
     const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(0)}MB`;
     setInterval(() => {
       const before = process.memoryUsage();
+      const rssMb = before.rss / 1024 / 1024;
+      // Memory pressure → also force a session sweep so LRU eviction kicks in
+      // even when individual sockets aren't past the idle threshold yet.
+      if (rssMb > 250) {
+        try { sweepIdleSessions(); } catch {}
+      }
       if (typeof (global as any).gc === "function") {
         (global as any).gc();
       }
@@ -143,7 +151,7 @@ async function main() {
         `[MEM] rss=${fmtMb(after.rss)} heap=${fmtMb(after.heapUsed)}/${fmtMb(after.heapTotal)} ` +
         `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
       );
-    }, 5 * 60 * 1000);
+    }, 2 * 60 * 1000);
   });
 
   startBot();

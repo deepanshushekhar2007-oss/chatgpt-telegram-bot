@@ -1210,9 +1210,16 @@ interface QrPairingState {
 
 const qrPairings: Map<number, QrPairingState> = new Map();
 
-// Cleanup interval (15 min) — keeps RAM footprint tight on low-memory hosts
-// (Render free 512MB) when 500-1000 concurrent users are connected.
-const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(15 * 60 * 1000));
+// Cleanup interval (5 min) — keeps RAM footprint tight on low-memory hosts
+// (Render free 512MB) when 500-1000 concurrent users are connected. Was
+// 15 min earlier, but on a 512MB host idle state can pile up quickly so we
+// run cleanup more often now.
+const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(5 * 60 * 1000));
+// Drop /help pagination state for users idle longer than this. Each entry
+// can hold ~10–20KB of HTML chunks; if 1000 users press /help we'd be
+// keeping 10–20MB live forever without this.
+const HELP_PAGES_STALE_MS = 30 * 60 * 1000;
+const helpPagesLastTouched: Map<number, number> = new Map();
 setInterval(() => {
   const activeUserIds = new Set([
     ...autoChatSessions.keys(),
@@ -1245,6 +1252,18 @@ setInterval(() => {
       qrPairings.delete(userId);
     }
   }
+  // Drop stale /help pagination state — keeps ~10-20KB per entry from
+  // accumulating forever when users open /help and never come back.
+  const now = Date.now();
+  for (const [userId, touchedAt] of helpPagesLastTouched) {
+    if (now - touchedAt > HELP_PAGES_STALE_MS) {
+      helpPages.delete(userId);
+      helpPagesLastTouched.delete(userId);
+    }
+  }
+  // newSessionFlag is a per-update flag; if anything stuck in there from
+  // dead users, drop it. It's tiny but bounded == bounded.
+  if (newSessionFlag.size > 1000) newSessionFlag.clear();
   joinCancelRequests.clear();
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
@@ -1256,7 +1275,7 @@ setInterval(() => {
   const rssMb = Math.round(mem.rss / 1024 / 1024);
   const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
   console.log(
-    `[MEMORY] Cleanup: rss=${rssMb}MB heap=${heapMb}MB userStates=${userStates.size} autoChat=${autoChatSessions.size} cig=${cigSessions.size} acf=${acfSessions.size} qr=${qrPairings.size}`
+    `[MEMORY] Cleanup: rss=${rssMb}MB heap=${heapMb}MB userStates=${userStates.size} autoChat=${autoChatSessions.size} cig=${cigSessions.size} acf=${acfSessions.size} qr=${qrPairings.size} helpPages=${helpPages.size}`
   );
 }, MEMORY_CLEANUP_INTERVAL_MS);
 
@@ -1536,14 +1555,19 @@ bot.callbackQuery("check_joined", async (ctx) => {
   try {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
     if (["member", "administrator", "creator"].includes(member.status)) {
-      // ── Start the user's one-and-only 24h free trial.
-      // We do this on EVERY first /start regardless of whether refer
-      // mode is currently on or off — the trial entry is permanent in
-      // MongoDB (`freeTrials` map keyed by userId) so the same user can
-      // never receive a second free trial, even if they leave and come
-      // back later. Admin is skipped — admin already has unlimited
-      // access, the trial UI would be misleading for them.
       const data = await loadBotData();
+
+      // First-time users (no language picked yet) → show language picker.
+      // Trial creation + trial banner are deferred until after language
+      // selection (handled in applyLanguageSelection), matching the /start
+      // flow so the trial banner never appears stacked on the language picker.
+      if (!hasUserLang(userId)) {
+        try { await ctx.deleteMessage(); } catch {}
+        await sendLanguagePicker(ctx, true);
+        return;
+      }
+
+      // Returning users (lang already set): start trial if not yet created.
       let trialJustStarted: { expiresAt: number } | null = null;
       if (!isAdmin(userId)) {
         const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
@@ -1753,15 +1777,44 @@ bot.command("start", async (ctx) => {
     }
   }
 
-  // ── Start the user's one-and-only 24h free trial.
-  // We do this on EVERY first /start regardless of whether refer mode
-  // is currently on or off — the trial entry is permanent in MongoDB
-  // (`freeTrials` map keyed by userId) so the same user can never
-  // receive a second free trial. We start it AFTER the channel-join
-  // check so users only get the trial when they actually have access.
-  // Admin is skipped — admin already has unlimited access, the trial
-  // UI would be misleading for them.
+  // ── First-time users (no language set yet) → language picker FIRST.
+  // We deliberately do NOT start the free trial or show the trial message
+  // here. The trial is created right after the user picks a language in
+  // applyLanguageSelection(), so the trial countdown only starts once the
+  // user has actually entered the bot and the trial banner appears AFTER
+  // the language is set (not bundled with the language picker).
   const dataNow = await loadBotData();
+  if (!hasUserLang(userId)) {
+    // For brand-new users we still need to surface the access gate (refer
+    // required / subscription required) BEFORE the language picker, but we
+    // don't create the trial yet — that happens after language selection.
+    if (!isAdmin(userId) && !(await hasAccess(userId))) {
+      if (dataNow.referMode) {
+        await sendReferRequired(ctx, userId);
+      } else {
+        await ctx.reply(
+          `🔒 <b>Subscription Required!</b>\n\n` +
+          `This bot requires a subscription to use.\n\n` +
+          `👤 Contact owner: <b>${OWNER_USERNAME}</b>\n` +
+          `📩 Ask admin for access.`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+      // refer mode: still allow language pick first; trial will be created
+      // after language selection and the access check will run again then.
+    }
+    userStates.delete(userId);
+    await sendLanguagePicker(ctx, true);
+    return;
+  }
+
+  // ── Returning users (language already set).
+  // Start their one-and-only 24h free trial if they don't have one yet.
+  // The trial entry is permanent in MongoDB (`freeTrials` map keyed by
+  // userId) so the same user can never receive a second free trial.
+  // Admin is skipped — admin already has unlimited access, the trial UI
+  // would be misleading for them.
   let trialJustStarted: { expiresAt: number } | null = null;
   if (!isAdmin(userId)) {
     const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
@@ -1784,14 +1837,6 @@ bot.command("start", async (ctx) => {
     return;
   }
   userStates.delete(userId);
-  // First-time users (no language set yet) → language picker first.
-  if (!hasUserLang(userId)) {
-    await sendLanguagePicker(ctx, true);
-    if (trialJustStarted) {
-      await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
-    }
-    return;
-  }
   // Show live "connecting WhatsApp" progress bar before the menu, so users
   // immediately see the status of their saved WhatsApp session.
   await showWhatsAppConnectingProgress(ctx, userId);
@@ -1938,8 +1983,26 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
   const userId = ctx.from.id;
   await ctx.answerCallbackQuery();
 
+  // Was this the user's very first language pick? If yes, this is the
+  // moment we kick off their one-and-only 24h free trial — NOT on /start.
+  // The trial banner is shown AFTER the menu so it doesn't get bundled
+  // with the language picker reply.
+  const isFirstPick = !hasUserLang(userId);
+
   // Persist the choice immediately so all subsequent messages use it.
   await setUserLanguage(userId, lang);
+
+  // Create the trial right after the very first language pick (admin
+  // skipped — they have unlimited access).
+  let trialJustStarted: { expiresAt: number } | null = null;
+  if (isFirstPick && !isAdmin(userId)) {
+    try {
+      const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+      if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+    } catch (err: any) {
+      console.error(`[TRIAL] ensureFreeTrial after lang pick failed for ${userId}:`, err?.message);
+    }
+  }
 
   // For "default" there's nothing to warm up — go straight to the menu.
   if (lang === "default") {
@@ -1959,6 +2022,9 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
       await ctx.reply(mainMenuText(userId, "welcome"), {
         parse_mode: "HTML", reply_markup: mainMenu(userId),
       });
+    }
+    if (trialJustStarted) {
+      await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
     }
     return;
   }
@@ -2001,6 +2067,9 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
     await ctx.reply(mainMenuText(userId, "welcome"), {
       parse_mode: "HTML", reply_markup: mainMenu(userId),
     });
+  }
+  if (trialJustStarted) {
+    await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
   }
 }
 
@@ -2148,6 +2217,7 @@ bot.command("help", async (ctx) => {
   // with Next / Previous buttons. Content stays in <pre> (copy-code) format.
   const chunks = splitHelpIntoChunks(codeBlock);
   helpPages.set(userId, chunks);
+  helpPagesLastTouched.set(userId, Date.now());
   await ctx.reply(renderHelpPage(chunks, 0), {
     parse_mode: "HTML",
     reply_markup: buildHelpKeyboard(0, chunks.length),
@@ -2201,6 +2271,7 @@ bot.callbackQuery(/^help_pg_(\d+)$/, async (ctx) => {
     try { await ctx.answerCallbackQuery({ text: "Help session expired. Send /help again.", show_alert: true }); } catch {}
     return;
   }
+  helpPagesLastTouched.set(userId, Date.now());
   try {
     await ctx.editMessageText(renderHelpPage(chunks, page), {
       parse_mode: "HTML",
