@@ -51,7 +51,7 @@ const sessions: Map<string, WhatsAppSession> = new Map();
 // while and lazy-restore them when the user comes back. The session metadata
 // stays in MongoDB, so reconnect just reuses existing creds — no re-pairing.
 const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 30 * 60 * 1000); // 30 min
-const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 6);
+const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 8);
 const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 380);
 
 export function markSessionActive(userId: string): void {
