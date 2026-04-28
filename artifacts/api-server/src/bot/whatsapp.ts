@@ -37,9 +37,142 @@ interface WhatsAppSession {
   retryCount: number;
   socketGenId: number;
   connectLock: boolean;
+  // ms timestamp of the last time this session was actively used (any
+  // user-initiated WA call or incoming message). Drives idle eviction so
+  // we can keep memory bounded on small hosts (Render free tier = 512MB).
+  lastActivityAt: number;
 }
 
 const sessions: Map<string, WhatsAppSession> = new Map();
+
+// ── Memory-aware idle session eviction ─────────────────────────────────────
+// On a 512MB box, ~6 live Baileys sockets is the realistic ceiling. To stay
+// within budget we close ("evict") sockets that haven't been used for a
+// while and lazy-restore them when the user comes back. The session metadata
+// stays in MongoDB, so reconnect just reuses existing creds — no re-pairing.
+const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 30 * 60 * 1000); // 30 min
+const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 6);
+const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 380);
+
+export function markSessionActive(userId: string): void {
+  const s = sessions.get(userId);
+  if (s) s.lastActivityAt = Date.now();
+}
+
+function evictSessionSocket(userId: string, session: WhatsAppSession): void {
+  // Close the underlying socket but keep the session record so isConnected()
+  // reports false, the user sees "WhatsApp not connected", and lazy restore
+  // can pick it back up from MongoDB on next interaction.
+  closeSocketSafe(session.socket);
+  session.socket = null;
+  session.connected = false;
+  session.connecting = false;
+  // Remove the session entry entirely so the next interaction triggers a
+  // full lazy restore (which loads creds from MongoDB and reopens the socket).
+  sessions.delete(userId);
+  console.log(`[WA][EVICT][${userId}] Idle socket closed to free memory`);
+}
+
+export function sweepIdleSessions(): { evicted: number; total: number } {
+  const now = Date.now();
+  let evicted = 0;
+
+  // 1. Always evict sessions that have been idle past the threshold.
+  for (const [userId, session] of [...sessions.entries()]) {
+    if (session.connectLock) continue;
+    if (now - session.lastActivityAt > IDLE_EVICTION_MS) {
+      evictSessionSocket(userId, session);
+      evicted++;
+    }
+  }
+
+  // 2. If we're still over the live-session cap or under memory pressure,
+  //    evict least-recently-used sessions until we're back in budget.
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const overCap = sessions.size > MAX_LIVE_SESSIONS;
+  const memoryHigh = rssMb > MEMORY_PRESSURE_RSS_MB;
+  if (overCap || memoryHigh) {
+    const candidates = [...sessions.entries()]
+      .filter(([, s]) => !s.connectLock)
+      .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
+    while (
+      candidates.length > 0 &&
+      (sessions.size > MAX_LIVE_SESSIONS ||
+        process.memoryUsage().rss / 1024 / 1024 > MEMORY_PRESSURE_RSS_MB)
+    ) {
+      const [userId, session] = candidates.shift()!;
+      evictSessionSocket(userId, session);
+      evicted++;
+    }
+  }
+
+  return { evicted, total: sessions.size };
+}
+
+// Lazily reload a session from MongoDB on the next user interaction. Returns
+// true once the socket is open and connected, false if no stored creds exist
+// or the connection failed.
+export async function ensureSessionLoaded(userId: string): Promise<boolean> {
+  const existing = sessions.get(userId);
+  if (existing?.connected && existing.socket) {
+    existing.lastActivityAt = Date.now();
+    return true;
+  }
+  if (existing?.connectLock) {
+    // Another caller is already restoring — just wait briefly.
+    for (let i = 0; i < 50 && existing.connectLock; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return existing.connected && existing.socket !== null;
+  }
+
+  // No live session — check MongoDB for stored creds and lazy-restore.
+  const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === userId);
+  if (!stored) return false;
+
+  const session: WhatsAppSession = {
+    socket: null,
+    connected: false,
+    pairingCode: null,
+    qrCode: null,
+    qrExpiresAt: null,
+    pairingMode: "code",
+    connecting: true,
+    phoneNumber: stored.phoneNumber,
+    codeRequested: false,
+    wasConnected: true,
+    retryCount: 0,
+    socketGenId: 0,
+    connectLock: true,
+    lastActivityAt: Date.now(),
+  };
+  sessions.set(userId, session);
+
+  try {
+    // Make room before opening a new socket if we're already at the cap.
+    if (sessions.size > MAX_LIVE_SESSIONS) sweepIdleSessions();
+    await createSocket(
+      stored.userId,
+      stored.phoneNumber,
+      "code",
+      () => {},
+      () => {},
+      () => console.log(`[WA][LAZY][${stored.userId}] Session restored on demand`),
+      (reason) => {
+        console.log(`[WA][LAZY][${stored.userId}] Restore disconnected: ${reason}`);
+        notifyDisconnect(stored.userId, reason);
+      },
+      session
+    );
+    return session.connected && session.socket !== null;
+  } catch (err: any) {
+    console.error(`[WA][LAZY][${stored.userId}] Failed:`, err?.message);
+    sessions.delete(stored.userId);
+    return false;
+  } finally {
+    session.connectLock = false;
+  }
+}
 
 async function clearSessionData(userId: string): Promise<void> {
   try {
@@ -428,10 +561,13 @@ export async function connectWhatsApp(
     retryCount: 0,
     socketGenId: 0,
     connectLock: true,
+    lastActivityAt: Date.now(),
   };
   sessions.set(userId, session);
 
   try {
+    // Make room before opening a new socket if we're already at the cap.
+    if (sessions.size > MAX_LIVE_SESSIONS) sweepIdleSessions();
     await createSocket(userId, phoneNumber, "code", onCode, () => {}, onConnected, onDisconnected, session);
   } finally {
     session.connectLock = false;
@@ -471,10 +607,12 @@ export async function connectWhatsAppQr(
     retryCount: 0,
     socketGenId: 0,
     connectLock: true,
+    lastActivityAt: Date.now(),
   };
   sessions.set(userId, session);
 
   try {
+    if (sessions.size > MAX_LIVE_SESSIONS) sweepIdleSessions();
     await createSocket(userId, "", "qr", () => {}, onQr, onConnected, onDisconnected, session);
   } finally {
     session.connectLock = false;
@@ -482,11 +620,14 @@ export async function connectWhatsAppQr(
 }
 
 export function getSession(userId: string): WhatsAppSession | undefined {
-  return sessions.get(userId);
+  const s = sessions.get(userId);
+  if (s) s.lastActivityAt = Date.now();
+  return s;
 }
 
 export function isConnected(userId: string): boolean {
   const s = sessions.get(userId);
+  if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
 }
 
@@ -521,12 +662,26 @@ export async function restoreWhatsAppSessions(): Promise<void> {
   const storedSessions = await listStoredWhatsAppSessions();
   console.log(`[WA][RESTORE] Found ${storedSessions.length} saved WhatsApp session(s)`);
 
-  for (let _i = 0; _i < storedSessions.length; _i++) {
+  // On small hosts (Render free tier = 512MB) we can't keep more than ~6
+  // Baileys sockets in memory at once. Restore at most that many up front;
+  // the rest will be lazy-restored on demand when the user interacts with
+  // the bot (see ensureSessionLoaded). All session creds stay in MongoDB —
+  // lazy restore reuses them, no re-pairing needed.
+  const restoreLimit = Math.min(storedSessions.length, MAX_LIVE_SESSIONS);
+  if (storedSessions.length > restoreLimit) {
+    console.log(
+      `[WA][RESTORE] Restoring first ${restoreLimit} of ${storedSessions.length} sessions on startup; ` +
+      `rest will lazy-restore on demand to keep memory under ${MEMORY_PRESSURE_RSS_MB}MB.`
+    );
+  }
+
+  for (let _i = 0; _i < restoreLimit; _i++) {
     const stored = storedSessions[_i];
     if (sessions.has(stored.userId)) continue;
     if (_i > 0) {
-      // Memory optimization: stagger restores to avoid RAM spike
-      await new Promise((r) => setTimeout(r, 3000));
+      // Memory optimization: stagger restores so sockets don't all open at
+      // the same instant — 5s gives the previous one time to settle.
+      await new Promise((r) => setTimeout(r, 5000));
     }
 
     const session: WhatsAppSession = {
@@ -543,6 +698,7 @@ export async function restoreWhatsAppSessions(): Promise<void> {
       retryCount: 0,
       socketGenId: 0,
       connectLock: true,
+      lastActivityAt: Date.now(),
     };
 
     sessions.set(stored.userId, session);
