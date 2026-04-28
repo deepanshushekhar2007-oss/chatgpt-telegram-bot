@@ -21,8 +21,10 @@ interface BotData {
   // When referMode is OFF, the bot behaves exactly like before — only the
   // existing /access subscription-mode logic applies.
   referMode: boolean;
-  // userId -> trial window
-  freeTrials: Record<string, { startedAt: number; expiresAt: number }>;
+  // userId -> trial window. `warned` flips to true the first time we send
+  // the "30 min left" reminder so the same user is never pinged twice for
+  // the same trial.
+  freeTrials: Record<string, { startedAt: number; expiresAt: number; warned?: boolean }>;
   // refereeUserId -> referrerUserId (a given user can only be referred once,
   // ever — this prevents the same user from being recycled to farm rewards).
   referredBy: Record<string, number>;
@@ -284,6 +286,38 @@ export async function setReferMode(enabled: boolean): Promise<void> {
   const data = await loadBotData();
   data.referMode = enabled;
   await saveBotData(data);
+}
+
+// Find every user whose free trial expires inside (now, now+warnBeforeMs]
+// and that hasn't been warned yet. Returns the userIds AND atomically marks
+// them as warned so concurrent ticks won't double-send. Caller is
+// responsible for actually sending the Telegram message — if delivery
+// fails (user blocked the bot, etc.) we still consider the warning
+// "delivered" because there is nothing useful to retry to.
+export async function findAndMarkTrialsToWarn(
+  warnBeforeMs: number
+): Promise<Array<{ userId: number; expiresAt: number }>> {
+  const data = await loadBotData();
+  if (!data.referMode) return [];
+  const now = Date.now();
+  const toWarn: Array<{ userId: number; expiresAt: number }> = [];
+  let changed = false;
+  for (const [uidStr, trial] of Object.entries(data.freeTrials)) {
+    if (trial.warned) continue;
+    const remaining = trial.expiresAt - now;
+    // Only warn while the trial is still active AND we are inside the
+    // warning window. Trials that already expired silently are skipped —
+    // the next button press surfaces the refer-required UI anyway.
+    if (remaining > 0 && remaining <= warnBeforeMs) {
+      const uid = Number(uidStr);
+      if (!Number.isFinite(uid)) continue;
+      toWarn.push({ userId: uid, expiresAt: trial.expiresAt });
+      data.freeTrials[uidStr] = { ...trial, warned: true };
+      changed = true;
+    }
+  }
+  if (changed) await saveBotData(data);
+  return toWarn;
 }
 
 export async function getReferralStats(userId: number): Promise<{

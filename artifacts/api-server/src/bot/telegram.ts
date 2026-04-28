@@ -58,6 +58,7 @@ import {
   recordReferral,
   setReferMode,
   getReferralStats,
+  findAndMarkTrialsToWarn,
   AccessState,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
@@ -89,6 +90,11 @@ const BOT_DISPLAY_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
 // owner. One referral grants exactly one extra day of access (stacking).
 const FREE_TRIAL_MS = 24 * 60 * 60 * 1000;
 const REFERRAL_REWARD_MS = 24 * 60 * 60 * 1000;
+// How long before trial expiry we send the "your trial is ending soon"
+// warning. The scheduler checks every TRIAL_WARNING_INTERVAL_MS, so the
+// warning may land anywhere inside [warnBefore - tickInterval, warnBefore].
+const TRIAL_WARNING_BEFORE_MS = 30 * 60 * 1000;
+const TRIAL_WARNING_INTERVAL_MS = 60 * 1000;
 
 const bot = new Bot(token || "placeholder");
 
@@ -621,6 +627,69 @@ function trialStartedMessage(expiresAt: number): string {
     `When the trial ends, you can either refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`
   );
 }
+
+// Build the "your trial ends in 30 minutes" reminder. Includes the user's
+// personal referral link + a Buy Premium button so they can act
+// immediately without having to wait for the trial to expire. All copy in
+// English.
+async function buildTrialEndingMessage(userId: number, expiresAt: number): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
+}> {
+  const username = await getBotUsername();
+  const link = username ? buildReferLink(userId, username) : "";
+  const text =
+    `⏰ <b>Heads up — your free trial is ending soon.</b>\n\n` +
+    `Your 24-hour free trial will end in about <b>${formatRemaining(expiresAt)}</b>.\n\n` +
+    `To keep using the bot without a break, you can:\n\n` +
+    `1️⃣ <b>Refer a friend now</b> — every new person who starts the bot through your link gives you <b>1 extra day</b> of free access.\n` +
+    `2️⃣ <b>Don't want to refer?</b> Message ${OWNER_USERNAME} on Telegram to buy premium access.\n\n` +
+    (link
+      ? `🔗 <b>Your personal referral link:</b>\n<code>${esc(link)}</code>\n\n`
+      : ``) +
+    `If you do nothing, the bot will stop responding to your buttons once the trial ends.`;
+
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  return { text, keyboard: kb };
+}
+
+// Background scheduler: every minute, scan for trials ending within the
+// next 30 minutes that we haven't warned about yet, and ping each user
+// once with the reminder. Atomic "mark as warned" lives in
+// findAndMarkTrialsToWarn() so the same user is never double-pinged
+// even if multiple ticks overlap or the process restarts mid-window.
+setInterval(async () => {
+  try {
+    const due = await findAndMarkTrialsToWarn(TRIAL_WARNING_BEFORE_MS);
+    for (const { userId, expiresAt } of due) {
+      try {
+        // Skip the warning if the user already has access that outlasts
+        // the trial (admin grant, referral days). Their trial expiring
+        // is irrelevant to them.
+        const state = await getUserAccessState(userId, ADMIN_USER_ID);
+        if (state.kind !== "trial") continue;
+
+        const { text, keyboard } = await buildTrialEndingMessage(userId, expiresAt);
+        await bot.api.sendMessage(userId, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      } catch (err: any) {
+        // Most likely the user blocked the bot — nothing useful to do.
+        console.error(`[TRIAL-WARN] notify ${userId} failed:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error("[TRIAL-WARN] scheduler tick failed:", err?.message);
+  }
+}, TRIAL_WARNING_INTERVAL_MS);
 
 async function trackUser(userId: number): Promise<void> {
   return trackUserMongo(userId);
