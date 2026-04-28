@@ -1536,13 +1536,16 @@ bot.callbackQuery("check_joined", async (ctx) => {
   try {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
     if (["member", "administrator", "creator"].includes(member.status)) {
-      // ── Refer mode: start the 24h trial now that they've joined the
-      // channel (the trial is the user's first access window). Admin is
-      // skipped — admin already has unlimited access to everything, the
-      // trial UI would be misleading and noisy for them.
+      // ── Start the user's one-and-only 24h free trial.
+      // We do this on EVERY first /start regardless of whether refer
+      // mode is currently on or off — the trial entry is permanent in
+      // MongoDB (`freeTrials` map keyed by userId) so the same user can
+      // never receive a second free trial, even if they leave and come
+      // back later. Admin is skipped — admin already has unlimited
+      // access, the trial UI would be misleading for them.
       const data = await loadBotData();
       let trialJustStarted: { expiresAt: number } | null = null;
-      if (data.referMode && !isAdmin(userId)) {
+      if (!isAdmin(userId)) {
         const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
         if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
       }
@@ -1750,14 +1753,17 @@ bot.command("start", async (ctx) => {
     }
   }
 
-  // ── Refer mode: ensure 24h trial exists for this user ────────────────
-  // We start the trial AFTER the channel-join check passes, so users only
-  // get the trial when they actually have access to the bot. Admin is
-  // skipped — admin already has unlimited access to everything, so the
-  // trial UI would be misleading and noisy for them.
+  // ── Start the user's one-and-only 24h free trial.
+  // We do this on EVERY first /start regardless of whether refer mode
+  // is currently on or off — the trial entry is permanent in MongoDB
+  // (`freeTrials` map keyed by userId) so the same user can never
+  // receive a second free trial. We start it AFTER the channel-join
+  // check so users only get the trial when they actually have access.
+  // Admin is skipped — admin already has unlimited access, the trial
+  // UI would be misleading for them.
   const dataNow = await loadBotData();
   let trialJustStarted: { expiresAt: number } | null = null;
-  if (dataNow.referMode && !isAdmin(userId)) {
+  if (!isAdmin(userId)) {
     const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
     if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
   }
