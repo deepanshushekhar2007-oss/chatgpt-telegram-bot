@@ -3116,7 +3116,6 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
   // output unreadable.
   let totalCorrect = 0;
   let totalWrong = 0;
-  let totalNotFound = 0;
   let groupsAccessed = 0;
   let groupsFailed = 0;
 
@@ -3139,7 +3138,6 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
         gr,
         correctPendingCount: 0,
         correctMembersCount: 0,
-        notInVcfCount: gr.vcfContacts.length,
         wrongPending: [],
         wrongPendingFull: 0,
         vcfLast10Set: new Set(),
@@ -3152,10 +3150,6 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
     const inPendingSet = new Set(gr.inPending.map(p => p.replace(/[^0-9]/g, "")));
     const correctMembersCount = gr.vcfContacts.filter((c) => inMembersSet.has(c.phone.replace(/[^0-9]/g, ""))).length;
     const correctPendingCount = gr.vcfContacts.filter((c) => inPendingSet.has(c.phone.replace(/[^0-9]/g, ""))).length;
-    const notInVcfCount = gr.vcfContacts.filter((c) =>
-      !inMembersSet.has(c.phone.replace(/[^0-9]/g, "")) &&
-      !inPendingSet.has(c.phone.replace(/[^0-9]/g, ""))
-    ).length;
 
     const vcfLast10Set = new Set(gr.vcfContacts.map(c => c.phone.replace(/[^0-9]/g, "").slice(-10)));
 
@@ -3170,13 +3164,11 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
 
     totalCorrect += correctPendingCount;
     totalWrong += wrongPendingFull;
-    totalNotFound += notInVcfCount;
 
     summaries.push({
       gr,
       correctPendingCount,
       correctMembersCount,
-      notInVcfCount,
       wrongPending,
       wrongPendingFull,
       vcfLast10Set,
@@ -3188,7 +3180,6 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
   result += `📁 Groups: <b>${groupsAccessed}</b>${groupsFailed ? ` ❌ ${groupsFailed} failed` : ""}\n`;
   result += `✅ Correct Pending: <b>${totalCorrect}</b>\n`;
   result += `⚠️ Wrong Pending: <b>${totalWrong}</b>\n`;
-  result += `❓ Not in any list: <b>${totalNotFound}</b>\n`;
   result += "━━━━━━━━━━━━━━━━━━\n\n";
 
   // Per-group block — kept short. Wrong pending phones limited to 10 lines.
@@ -3212,9 +3203,6 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
       const slice = s.wrongPending.slice(0, SHOW);
       for (const p of slice) result += `      • ${esc(p)}\n`;
       if (s.wrongPendingFull > SHOW) result += `      … +${s.wrongPendingFull - SHOW} more\n`;
-    }
-    if (s.notInVcfCount > 0) {
-      result += `   ❓ Contacts not found: <b>${s.notInVcfCount}</b>\n`;
     }
     result += "\n";
   }
