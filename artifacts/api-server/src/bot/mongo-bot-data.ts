@@ -158,39 +158,48 @@ export async function getUserAccessState(
 ): Promise<AccessState> {
   if (userId === adminUserId) return { kind: "admin" };
   const data = await loadBotData();
+  const now = Date.now();
 
-  // Admin-granted access always wins (works regardless of refermode).
+  // Clean up expired admin grants so the DB doesn't grow forever.
   const granted = data.accessList[String(userId)];
-  if (granted) {
-    if (granted.expiresAt > Date.now()) {
-      return { kind: "admin_grant", expiresAt: granted.expiresAt };
-    }
-    // Expired — clean up
+  if (granted && granted.expiresAt <= now) {
     delete data.accessList[String(userId)];
     await saveBotData(data);
   }
 
+  // Build the list of every active access window the user has earned.
+  // We always pick the one that expires LATEST, so:
+  //   - trial 24h + 1 referral (24h) => "Referral access, 47h left"
+  //   - admin grant 7d + 3 referrals => "Referral access, 10d left"
+  //   - admin grant 30d alone        => "Premium access, 30d left"
+  // The user never loses time because of which "kind" was checked first.
+  type Window = { kind: AccessState["kind"]; expiresAt: number };
+  const windows: Window[] = [];
+  const grant = data.accessList[String(userId)];
+  if (grant && grant.expiresAt > now) {
+    windows.push({ kind: "admin_grant", expiresAt: grant.expiresAt });
+  }
   if (data.referMode) {
-    const now = Date.now();
     const trial = data.freeTrials[String(userId)];
-    const ref = data.referralAccess[String(userId)];
-    const trialActive = trial && trial.expiresAt > now;
-    const refActive = ref && ref.expiresAt > now;
-    // Whichever window expires LATEST is what the user actually has.
-    // We always surface the longest-living window so referral days that
-    // stack on top of an active trial aren't hidden by the trial UI.
-    if (trialActive && refActive) {
-      if (ref!.expiresAt >= trial!.expiresAt) {
-        return { kind: "referral", expiresAt: ref!.expiresAt };
-      }
-      return { kind: "trial", expiresAt: trial!.expiresAt };
+    if (trial && trial.expiresAt > now) {
+      windows.push({ kind: "trial", expiresAt: trial.expiresAt });
     }
-    if (trialActive) return { kind: "trial", expiresAt: trial!.expiresAt };
-    if (refActive) return { kind: "referral", expiresAt: ref!.expiresAt };
-    return { kind: "none" };
+  }
+  // Referral access is honoured regardless of refermode — once a user has
+  // earned referral days, they keep them even if admin flips refermode off.
+  const ref = data.referralAccess[String(userId)];
+  if (ref && ref.expiresAt > now) {
+    windows.push({ kind: "referral", expiresAt: ref.expiresAt });
   }
 
-  // Refermode OFF → fall back to the original subscription-mode behaviour.
+  if (windows.length > 0) {
+    windows.sort((a, b) => b.expiresAt - a.expiresAt);
+    return { kind: windows[0].kind, expiresAt: windows[0].expiresAt };
+  }
+
+  // No active windows. Refermode ON => locked out. Refermode OFF =>
+  // fall back to the original subscription-mode behaviour.
+  if (data.referMode) return { kind: "none" };
   if (!data.subscriptionMode) return { kind: "subscription_open" };
   return { kind: "none" };
 }
