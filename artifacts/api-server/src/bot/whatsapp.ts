@@ -1507,6 +1507,57 @@ export async function approveGroupParticipant(
   }
 }
 
+// Reject a single pending join request. Used by the CTC "Fix Wrong Pending"
+// flow to cancel join requests that are NOT in the user's VCF.
+export async function rejectGroupParticipant(
+  userId: string,
+  groupId: string,
+  participantJid: string
+): Promise<boolean> {
+  const session = sessions.get(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.groupRequestParticipantsUpdate(groupId, [participantJid], "reject");
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Reject participant error:`, err?.message);
+    return false;
+  }
+}
+
+// Reject many pending join requests in one call (more efficient than looping
+// rejectGroupParticipant). Returns the number of JIDs WhatsApp accepted as
+// rejected.
+export async function rejectGroupParticipantsBulk(
+  userId: string,
+  groupId: string,
+  participantJids: string[]
+): Promise<number> {
+  const session = sessions.get(userId);
+  if (!session?.socket || !session.connected) return 0;
+  if (!participantJids.length) return 0;
+  try {
+    const result = await session.socket.groupRequestParticipantsUpdate(
+      groupId,
+      participantJids,
+      "reject"
+    );
+    if (Array.isArray(result)) {
+      // Baileys returns an array of { jid, status } items — count successes.
+      let ok = 0;
+      for (const r of result as any[]) {
+        const s = String(r?.status || "").toLowerCase();
+        if (s === "200" || s === "success" || s === "") ok++;
+      }
+      return ok || participantJids.length;
+    }
+    return participantJids.length;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Bulk reject error:`, err?.message);
+    return 0;
+  }
+}
+
 export async function setGroupApprovalMode(
   userId: string,
   groupId: string,

@@ -23,6 +23,7 @@ import {
   getGroupPendingList,
   makeGroupAdmin,
   approveGroupParticipant,
+  rejectGroupParticipantsBulk,
   setGroupApprovalMode,
   findParticipantByPhone,
   addGroupParticipant,
@@ -203,7 +204,21 @@ bot.api.config.use(async (prev, method, payload, signal) => {
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (typeof userId === "number") {
-    await updateUserCtx.run(userId, next);
+    // Refresh the user's "active" timestamp on every interaction (commands,
+    // button presses, text messages). This is what keeps long flows like
+    // group creation alive past the old aggressive cleanup, AND prevents the
+    // "✅ WhatsApp connected" toast from re-appearing on every /start.
+    const startedNewSession = markUserActive(userId);
+    newSessionFlag.set(userId, startedNewSession);
+    // If WhatsApp got disconnected (idle timer or process restart) but the
+    // user has a saved Mongo session, kick off a silent restore in the
+    // background so it's ready by the time they tap a feature button.
+    void ensureWhatsAppRestored(userId);
+    try {
+      await updateUserCtx.run(userId, next);
+    } finally {
+      newSessionFlag.delete(userId);
+    }
   } else {
     await next();
   }
@@ -728,6 +743,84 @@ const autoChatSessions: Map<number, AutoChatSession> = new Map();
 const cigSessions: Map<number, CigSession> = new Map();
 const acfSessions: Map<number, AcfSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// User-activity tracking (in-memory). Drives three behaviours:
+//   1. The "✅ WhatsApp connected +XXX" celebration message on /start is only
+//      shown the first time per session window (i.e. when the user has been
+//      idle for >= USER_IDLE_DISCONNECT_MS, or has never used the bot since
+//      the process started). On subsequent /start calls within the active
+//      window, the menu appears without the connection toast.
+//   2. Any button press or text message refreshes lastActivityAt — the user
+//      is "active" for another 30 minutes from that point.
+//   3. A background timer disconnects WhatsApp for users idle >=
+//      USER_IDLE_DISCONNECT_MS and remembers that we did so (idleDisconnected
+//      flag). On the next interaction, the connection is restored silently
+//      from the stored Mongo session if available.
+// ─────────────────────────────────────────────────────────────────────────────
+const USER_IDLE_DISCONNECT_MS = Number(
+  process.env.USER_IDLE_DISCONNECT_MS || String(30 * 60 * 1000)
+);
+const USER_IDLE_CHECK_INTERVAL_MS = Number(
+  process.env.USER_IDLE_CHECK_INTERVAL_MS || String(5 * 60 * 1000)
+);
+
+interface UserActivity {
+  lastActivityAt: number;
+  // Set to true after the background idle timer disconnects this user. Reset
+  // to false the next time they interact with the bot.
+  idleDisconnected: boolean;
+}
+
+const userActivity: Map<number, UserActivity> = new Map();
+
+function isUserActive(userId: number): boolean {
+  const a = userActivity.get(userId);
+  if (!a) return false;
+  return Date.now() - a.lastActivityAt < USER_IDLE_DISCONNECT_MS;
+}
+
+// Returns true when this interaction is the first one in a new active
+// window (i.e. the user was previously idle/never seen). Callers like the
+// /start handler use this to decide whether to show the WhatsApp
+// "connected" toast — we only want it once per session window, not on
+// every /start tap.
+function markUserActive(userId: number): boolean {
+  const now = Date.now();
+  const existing = userActivity.get(userId);
+  if (!existing) {
+    userActivity.set(userId, { lastActivityAt: now, idleDisconnected: false });
+    return true;
+  }
+  const wasIdle = existing.idleDisconnected || (now - existing.lastActivityAt >= USER_IDLE_DISCONNECT_MS);
+  existing.lastActivityAt = now;
+  existing.idleDisconnected = false;
+  return wasIdle;
+}
+
+// True if the most recent markUserActive call started a new active window.
+// We can't simply re-check on demand because the middleware updates the
+// timestamp on every update — once /start runs, the user is already
+// "active". Cache the result per-update via a tiny in-memory flag.
+const newSessionFlag: Map<number, boolean> = new Map();
+
+// Silent reconnect: if the user has a stored WhatsApp session but the in-memory
+// socket has been evicted (process restart, idle disconnect, etc.), trigger a
+// background reload. Returns immediately — the menu/button flow continues
+// without waiting. The connect handlers in connectWhatsApp itself will set the
+// connected flag once the socket is up.
+async function ensureWhatsAppRestored(userId: number): Promise<void> {
+  const uid = String(userId);
+  if (isConnected(uid)) return;
+  try {
+    const stored = await hasStoredWhatsAppSession(uid);
+    if (!stored) return;
+    // Fire-and-forget — ensureSessionLoaded handles its own concurrency guards.
+    ensureSessionLoaded(uid).catch((err) => {
+      console.error(`[BOT] silent restore failed for ${userId}:`, err?.message);
+    });
+  } catch {}
+}
 const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
@@ -826,12 +919,23 @@ setInterval(() => {
     ...acfSessions.keys(),
   ]);
   for (const [userId, state] of userStates) {
-    if (!activeUserIds.has(userId)) {
-      // Eagerly drop any large Buffers (group DPs / edit-settings DPs) so
-      // they become GC-able immediately, not at the next heap pressure.
-      if (state.groupSettings) state.groupSettings.dpBuffers = [];
-      if (state.editSettingsData) state.editSettingsData.settings.dpBuffers = [];
-      userStates.delete(userId);
+    // Keep state for users currently in a long-running session (auto chat,
+    // CIG, ACF) AND for users whose last interaction was within the active
+    // window. Without this, multi-step flows like "Create Groups → wait 15
+    // min → enter group name" lose their step and silently drop the input.
+    if (activeUserIds.has(userId) || isUserActive(userId)) continue;
+    // Eagerly drop any large Buffers (group DPs / edit-settings DPs) so
+    // they become GC-able immediately, not at the next heap pressure.
+    if (state.groupSettings) state.groupSettings.dpBuffers = [];
+    if (state.editSettingsData) state.editSettingsData.settings.dpBuffers = [];
+    userStates.delete(userId);
+  }
+  // Drop activity entries for users idle far longer than the disconnect
+  // window so the map doesn't grow unbounded across days.
+  const STALE_ACTIVITY_MS = USER_IDLE_DISCONNECT_MS * 4;
+  for (const [userId, a] of userActivity) {
+    if (Date.now() - a.lastActivityAt > STALE_ACTIVITY_MS) {
+      userActivity.delete(userId);
     }
   }
   for (const [userId, state] of qrPairings) {
@@ -854,6 +958,45 @@ setInterval(() => {
     `[MEMORY] Cleanup: rss=${rssMb}MB heap=${heapMb}MB userStates=${userStates.size} autoChat=${autoChatSessions.size} cig=${cigSessions.size} acf=${acfSessions.size} qr=${qrPairings.size}`
   );
 }, MEMORY_CLEANUP_INTERVAL_MS);
+
+// ── Idle-disconnect timer ─────────────────────────────────────────────────
+// Walk every connected WhatsApp session and disconnect users who have been
+// idle for >= USER_IDLE_DISCONNECT_MS. Long-running flows that imply the
+// user is still working in the background (auto chat, chat-in-group, auto
+// chat friend) are exempt — we don't want to kill a user's CIG run just
+// because they walked away from Telegram. The next time the user taps any
+// button or sends a message, the bot.use middleware silently restores the
+// session from Mongo and the connection toast appears once (showing the
+// user the freshly restored connection).
+setInterval(async () => {
+  try {
+    const liveSessions = getActiveSessionUserIds();
+    const longRunning = new Set<number>([
+      ...autoChatSessions.keys(),
+      ...cigSessions.keys(),
+      ...acfSessions.keys(),
+    ]);
+    for (const uidStr of liveSessions) {
+      const uid = Number(uidStr);
+      if (!Number.isFinite(uid)) continue;
+      if (longRunning.has(uid)) continue;
+      const a = userActivity.get(uid);
+      // No recorded activity OR activity older than the window → disconnect.
+      const idleFor = a ? Date.now() - a.lastActivityAt : Number.POSITIVE_INFINITY;
+      if (idleFor < USER_IDLE_DISCONNECT_MS) continue;
+      try {
+        await disconnectWhatsApp(uidStr);
+        if (a) a.idleDisconnected = true;
+        else userActivity.set(uid, { lastActivityAt: Date.now() - USER_IDLE_DISCONNECT_MS, idleDisconnected: true });
+        console.log(`[BOT] Idle disconnect for user ${uid} after ${Math.round(idleFor / 60000)} min`);
+      } catch (err: any) {
+        console.error(`[BOT] Idle disconnect error for ${uid}:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[BOT] Idle-disconnect sweep error:`, err?.message);
+  }
+}, USER_IDLE_CHECK_INTERVAL_MS);
 
 // ── High-memory alert: ping admin on Telegram when RSS crosses threshold ──
 // Checks every 1 min. Sends alert when RSS >= MEMORY_ALERT_THRESHOLD_PCT of
@@ -1112,12 +1255,26 @@ function renderProgressBar(pct: number): string {
 async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise<void> {
   const uid = String(userId);
 
+  // Only surface the connection toast/progress bar when this /start kicks
+  // off a brand-new active window (first /start of the session, or first
+  // /start after a 30-min idle gap). Otherwise the user sees the same
+  // "✅ WhatsApp connected +XXX" message every time they tap /start,
+  // which is exactly what the user reported. If the user is mid-session,
+  // the menu appears immediately with no toast.
+  const isNewSession = newSessionFlag.get(userId) === true;
+  if (!isNewSession) return;
+
   // Already live? Just show a quick confirmation, no progress bar needed.
   if (isConnected(uid)) {
     try {
       const phone = getConnectedWhatsAppNumber(uid);
       const phoneTxt = phone ? ` <code>+${phone}</code>` : "";
-      await ctx.reply(`✅ <b>WhatsApp connected${phoneTxt}</b>`, { parse_mode: "HTML" });
+      const msg = await ctx.reply(`✅ <b>WhatsApp connected${phoneTxt}</b>`, { parse_mode: "HTML" });
+      // Auto-delete after 5s so the chat stays clean (matches the post-
+      // restore confirmation behaviour below).
+      setTimeout(() => {
+        ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+      }, 5000);
     } catch {}
     return;
   }
@@ -2841,15 +2998,43 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
 });
 
-async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
-  let result = "📊 <b>CTC Check Results</b>\n\n";
+// Fix Wrong Pending: cached per-user data so the user can tap the
+// "🛠 Fix Wrong Pending" button after a CTC check completes. We store
+// only what's needed to re-fetch the live pending list and reject the
+// JIDs whose phone number is NOT in the VCF for that group.
+interface CtcFixData {
+  groups: Array<{
+    groupId: string;
+    groupName: string;
+    link: string;
+    // last-10-digit phone numbers from this group's VCF — used to decide
+    // which pending JIDs are "wrong" (= not in VCF) at fix time.
+    vcfLast10Set: Set<string>;
+    // Snapshot count from the check, just for the confirmation prompt.
+    wrongCount: number;
+  }>;
+  totalWrong: number;
+  createdAt: number;
+}
 
+const ctcFixDataStore: Map<number, CtcFixData> = new Map();
+
+// Drop stale fix-data after 30 min so the map can't grow unbounded.
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [uid, data] of ctcFixDataStore) {
+    if (data.createdAt < cutoff) ctcFixDataStore.delete(uid);
+  }
+}, 10 * 60 * 1000);
+
+async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
   const pendingPhoneToGroups = new Map<string, string[]>();
 
   // First pass: collect results per group
   const groupResults: Array<{
+    groupId: string;
     groupName: string;
     link: string;
     vcfContacts: Array<{ name: string; phone: string; vcfFileName: string }>;
@@ -2868,7 +3053,7 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
 
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Checking group ${i + 1}/${activePairs.length}...</b>\n\n⌛ Please wait...`,
+        `⏳ <b>Checking group ${i + 1}/${activePairs.length}...</b>`,
         { parse_mode: "HTML" }
       );
     } catch {}
@@ -2876,7 +3061,8 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
     const groupInfo = await getGroupIdFromLink(userId, cleanLink);
     if (!groupInfo) {
       groupResults.push({
-        groupName: `Group ${i + 1} (could not access)`,
+        groupId: "",
+        groupName: `Group ${i + 1}`,
         link: cleanLink,
         vcfContacts: pair.vcfContacts,
         inMembers: [],
@@ -2896,13 +3082,12 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
 
     // Track ALL pending phones for duplicate detection (not just VCF matches)
     for (const phone of allPendingPhones) {
-      if (!pendingPhoneToGroups.has(phone)) {
-        pendingPhoneToGroups.set(phone, []);
-      }
+      if (!pendingPhoneToGroups.has(phone)) pendingPhoneToGroups.set(phone, []);
       pendingPhoneToGroups.get(phone)!.push(groupInfo.subject);
     }
 
     groupResults.push({
+      groupId: groupInfo.id,
       groupName: groupInfo.subject,
       link: cleanLink,
       vcfContacts: pair.vcfContacts,
@@ -2916,112 +3101,314 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
     });
   }
 
-  // Build all VCF phone numbers across ALL pairs for wrong-adding detection
-  // Wrong adding: a number is a group MEMBER (not pending) but NOT in the VCF for that group
-  for (let i = 0; i < activePairs.length; i++) {
-    const pair = activePairs[i];
-    const gr = groupResults[i];
-    if (!gr || gr.couldNotAccess) {
-      result += `❌ <b>Group ${i + 1}</b>: Could not access\n${esc(gr?.link || pair.link)}\n\n`;
+  // ── Compact, scannable result format ────────────────────────────────────
+  // Top: one-line totals so the user sees the headline numbers without
+  // scrolling. Then per-group summary lines (no full pending phone dumps).
+  // Wrong-pending phones are still surfaced but trimmed to the first 10
+  // and counted, since dumping every wrong number is what made the old
+  // output unreadable.
+  let totalCorrect = 0;
+  let totalWrong = 0;
+  let totalNotFound = 0;
+  let groupsAccessed = 0;
+  let groupsFailed = 0;
+
+  // Per-group computed summary (used both for the message and the fix data)
+  type Summary = {
+    gr: typeof groupResults[number];
+    correctPendingCount: number;
+    correctMembersCount: number;
+    notInVcfCount: number;
+    wrongPending: string[];          // "+91XXXXXXXXXX" formatted
+    wrongPendingFull: number;        // actual count (may exceed shown list)
+    vcfLast10Set: Set<string>;
+  };
+  const summaries: Summary[] = [];
+
+  for (const gr of groupResults) {
+    if (gr.couldNotAccess) {
+      groupsFailed++;
+      summaries.push({
+        gr,
+        correctPendingCount: 0,
+        correctMembersCount: 0,
+        notInVcfCount: gr.vcfContacts.length,
+        wrongPending: [],
+        wrongPendingFull: 0,
+        vcfLast10Set: new Set(),
+      });
       continue;
     }
+    groupsAccessed++;
 
     const inMembersSet = new Set(gr.inMembers.map(p => p.replace(/[^0-9]/g, "")));
     const inPendingSet = new Set(gr.inPending.map(p => p.replace(/[^0-9]/g, "")));
+    const correctMembersCount = gr.vcfContacts.filter((c) => inMembersSet.has(c.phone.replace(/[^0-9]/g, ""))).length;
+    const correctPendingCount = gr.vcfContacts.filter((c) => inPendingSet.has(c.phone.replace(/[^0-9]/g, ""))).length;
+    const notInVcfCount = gr.vcfContacts.filter((c) =>
+      !inMembersSet.has(c.phone.replace(/[^0-9]/g, "")) &&
+      !inPendingSet.has(c.phone.replace(/[^0-9]/g, ""))
+    ).length;
 
-    const inMembersContacts = gr.vcfContacts.filter((c) => inMembersSet.has(c.phone.replace(/[^0-9]/g, "")));
-    const inPendingContacts = gr.vcfContacts.filter((c) => inPendingSet.has(c.phone.replace(/[^0-9]/g, "")));
-    const notFoundContacts = gr.vcfContacts.filter((c) => !inMembersSet.has(c.phone.replace(/[^0-9]/g, "")) && !inPendingSet.has(c.phone.replace(/[^0-9]/g, "")));
-
-    // Build VCF phone set (last-10-digit) for robust matching
     const vcfLast10Set = new Set(gr.vcfContacts.map(c => c.phone.replace(/[^0-9]/g, "").slice(-10)));
 
-    // Wrong Adding: pending contacts that are NOT in the VCF
-    // (someone who requested to join but is NOT in your contact list)
-    const wrongAdding: string[] = [];
+    const wrongPending: string[] = [];
     for (const pendingPhone of gr.allPendingPhones) {
       const pLast10 = pendingPhone.slice(-10);
       if (pLast10.length >= 7 && !vcfLast10Set.has(pLast10)) {
-        wrongAdding.push("+" + pendingPhone);
+        wrongPending.push("+" + pendingPhone);
       }
     }
+    const wrongPendingFull = wrongPending.length;
 
-    // Members Not in VCF: actual group members who are NOT in the VCF
-    const membersNotInVcf: string[] = [];
-    for (const memberPhone of gr.allMemberPhones) {
-      const mLast10 = memberPhone.slice(-10);
-      if (mLast10.length >= 7 && !vcfLast10Set.has(mLast10)) {
-        membersNotInVcf.push("+" + memberPhone);
-      }
+    totalCorrect += correctPendingCount;
+    totalWrong += wrongPendingFull;
+    totalNotFound += notInVcfCount;
+
+    summaries.push({
+      gr,
+      correctPendingCount,
+      correctMembersCount,
+      notInVcfCount,
+      wrongPending,
+      wrongPendingFull,
+      vcfLast10Set,
+    });
+  }
+
+  // Headline summary
+  let result = "📊 <b>CTC Check — Summary</b>\n";
+  result += `📁 Groups: <b>${groupsAccessed}</b>${groupsFailed ? ` ❌ ${groupsFailed} failed` : ""}\n`;
+  result += `✅ Correct Pending: <b>${totalCorrect}</b>\n`;
+  result += `⚠️ Wrong Pending: <b>${totalWrong}</b>\n`;
+  result += `❓ Not in any list: <b>${totalNotFound}</b>\n`;
+  result += "━━━━━━━━━━━━━━━━━━\n\n";
+
+  // Per-group block — kept short. Wrong pending phones limited to 10 lines.
+  for (let i = 0; i < summaries.length; i++) {
+    const s = summaries[i];
+    const gr = s.gr;
+    if (gr.couldNotAccess) {
+      result += `❌ <b>Group ${i + 1}</b>: Could not access\n   ${esc(gr.link)}\n\n`;
+      continue;
     }
-
-    // Group header
     result += `📋 <b>${esc(gr.groupName)}</b>\n`;
-    result += `🔗 ${esc(gr.link)}\n`;
     if (!gr.pendingAvailable) {
-      result += `⚠️ <i>Pending detection unavailable (need to be admin + "Approval required" ON)</i>\n`;
+      result += `   ⚠️ <i>Pending detection off — need admin + "Approval required" ON</i>\n`;
+    }
+    result += `   ✅ Correct Pending: <b>${s.correctPendingCount}</b>`;
+    if (s.correctMembersCount) result += `   👥 Already In: <b>${s.correctMembersCount}</b>`;
+    result += "\n";
+    if (s.wrongPendingFull > 0) {
+      result += `   ⚠️ Wrong Pending: <b>${s.wrongPendingFull}</b>\n`;
+      const SHOW = 10;
+      const slice = s.wrongPending.slice(0, SHOW);
+      for (const p of slice) result += `      • ${esc(p)}\n`;
+      if (s.wrongPendingFull > SHOW) result += `      … +${s.wrongPendingFull - SHOW} more\n`;
+    }
+    if (s.notInVcfCount > 0) {
+      result += `   ❓ Contacts not found: <b>${s.notInVcfCount}</b>\n`;
     }
     result += "\n";
-
-    // ⚠️ Wrong Adding: pending contacts NOT in VCF
-    if (wrongAdding.length > 0) {
-      result += `⚠️ <b>Wrong Pending Request (${wrongAdding.length}):</b>\n`;
-      result += `<i>These numbers are in pending but NOT in your VCF</i>\n`;
-      for (const phone of wrongAdding) result += `  ⚠️ ${esc(phone)}\n`;
-      result += "\n";
-    } else {
-      result += `⚠️ <b>Wrong Pending Request: 0</b>\n\n`;
-    }
-
-    // ✅ Correct Pending: pending contacts that ARE in VCF — show per-VCF summary
-    if (inPendingContacts.length > 0) {
-      // Group by VCF file name
-      const byVcf = new Map<string, number>();
-      for (const c of inPendingContacts) {
-        byVcf.set(c.vcfFileName, (byVcf.get(c.vcfFileName) || 0) + 1);
-      }
-      result += `✅ <b>Correct Pending (${inPendingContacts.length}):</b>\n`;
-      for (const [vcf, count] of byVcf.entries()) {
-        result += `  📄 ${esc(vcf)} — ${count} contact${count > 1 ? "s" : ""} pending\n`;
-      }
-      result += "\n";
-    }
-
-    result += "━━━━━━━━━━━━━━━━━━\n\n";
   }
 
   // Duplicate pending detection: contacts in pending of multiple groups
   const duplicates: Array<{ phone: string; groups: string[] }> = [];
   for (const [phone, groups] of pendingPhoneToGroups.entries()) {
-    if (groups.length > 1) {
-      duplicates.push({ phone: "+" + phone, groups });
-    }
+    if (groups.length > 1) duplicates.push({ phone: "+" + phone, groups });
+  }
+  if (duplicates.length > 0) {
+    result += `🔁 <b>Duplicate Pending (${duplicates.length}):</b>\n`;
+    const SHOW = 8;
+    const slice = duplicates.slice(0, SHOW);
+    for (const d of slice) result += `   • ${esc(d.phone)} — in <b>${d.groups.length}</b> groups\n`;
+    if (duplicates.length > SHOW) result += `   … +${duplicates.length - SHOW} more\n`;
+    result += "\n";
   }
 
-  if (duplicates.length > 0) {
-    result += `🔁 <b>Duplicate Pending Contacts (${duplicates.length}):</b>\n`;
-    result += `<i>Same contact pending in multiple groups</i>\n\n`;
-    for (const d of duplicates) {
-      result += `  🔁 ${esc(d.phone)}\n`;
-      for (const g of d.groups) result += `    📌 ${esc(g)}\n`;
-    }
-    result += "\n━━━━━━━━━━━━━━━━━━\n\n";
+  // Stash fix data so the user can run "Fix Wrong Pending" right from the
+  // result message. Only groups that we successfully accessed AND have at
+  // least one wrong pending entry are eligible.
+  const fixGroups = summaries
+    .filter((s) => !s.gr.couldNotAccess && s.wrongPendingFull > 0)
+    .map((s) => ({
+      groupId: s.gr.groupId,
+      groupName: s.gr.groupName,
+      link: s.gr.link,
+      vcfLast10Set: s.vcfLast10Set,
+      wrongCount: s.wrongPendingFull,
+    }));
+  const uidNum = Number(userId);
+  if (fixGroups.length > 0 && Number.isFinite(uidNum)) {
+    ctcFixDataStore.set(uidNum, {
+      groups: fixGroups,
+      totalWrong,
+      createdAt: Date.now(),
+    });
+  } else if (Number.isFinite(uidNum)) {
+    ctcFixDataStore.delete(uidNum);
   }
+
+  const finalKb = new InlineKeyboard();
+  if (totalWrong > 0) {
+    finalKb.text(`🛠 Fix Wrong Pending (${totalWrong})`, "ctc_fix_wrong").row();
+  }
+  finalKb.text("🏠 Main Menu", "main_menu");
 
   const chunks = splitMessage(result, 4000);
   try {
     await bot.api.editMessageText(chatId, msgId, chunks[0], {
       parse_mode: "HTML",
-      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: chunks.length === 1 ? finalKb : undefined,
     });
   } catch {}
   for (let i = 1; i < chunks.length; i++) {
     await bot.api.sendMessage(chatId, chunks[i], {
       parse_mode: "HTML",
-      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: i === chunks.length - 1 ? finalKb : undefined,
     });
   }
 }
+
+// ── Fix Wrong Pending ────────────────────────────────────────────────────
+// Confirmation step: explain what will happen and wait for the user to tap
+// "Yes, Cancel them". We don't want a single accidental tap to reject
+// dozens of join requests with no second chance.
+bot.callbackQuery("ctc_fix_wrong", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const data = ctcFixDataStore.get(userId);
+  if (!data || !data.groups.length) {
+    await ctx.editMessageText(
+      "⚠️ <b>Fix data expired</b>\n\nPlease run the CTC check again.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+    return;
+  }
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "❌ <b>WhatsApp not connected!</b>",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
+  const groupList = data.groups
+    .slice(0, 8)
+    .map((g) => `• ${esc(g.groupName)} — <b>${g.wrongCount}</b>`)
+    .join("\n");
+  const more = data.groups.length > 8 ? `\n… +${data.groups.length - 8} more groups` : "";
+  await ctx.editMessageText(
+    `🛠 <b>Fix Wrong Pending Requests</b>\n\n` +
+    `Total: <b>${data.totalWrong}</b> wrong pending requests across <b>${data.groups.length}</b> group(s).\n\n` +
+    `${groupList}${more}\n\n` +
+    `<i>This will REJECT (cancel) every pending request whose number is NOT in your VCF for that group.</i>\n\n` +
+    `Sure?`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Yes, Cancel them", "ctc_fix_wrong_confirm")
+        .text("❌ No", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const data = ctcFixDataStore.get(userId);
+  if (!data || !data.groups.length) {
+    await ctx.editMessageText(
+      "⚠️ <b>Fix data expired</b>\n\nPlease run the CTC check again.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+    return;
+  }
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "❌ <b>WhatsApp not connected!</b>",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
+
+  const chatId = ctx.callbackQuery.message?.chat.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+  if (!chatId || !msgId) return;
+
+  // Clear so the user can't double-trigger by re-tapping
+  ctcFixDataStore.delete(userId);
+
+  await ctx.editMessageText(
+    `⏳ <b>Cancelling wrong pending requests...</b>`,
+    { parse_mode: "HTML" }
+  );
+
+  let totalRejected = 0;
+  let totalAttempted = 0;
+  const perGroupReport: string[] = [];
+
+  for (let i = 0; i < data.groups.length; i++) {
+    const g = data.groups[i];
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Cancelling wrong pending...</b>\n\nGroup ${i + 1}/${data.groups.length}: <b>${esc(g.groupName)}</b>`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+
+    // Re-fetch live pending list right before rejecting so we don't act on
+    // stale data and accidentally reject someone who already got approved.
+    let pending: Array<{ jid: string; phone: string }> = [];
+    try {
+      pending = await getGroupPendingRequestsDetailed(String(userId), g.groupId);
+    } catch (err: any) {
+      perGroupReport.push(`• ${esc(g.groupName)} — failed: ${esc(err?.message || "fetch error")}`);
+      continue;
+    }
+
+    const wrongJids: string[] = [];
+    for (const p of pending) {
+      const last10 = p.phone.replace(/[^0-9]/g, "").slice(-10);
+      // If we couldn't resolve a phone (rare, @lid edge case), skip — too
+      // risky to reject without confirming the contact identity.
+      if (!last10 || last10.length < 7) continue;
+      if (!g.vcfLast10Set.has(last10)) wrongJids.push(p.jid);
+    }
+
+    if (!wrongJids.length) {
+      perGroupReport.push(`• ${esc(g.groupName)} — nothing to reject`);
+      continue;
+    }
+
+    totalAttempted += wrongJids.length;
+    const rejected = await rejectGroupParticipantsBulk(String(userId), g.groupId, wrongJids);
+    totalRejected += rejected;
+    perGroupReport.push(`• ${esc(g.groupName)} — <b>${rejected}</b>/${wrongJids.length} cancelled`);
+  }
+
+  const finalText =
+    `✅ <b>Wrong Pending Fixed</b>\n\n` +
+    `Cancelled: <b>${totalRejected}</b> / ${totalAttempted}\n\n` +
+    perGroupReport.join("\n");
+
+  const chunks = splitMessage(finalText, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1
+        ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+        : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1
+        ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+        : undefined,
+    });
+  }
+}); 
 
 // ─── Get Link ────────────────────────────────────────────────────────────────
 
