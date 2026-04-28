@@ -316,7 +316,30 @@ const inflight = new Map<string, Promise<string>>();
 // Per-string negative cache: when one specific string fails, mark it as
 // "skip for N ms" so re-renders of the same screen don't keep paying the
 // retry cost. Cleared on a successful retranslation.
+//
+// LEAK FIX: this map used to grow forever. Every unique string that ever
+// failed to translate left an entry behind, even after the entry expired,
+// because we only delete on a re-translate of the SAME key. On a long-
+// running bot with lots of unique error messages / dynamic strings this
+// was visible as steady RSS growth with uptime. We now sweep expired
+// entries on a 10-min cadence and hard-cap the map at 5000 keys (drop
+// oldest) so the worst case stays bounded.
 const negCacheUntil = new Map<string, number>();
+const NEG_CACHE_MAX = 5000;
+const NEG_CACHE_SWEEP_MS = 10 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, until] of negCacheUntil) {
+    if (until <= now) negCacheUntil.delete(k);
+  }
+  // Hard cap fallback: if expired sweep wasn't enough (high churn), evict
+  // oldest insertion-order entries until under the cap.
+  while (negCacheUntil.size > NEG_CACHE_MAX) {
+    const oldest = negCacheUntil.keys().next().value;
+    if (!oldest) break;
+    negCacheUntil.delete(oldest);
+  }
+}, NEG_CACHE_SWEEP_MS);
 
 export async function translate(text: string, lang: Language): Promise<string> {
   if (!text || lang === "default") return text;

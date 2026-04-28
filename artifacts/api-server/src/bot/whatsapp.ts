@@ -50,13 +50,9 @@ const sessions: Map<string, WhatsAppSession> = new Map();
 // within budget we close ("evict") sockets that haven't been used for a
 // while and lazy-restore them when the user comes back. The session metadata
 // stays in MongoDB, so reconnect just reuses existing creds — no re-pairing.
-//
-// Defaults are tuned conservatively for a 512MB host where each Baileys
-// socket + signal key cache holds ~20-40MB live. If you're on a bigger box
-// override via WA_IDLE_EVICT_MS / WA_MAX_LIVE_SESSIONS / WA_MEMORY_PRESSURE_MB.
-const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 10 * 60 * 1000); // 10 min
-const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 6);
-const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 300);
+const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 30 * 60 * 1000); // 30 min
+const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 15);
+const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 380);
 
 export function markSessionActive(userId: string): void {
   const s = sessions.get(userId);

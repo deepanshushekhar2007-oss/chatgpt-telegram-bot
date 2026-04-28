@@ -1210,11 +1210,9 @@ interface QrPairingState {
 
 const qrPairings: Map<number, QrPairingState> = new Map();
 
-// Cleanup interval (5 min) — keeps RAM footprint tight on low-memory hosts
-// (Render free 512MB) when 500-1000 concurrent users are connected. Was
-// 15 min earlier, but on a 512MB host idle state can pile up quickly so we
-// run cleanup more often now.
-const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(5 * 60 * 1000));
+// Cleanup interval (15 min) — keeps RAM footprint tight on low-memory hosts
+// (Render free 512MB) when 500-1000 concurrent users are connected.
+const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(15 * 60 * 1000));
 // Drop /help pagination state for users idle longer than this. Each entry
 // can hold ~10–20KB of HTML chunks; if 1000 users press /help we'd be
 // keeping 10–20MB live forever without this.
