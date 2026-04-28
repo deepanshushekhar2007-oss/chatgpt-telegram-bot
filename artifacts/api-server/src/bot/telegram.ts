@@ -4014,8 +4014,19 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
   if (duplicates.length > 0) {
     result += `🔁 <b>Duplicate Pending (${duplicates.length}):</b>\n`;
     const SHOW = 8;
+    // How many group names to print per phone before collapsing to "+N more".
+    // Most duplicates are in 2 groups; cap at 3 so the message stays under
+    // Telegram's 4096-char limit even when 8 duplicates each list groups.
+    const NAMES_PER_PHONE = 3;
     const slice = duplicates.slice(0, SHOW);
-    for (const d of slice) result += `   • ${esc(d.phone)} — in <b>${d.groups.length}</b> groups\n`;
+    for (const d of slice) {
+      result += `   • ${esc(d.phone)} — in <b>${d.groups.length}</b> groups:\n`;
+      const namesShown = d.groups.slice(0, NAMES_PER_PHONE);
+      for (const g of namesShown) result += `      ↳ ${esc(g)}\n`;
+      if (d.groups.length > NAMES_PER_PHONE) {
+        result += `      ↳ … +${d.groups.length - NAMES_PER_PHONE} more\n`;
+      }
+    }
     if (duplicates.length > SHOW) result += `   … +${duplicates.length - SHOW} more\n`;
     result += "\n";
   }
