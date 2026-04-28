@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startBot } from "./bot/telegram";
-import { restoreWhatsAppSessions, getActiveSessionUserIds, sweepIdleSessions } from "./bot/whatsapp";
+import { getActiveSessionUserIds, sweepIdleSessions } from "./bot/whatsapp";
 import { getMongoDb, closeMongoDb } from "./bot/mongodb";
 import { cleanupStaleSessions } from "./bot/mongo-auth-state";
 import https from "https";
@@ -148,11 +148,15 @@ async function main() {
 
   startBot();
 
-  // Fire-and-forget: WhatsApp sessions background mein restore karo. Iska
-  // result wait karne ki zaroorat nahi — bot already responsive hai.
-  void restoreWhatsAppSessions().catch((err: any) => {
-    console.error(`[WA][RESTORE] background restore failed:`, err?.message);
-  });
+  // NOTE: Startup pe koi WhatsApp session restore NAHI karte. Sab lazy hai —
+  // user /start karega tab uska WhatsApp connect hoga (showWhatsAppConnectingProgress
+  // → ensureSessionLoaded). 30 min idle ke baad sweepIdleSessions usse phir
+  // disconnect kar dega memory bachane ke liye. Wapas /start karne pe phir
+  // se connect ho jayega — creds MongoDB me safe hain, re-pairing nahi chahiye.
+  console.log(
+    `[INIT] Lazy mode active: WhatsApp sessions will connect on user /start ` +
+    `and auto-disconnect after ${Math.floor(30)} min idle.`
+  );
 }
 
 process.on("uncaughtException", (err: any) => {
