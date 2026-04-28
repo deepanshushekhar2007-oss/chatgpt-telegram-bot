@@ -799,6 +799,19 @@ export async function disconnectWhatsApp(userId: string): Promise<void> {
   clearSessionData(userId);
 }
 
+// Memory-only disconnect for the idle timer.
+// Closes the live Baileys socket so RAM is freed, but does NOT call
+// socket.logout() (which would unlink the device on WhatsApp servers)
+// and does NOT clear MongoDB creds. The next user interaction goes
+// through ensureSessionLoaded(), which silently restores the socket
+// from the saved Mongo creds — no re-pairing needed.
+export async function idleDisconnectWhatsApp(userId: string): Promise<void> {
+  const session = sessions.get(userId);
+  if (!session) return;
+  session.socketGenId = -1;
+  evictSessionSocket(userId, session);
+}
+
 export interface GroupResult {
   id: string;
   inviteCode: string;

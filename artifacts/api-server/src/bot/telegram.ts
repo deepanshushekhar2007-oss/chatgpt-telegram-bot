@@ -4,6 +4,7 @@ import {
   connectWhatsAppQr,
   isConnected,
   disconnectWhatsApp,
+  idleDisconnectWhatsApp,
   refreshWhatsAppSession,
   createWhatsAppGroup,
   applyGroupSettings,
@@ -1058,7 +1059,13 @@ setInterval(async () => {
       const idleFor = a ? Date.now() - a.lastActivityAt : Number.POSITIVE_INFINITY;
       if (idleFor < USER_IDLE_DISCONNECT_MS) continue;
       try {
-        await disconnectWhatsApp(uidStr);
+        // IMPORTANT: use idleDisconnectWhatsApp (memory-only eviction).
+        // disconnectWhatsApp() would call socket.logout() — which unlinks
+        // the device on WhatsApp servers — AND clear MongoDB creds, so
+        // the user would have to re-pair from scratch on next interaction.
+        // We only want to free RAM and let ensureSessionLoaded() silently
+        // restore the socket from saved creds when the user comes back.
+        await idleDisconnectWhatsApp(uidStr);
         if (a) a.idleDisconnected = true;
         else userActivity.set(uid, { lastActivityAt: Date.now() - USER_IDLE_DISCONNECT_MS, idleDisconnected: true });
         console.log(`[BOT] Idle disconnect for user ${uid} after ${Math.round(idleFor / 60000)} min`);
