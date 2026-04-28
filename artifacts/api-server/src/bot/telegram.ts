@@ -1537,10 +1537,12 @@ bot.callbackQuery("check_joined", async (ctx) => {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
     if (["member", "administrator", "creator"].includes(member.status)) {
       // ── Refer mode: start the 24h trial now that they've joined the
-      // channel (the trial is the user's first access window).
+      // channel (the trial is the user's first access window). Admin is
+      // skipped — admin already has unlimited access to everything, the
+      // trial UI would be misleading and noisy for them.
       const data = await loadBotData();
       let trialJustStarted: { expiresAt: number } | null = null;
-      if (data.referMode) {
+      if (data.referMode && !isAdmin(userId)) {
         const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
         if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
       }
@@ -1750,10 +1752,12 @@ bot.command("start", async (ctx) => {
 
   // ── Refer mode: ensure 24h trial exists for this user ────────────────
   // We start the trial AFTER the channel-join check passes, so users only
-  // get the trial when they actually have access to the bot.
+  // get the trial when they actually have access to the bot. Admin is
+  // skipped — admin already has unlimited access to everything, so the
+  // trial UI would be misleading and noisy for them.
   const dataNow = await loadBotData();
   let trialJustStarted: { expiresAt: number } | null = null;
-  if (dataNow.referMode) {
+  if (dataNow.referMode && !isAdmin(userId)) {
     const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
     if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
   }
