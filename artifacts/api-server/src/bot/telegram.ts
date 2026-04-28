@@ -53,6 +53,12 @@ import {
   trackUser as trackUserMongo,
   isUserBanned,
   hasUserAccess,
+  getUserAccessState,
+  ensureFreeTrial,
+  recordReferral,
+  setReferMode,
+  getReferralStats,
+  AccessState,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
@@ -77,7 +83,53 @@ const FORCE_SUB_CHANNEL = process.env["FORCE_SUB_CHANNEL"] || "";
 const OWNER_USERNAME = "@SPIDYWS";
 const BOT_DISPLAY_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
 
+// ── Referral mode tunables ───────────────────────────────────────────────────
+// Free trial length given to every new user when refer mode is ON. After it
+// expires, the user must either refer someone else or buy premium from the
+// owner. One referral grants exactly one extra day of access (stacking).
+const FREE_TRIAL_MS = 24 * 60 * 60 * 1000;
+const REFERRAL_REWARD_MS = 24 * 60 * 60 * 1000;
+
 const bot = new Bot(token || "placeholder");
+
+// Cached bot username for building referral deep links. Populated lazily on
+// first access so we don't have to await getMe() during startup.
+let cachedBotUsername: string | null = null;
+async function getBotUsername(): Promise<string> {
+  if (cachedBotUsername) return cachedBotUsername;
+  try {
+    const me = await bot.api.getMe();
+    cachedBotUsername = me.username || "";
+  } catch (err: any) {
+    console.error("[REFER] getMe failed:", err?.message);
+    cachedBotUsername = "";
+  }
+  return cachedBotUsername;
+}
+
+function buildReferLink(userId: number, botUsername: string): string {
+  // tg deep-link format: https://t.me/<bot>?start=ref_<userId>
+  return `https://t.me/${botUsername}?start=ref_${userId}`;
+}
+
+function formatRemaining(expiresAt: number): string {
+  const ms = expiresAt - Date.now();
+  if (ms <= 0) return "expired";
+  const totalMin = Math.floor(ms / 60000);
+  if (totalMin < 60) return `${totalMin} minute${totalMin === 1 ? "" : "s"}`;
+  const totalHrs = Math.floor(totalMin / 60);
+  if (totalHrs < 24) {
+    const mins = totalMin - totalHrs * 60;
+    return mins
+      ? `${totalHrs} hour${totalHrs === 1 ? "" : "s"} ${mins} min`
+      : `${totalHrs} hour${totalHrs === 1 ? "" : "s"}`;
+  }
+  const days = Math.floor(totalHrs / 24);
+  const hrs = totalHrs - days * 24;
+  return hrs
+    ? `${days} day${days === 1 ? "" : "s"} ${hrs} hour${hrs === 1 ? "" : "s"}`
+    : `${days} day${days === 1 ? "" : "s"}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // i18n API transformer: auto-translate every outgoing message + button label
@@ -298,6 +350,50 @@ bot.use(async (ctx, next) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Refer-mode gate for callback queries.
+//
+// When refer mode is ON and the user has run out of access (no admin grant,
+// no active 24h trial, no remaining referral days) every button press is
+// intercepted here and replaced with the "refer or buy premium" message.
+// Admin and the language / channel-join callbacks are exempted so the user
+// can always pick a language and confirm the channel join even if their
+// trial has just expired.
+// ─────────────────────────────────────────────────────────────────────────────
+const REFER_GATE_EXEMPT_PREFIXES = ["lang_", "force_sub_"];
+const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
+function isReferGateExempt(cbData: string): boolean {
+  if (REFER_GATE_EXEMPT_EXACT.has(cbData)) return true;
+  return REFER_GATE_EXEMPT_PREFIXES.some((p) => cbData.startsWith(p));
+}
+
+bot.use(async (ctx, next) => {
+  const cbData = ctx.callbackQuery?.data;
+  if (!cbData) return next();
+  const userId = ctx.from?.id;
+  if (typeof userId !== "number") return next();
+  if (isAdmin(userId)) return next();
+  if (isReferGateExempt(cbData)) return next();
+
+  const data = await loadBotData();
+  if (!data.referMode) return next();
+
+  const state = await getAccessState(userId);
+  if (state.kind !== "none") return next();
+
+  // Out of access — block the button and surface the refer-required UI.
+  try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: false }); } catch {}
+  const { text, keyboard } = await buildReferRequiredMessage(userId);
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch {
+    try {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {}
+  }
+  // Stop here — do NOT call next(), the original handler must not run.
+});
+
 type TelegramButtonStyle = "primary" | "success" | "danger";
 
 function getButtonStyle(text: string, callbackData?: string): TelegramButtonStyle {
@@ -462,6 +558,68 @@ async function isBanned(userId: number): Promise<boolean> {
 
 async function hasAccess(userId: number): Promise<boolean> {
   return hasUserAccess(userId, ADMIN_USER_ID);
+}
+
+async function getAccessState(userId: number): Promise<AccessState> {
+  return getUserAccessState(userId, ADMIN_USER_ID);
+}
+
+// Build the "your free time is over — refer or buy premium" reply that is
+// shown to users when refer mode is on and their trial + referral access
+// have both expired. The message includes the user's personal referral
+// deep link so they can share it directly. All copy is in English.
+async function buildReferRequiredMessage(userId: number): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
+}> {
+  const username = await getBotUsername();
+  const link = username ? buildReferLink(userId, username) : "";
+  const stats = await getReferralStats(userId);
+  const referredText = stats.totalReferred > 0
+    ? `\n👥 <b>Total people referred so far:</b> ${stats.totalReferred}`
+    : "";
+
+  const text =
+    `🔒 <b>Your free access has ended.</b>\n\n` +
+    `To keep using the bot you have two options:\n\n` +
+    `1️⃣ <b>Refer a friend</b> — every new person who starts the bot through your link gives you <b>1 day of free access</b>.\n` +
+    `2️⃣ <b>Don't want to refer?</b> Message ${OWNER_USERNAME} on Telegram to buy premium access.\n\n` +
+    `🔗 <b>Your personal referral link:</b>\n` +
+    (link ? `<code>${esc(link)}</code>` : `<i>(link unavailable, please try again later)</i>`) +
+    `${referredText}\n\n` +
+    `Share this link with friends — as soon as someone starts the bot through it, you'll get a notification and 1 extra day will be added to your access.`;
+
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  return { text, keyboard: kb };
+}
+
+// Send the refer-required message as a fresh reply (used for /start and
+// other text commands).
+async function sendReferRequired(ctx: any, userId: number): Promise<void> {
+  const { text, keyboard } = await buildReferRequiredMessage(userId);
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch (err: any) {
+    console.error("[REFER] sendReferRequired failed:", err?.message);
+  }
+}
+
+// Build the friendly "trial just started" notification used by /start
+// when refer mode is ON and we just created a 24h window for the user.
+function trialStartedMessage(expiresAt: number): string {
+  return (
+    `🎁 <b>Welcome! You've unlocked a 24-hour free trial.</b>\n\n` +
+    `For the next 24 hours you can use every feature of this bot — except <b>Auto Chat</b>, which still requires admin approval like before.\n\n` +
+    `⏰ <b>Trial ends in:</b> ${formatRemaining(expiresAt)}\n\n` +
+    `When the trial ends, you can either refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`
+  );
 }
 
 async function trackUser(userId: number): Promise<void> {
@@ -1309,10 +1467,38 @@ bot.callbackQuery("check_joined", async (ctx) => {
   try {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
     if (["member", "administrator", "creator"].includes(member.status)) {
+      // ── Refer mode: start the 24h trial now that they've joined the
+      // channel (the trial is the user's first access window).
+      const data = await loadBotData();
+      let trialJustStarted: { expiresAt: number } | null = null;
+      if (data.referMode) {
+        const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+        if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+      }
+
+      // Even in refer mode, if the user somehow has no access at all
+      // (e.g. trial already expired and no referral), surface the refer
+      // message instead of the menu.
+      if (!(await hasAccess(userId))) {
+        if (data.referMode) {
+          const { text, keyboard } = await buildReferRequiredMessage(userId);
+          await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        } else {
+          await ctx.editMessageText(
+            `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
+            { parse_mode: "HTML" }
+          );
+        }
+        return;
+      }
+
       await ctx.editMessageText(
         mainMenuText(userId, "welcome"),
         { parse_mode: "HTML", reply_markup: mainMenu(userId) }
       );
+      if (trialJustStarted) {
+        await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+      }
       return;
     }
   } catch {}
@@ -1441,6 +1627,14 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
   } catch {}
 }
 
+// Parse /start payload — supports plain "/start" and deep links such as
+// "/start ref_12345" used by the referral system.
+function parseStartPayload(text: string | undefined): string {
+  if (!text) return "";
+  const m = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
+  return (m?.[1] || "").trim();
+}
+
 bot.command("start", async (ctx) => {
   const userId = ctx.from!.id;
   await trackUser(userId);
@@ -1449,25 +1643,82 @@ bot.command("start", async (ctx) => {
     return;
   }
   if (!(await checkForceSub(ctx))) return;
+
+  // ── Referral payload handling ─────────────────────────────────────────
+  // If the user arrived through someone's referral link AND refer mode is
+  // currently ON AND the referrer is eligible to earn from this user, we
+  // record the referral, give the referrer +1 day, and notify them.
+  const payload = parseStartPayload(ctx.message?.text);
+  const refMatch = payload.match(/^ref_(\d+)$/i);
+  const referrerId = refMatch ? Number(refMatch[1]) : 0;
+  if (referrerId && Number.isFinite(referrerId)) {
+    const data = await loadBotData();
+    if (data.referMode) {
+      const result = await recordReferral(
+        userId, referrerId, REFERRAL_REWARD_MS, ADMIN_USER_ID
+      );
+      if (result.success && referrerId !== ADMIN_USER_ID) {
+        // Notify the referrer in their own chat — keeps them looped in
+        // and motivates more sharing. All copy in English.
+        const totalText = result.totalReferred
+          ? `\n👥 <b>Total people you've referred:</b> ${result.totalReferred}`
+          : "";
+        const remaining = result.referrerExpiresAt
+          ? `\n⏰ <b>Your access now lasts:</b> ${formatRemaining(result.referrerExpiresAt)}`
+          : "";
+        bot.api.sendMessage(
+          referrerId,
+          `🎉 <b>New referral!</b>\n\n` +
+          `User <code>${userId}</code> just started the bot through your link.\n\n` +
+          `✅ <b>You've earned 1 extra day of free access.</b>${remaining}${totalText}`,
+          { parse_mode: "HTML" }
+        ).catch((err: any) => {
+          console.error(`[REFER] Failed to notify referrer ${referrerId}:`, err?.message);
+        });
+      }
+    }
+  }
+
+  // ── Refer mode: ensure 24h trial exists for this user ────────────────
+  // We start the trial AFTER the channel-join check passes, so users only
+  // get the trial when they actually have access to the bot.
+  const dataNow = await loadBotData();
+  let trialJustStarted: { expiresAt: number } | null = null;
+  if (dataNow.referMode) {
+    const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+    if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+  }
+
   if (!(await hasAccess(userId))) {
-    await ctx.reply(
-      `🔒 <b>Subscription Required!</b>\n\n` +
-      `This bot requires a subscription to use.\n\n` +
-      `👤 Contact owner: <b>${OWNER_USERNAME}</b>\n` +
-      `📩 Ask admin for access.`,
-      { parse_mode: "HTML" }
-    );
+    // Two distinct messages depending on which mode is active.
+    if (dataNow.referMode) {
+      await sendReferRequired(ctx, userId);
+    } else {
+      await ctx.reply(
+        `🔒 <b>Subscription Required!</b>\n\n` +
+        `This bot requires a subscription to use.\n\n` +
+        `👤 Contact owner: <b>${OWNER_USERNAME}</b>\n` +
+        `📩 Ask admin for access.`,
+        { parse_mode: "HTML" }
+      );
+    }
     return;
   }
   userStates.delete(userId);
   // First-time users (no language set yet) → language picker first.
   if (!hasUserLang(userId)) {
     await sendLanguagePicker(ctx, true);
+    if (trialJustStarted) {
+      await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+    }
     return;
   }
   // Show live "connecting WhatsApp" progress bar before the menu, so users
   // immediately see the status of their saved WhatsApp session.
   await showWhatsAppConnectingProgress(ctx, userId);
+  if (trialJustStarted) {
+    await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+  }
   await ctx.reply(
     mainMenuText(userId, "welcome"),
     { parse_mode: "HTML", reply_markup: mainMenu(userId) }
@@ -2077,6 +2328,9 @@ bot.command("admin", async (ctx) => {
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
+    "🎁 <b>Refer Mode:</b>\n" +
+    "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
+    "🔴 <code>/refermode off</code> — Disable refer mode (back to normal)\n\n" +
     "🤖 <b>Auto Chat Controls:</b>\n" +
     "🟢 <code>/autochat on</code> — Auto Chat sabhi users ke liye ON\n" +
     "🔴 <code>/autochat off</code> — Auto Chat sabhi users ke liye OFF\n" +
@@ -2085,6 +2339,56 @@ bot.command("admin", async (ctx) => {
 
     { parse_mode: "HTML" }
   );
+});
+
+// ─── /refermode on|off ──────────────────────────────────────────────────────
+// Enables / disables the referral system globally. When ON:
+//   • Every new user gets a 24-hour free trial (all features except Auto
+//     Chat, which still follows /autochat + /accessautochat).
+//   • When the trial ends, the user is shown their personal refer link and
+//     is told they can earn 1 day per referred friend, or buy premium.
+//   • Admin-granted users (/access [id] [days]) are exempt from referral
+//     requirements.
+// When OFF, the bot reverts to the original behaviour — every user can use
+// every feature for free (subject to existing /access subscription mode if
+// admin enabled it separately).
+bot.command("refermode", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
+  if (arg !== "on" && arg !== "off") {
+    const data = await loadBotData();
+    await ctx.reply(
+      `🎁 <b>Refer Mode: ${data.referMode ? "ON 🟢" : "OFF 🔴"}</b>\n\n` +
+      `❓ <b>Usage:</b>\n` +
+      `<code>/refermode on</code> — Enable 24h trial + referral system\n` +
+      `<code>/refermode off</code> — Disable referrals (free for all again)\n\n` +
+      `<b>How it works when ON:</b>\n` +
+      `• New users get a 24-hour free trial after joining the channel\n` +
+      `• Auto Chat is still admin-controlled (unchanged)\n` +
+      `• When trial ends, users must refer friends (1 referral = 1 day) or buy premium from ${OWNER_USERNAME}\n` +
+      `• Each user can only be referred once (stored in MongoDB)\n` +
+      `• Users you grant access to with <code>/access [id] [days]</code> do NOT need to refer`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  await setReferMode(arg === "on");
+  if (arg === "on") {
+    await ctx.reply(
+      `🎁 <b>Refer Mode: ON 🟢</b>\n\n` +
+      `✅ New users will now get a 24-hour free trial (all features except Auto Chat).\n` +
+      `✅ When the trial ends, users will be asked to refer friends (1 referral = 1 day) or buy premium from ${OWNER_USERNAME}.\n\n` +
+      `💡 Users you grant access to with <code>/access [id] [days]</code> are exempt from referral requirements.`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.reply(
+      `🎁 <b>Refer Mode: OFF 🔴</b>\n\n` +
+      `✅ Referral system disabled. Bot behaves like before — all users can use every feature for free (subject to <code>/access on</code> subscription mode if enabled).\n\n` +
+      `📦 Existing trial / referral records are kept in the database; if you turn refer mode back on, leftover days will still count.`,
+      { parse_mode: "HTML" }
+    );
+  }
 });
 
 bot.command("autochat", async (ctx) => {
@@ -2153,6 +2457,43 @@ bot.command("access", async (ctx) => {
     await saveBotData(data);
     const exp = new Date(data.accessList[String(targetId)].expiresAt).toUTCString();
     await ctx.reply(`✅ <b>Access Granted!</b>\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
+
+    // Notify the user that admin has granted them access. Lists every
+    // feature that's unlocked so they know exactly what they got. Auto
+    // Chat is mentioned conditionally, depending on whether the user
+    // already has Auto Chat permission via /accessautochat (or global
+    // /autochat on).
+    const autoChatOn = data.autoChatEnabled === true
+      || (Array.isArray(data.autoChatAccessList) && data.autoChatAccessList.includes(targetId));
+    const features = [
+      "• ✅ Create Groups",
+      "• ✅ Join Groups",
+      "• ✅ CTC (Number) Checker",
+      "• ✅ Get Group Link",
+      "• ✅ Leave Group",
+      "• ✅ Remove Members",
+      "• ✅ Make Admin",
+      "• ✅ Pending Approvals",
+      "• ✅ Pending Members List",
+      "• ✅ Add Members",
+      "• ✅ Edit Group Settings",
+      autoChatOn
+        ? "• ✅ Auto Chat (already enabled for you)"
+        : "• ❌ Auto Chat (admin permission required separately — contact owner)",
+    ].join("\n");
+    bot.api.sendMessage(
+      targetId,
+      `🎉 <b>Premium Access Granted!</b>\n\n` +
+      `Admin has unlocked premium access on your account.\n\n` +
+      `📅 <b>Duration:</b> ${days} day${days === 1 ? "" : "s"}\n` +
+      `⏰ <b>Expires (UTC):</b> ${exp}\n\n` +
+      `🔓 <b>Features unlocked:</b>\n${features}\n\n` +
+      `💡 You don't need to refer anyone — refer mode does not apply to you while this access is active.\n\n` +
+      `Send /start to open the menu.`,
+      { parse_mode: "HTML" }
+    ).catch((err: any) => {
+      console.error(`[ACCESS] Failed to notify user ${targetId}:`, err?.message);
+    });
     return;
   }
   await ctx.reply("❓ Usage:\n/access on\n/access off\n/access [user_id] [days]");
@@ -7821,10 +8162,15 @@ bot.on("message:text", async (ctx) => {
     if (text.toLowerCase() === "start") {
       if (await isBanned(userId)) return;
       if (!(await hasAccess(userId))) {
-        await ctx.reply(
-          `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
-          { parse_mode: "HTML" }
-        );
+        const data = await loadBotData();
+        if (data.referMode) {
+          await sendReferRequired(ctx, userId);
+        } else {
+          await ctx.reply(
+            `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
+            { parse_mode: "HTML" }
+          );
+        }
         return;
       }
       await ctx.reply(
@@ -7832,6 +8178,16 @@ bot.on("message:text", async (ctx) => {
         { parse_mode: "HTML", reply_markup: mainMenu(userId) }
       );
       return;
+    }
+    // Block free-text interactions when refer mode is on and the user has
+    // no access — same UX as button presses.
+    const data = await loadBotData();
+    if (data.referMode && !isAdmin(userId)) {
+      const state2 = await getAccessState(userId);
+      if (state2.kind === "none") {
+        await sendReferRequired(ctx, userId);
+        return;
+      }
     }
     await ctx.reply("💬 Use /start to begin.", { reply_markup: mainMenu(userId) });
     return;
