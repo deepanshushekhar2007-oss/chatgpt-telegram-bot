@@ -1843,6 +1843,91 @@ bot.command("language", async (ctx) => {
   await sendLanguagePicker(ctx, false);
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// /myaccess — anyone can ask "what's my current access status?".
+//
+// Shows the user, in plain English, exactly which window is active for
+// them, when it expires, and their referral stats + personal link if
+// refer mode is on. Admin sees a special "unlimited access" line.
+// ─────────────────────────────────────────────────────────────────────────────
+bot.command("myaccess", async (ctx) => {
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) {
+    await ctx.reply("🚫 You are banned from using this bot.");
+    return;
+  }
+
+  const data = await loadBotData();
+  const state = await getUserAccessState(userId, ADMIN_USER_ID);
+  const stats = await getReferralStats(userId);
+  const username = await getBotUsername();
+  const link = username && !isAdmin(userId) ? buildReferLink(userId, username) : "";
+
+  let header = "";
+  switch (state.kind) {
+    case "admin":
+      header = `👑 <b>Admin</b> — unlimited access.`;
+      break;
+    case "admin_grant":
+      header =
+        `💎 <b>Premium access (granted by admin)</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "trial":
+      header =
+        `🎁 <b>Free 24-hour trial</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Ends (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "referral":
+      header =
+        `🤝 <b>Referral access</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "subscription_open":
+      header = `🆓 <b>Free for everyone right now</b> — the bot is open to all users.`;
+      break;
+    case "none":
+      header =
+        `🔒 <b>No active access.</b>\n` +
+        `Refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`;
+      break;
+  }
+
+  // Referral stats are only meaningful for non-admin users when refer
+  // mode is on (or has historical data).
+  let referralBlock = "";
+  if (!isAdmin(userId) && (data.referMode || stats.totalReferred > 0)) {
+    referralBlock =
+      `\n\n📊 <b>Your referral stats</b>\n` +
+      `👥 People you've referred: <b>${stats.totalReferred}</b>\n` +
+      (link ? `🔗 Your referral link:\n<code>${esc(link)}</code>\n` : ``) +
+      `<i>Each new person who starts the bot through your link gives you 1 extra day of free access.</i>`;
+  }
+
+  const text = `${header}${referralBlock}`;
+
+  // Add a "Share my link" button when we have a link to share.
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  if (state.kind === "none" || state.kind === "trial" || state.kind === "referral") {
+    kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  }
+
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: kb,
+  });
+});
+
 async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
   const userId = ctx.from.id;
   await ctx.answerCallbackQuery();
