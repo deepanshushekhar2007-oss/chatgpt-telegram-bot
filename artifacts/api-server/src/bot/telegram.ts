@@ -905,6 +905,11 @@ interface UserState {
   step: string;
   groupSettings?: GroupSettings;
   groupCreationCancel?: boolean;
+  // True while the cancel-confirmation dialog ("Are you sure?") is shown to
+  // the user. The background creation loop must NOT edit the message while
+  // this flag is on, otherwise the dialog gets overwritten by the next
+  // progress update and the user can never tap "Yes, Cancel".
+  groupCreationCancelPending?: boolean;
   ctcData?: {
     groupLinks: string[];
     pairs: CtcPair[];
@@ -3903,6 +3908,10 @@ bot.callbackQuery("group_create_start", async (ctx) => {
 bot.callbackQuery("group_cancel_creation", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
+  // Set the "pending" flag immediately so the background loop's next
+  // progress update doesn't overwrite the confirmation dialog.
+  const state = userStates.get(userId);
+  if (state) state.groupCreationCancelPending = true;
   await ctx.editMessageText(
     "⚠️ <b>Cancel Group Creation?</b>\n\nGroups already created will remain. Only remaining groups won't be created.\n\nAre you sure?",
     {
@@ -3920,6 +3929,11 @@ bot.callbackQuery("group_cancel_confirm", async (ctx) => {
   const state = userStates.get(userId);
   if (state) {
     state.groupCreationCancel = true;
+    // Keep the pending flag set as well — we don't want the background
+    // loop to overwrite the "cancelled" message with a stale progress
+    // update from a group that was already mid-creation when the user
+    // confirmed. The background loop checks both flags before editing.
+    state.groupCreationCancelPending = true;
   }
   await ctx.editMessageText(
     "🛑 <b>Group creation cancelled.</b>\n\nGroups already created will remain.",
@@ -3929,6 +3943,18 @@ bot.callbackQuery("group_cancel_confirm", async (ctx) => {
 
 bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (state) state.groupCreationCancelPending = false;
+  // The background loop will resume editing on its next iteration. To
+  // restore the progress UI immediately (instead of leaving the "Are you
+  // sure?" dialog visible until the next group finishes), put back the
+  // "❌ Cancel Creation" button now.
+  try {
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation"),
+    });
+  } catch {}
 });
 
 async function createGroupsBackground(userId: string, numericUserId: number, gs: GroupSettings, chatId: number, msgId: number) {
@@ -4010,12 +4036,33 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
 
     const done = i + 1;
     const lines = results.map((r) => r.link ? `✅ ${esc(r.name)}` : `❌ ${esc(r.name)}`).join("\n");
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Creating Groups: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
-        { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation") : undefined }
-      );
-    } catch {}
+
+    // Re-read state right before editing — if the user has just cancelled
+    // (or is mid-confirmation), DO NOT overwrite the cancel/dialog screen
+    // with a stale progress update. Without this guard, a group that was
+    // already in flight when the user tapped Cancel would push the
+    // "Creating Groups: X/Y..." UI back on screen and make it look like
+    // the cancel didn't work.
+    const stateNow = userStates.get(numericUserId);
+    const skipEdit = !!(stateNow?.groupCreationCancel || stateNow?.groupCreationCancelPending);
+    if (!skipEdit) {
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Creating Groups: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
+          { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation") : undefined }
+        );
+      } catch {}
+    }
+
+    // If cancel was confirmed during this iteration, mark the remaining
+    // groups as cancelled and break out — the final summary will be sent
+    // by the post-loop block below.
+    if (stateNow?.groupCreationCancel) {
+      for (let j = i + 1; j < total; j++) {
+        results.push({ name: gs.finalNames[j], link: null, error: "Cancelled by user" });
+      }
+      break;
+    }
 
     if (i < total - 1) await new Promise((r) => setTimeout(r, 4000));
   }
