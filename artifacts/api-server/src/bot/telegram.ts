@@ -1210,6 +1210,31 @@ const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
 const removeMembersCancelRequests: Set<number> = new Set();
 
+// ── Cancel-dialog protection ────────────────────────────────────────────────
+// When a user taps a "❌ Cancel" button on a long-running flow, the bot shows
+// an "Are you sure?" confirmation by changing only the inline keyboard. The
+// underlying message text is still the in-progress status. Without protection
+// the next progress update from the background task would call
+// editMessageText(...) with a fresh "❌ Cancel" reply_markup — which wipes
+// the Yes/No dialog the user is staring at and makes it look like cancel
+// silently failed. This Set tracks "cancel dialog currently open for this
+// user". Background tasks check it with safeBackgroundEdit() below and skip
+// the edit until the dialog is dismissed (No) or confirmed (Yes).
+const cancelDialogActiveFor: Set<number> = new Set();
+
+async function safeBackgroundEdit(
+  userId: number,
+  chatId: number,
+  msgId: number,
+  text: string,
+  options?: any,
+): Promise<void> {
+  if (cancelDialogActiveFor.has(userId)) return; // dialog open — don't clobber
+  try {
+    await bot.api.editMessageText(chatId, msgId, text, options);
+  } catch {}
+}
+
 let autoChatGlobalEnabled: boolean = true;
 const autoChatAccessSet: Set<number> = new Set();
 
@@ -4138,6 +4163,7 @@ bot.callbackQuery("join_groups", async (ctx) => {
 
 bot.callbackQuery("join_cancel_request", async (ctx) => {
   await ctx.answerCallbackQuery();
+  cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
       .text("✅ Yes, Stop Joining", "join_cancel_confirm")
@@ -4148,6 +4174,7 @@ bot.callbackQuery("join_cancel_request", async (ctx) => {
 bot.callbackQuery("join_cancel_no", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Joining continued" });
   const userId = ctx.from.id;
+  cancelDialogActiveFor.delete(userId);
   if (joinCancelRequests.has(userId)) return;
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request"),
@@ -4157,6 +4184,9 @@ bot.callbackQuery("join_cancel_no", async (ctx) => {
 bot.callbackQuery("join_cancel_confirm", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Stopping after current group..." });
   joinCancelRequests.add(ctx.from.id);
+  // Keep the dialog flag on so the in-flight progress edit doesn't pop
+  // the "❌ Cancel" button back. The background task clears the flag in
+  // its finally cleanup.
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
@@ -4742,6 +4772,7 @@ bot.callbackQuery("gl_all", async (ctx) => {
 });
 
 bot.callbackQuery("gl_cancel_request", async (ctx) => {
+  cancelDialogActiveFor.add(ctx.from.id);
   await ctx.answerCallbackQuery();
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -4751,6 +4782,7 @@ bot.callbackQuery("gl_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("gl_cancel_no", async (ctx) => {
+  cancelDialogActiveFor.delete(ctx.from.id);
   await ctx.answerCallbackQuery({ text: "Fetching continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request"),
@@ -4893,6 +4925,9 @@ async function fetchGroupLinksBackground(
   let consecutiveFailures = 0;
 
   const updateProgress = async (extra?: string) => {
+    // Skip if user is currently looking at the cancel-confirm dialog —
+    // overwriting would wipe the Yes/No buttons and look like cancel failed.
+    if (cancelDialogActiveFor.has(Number(userId))) return;
     try {
       const label = mode === "similar" ? `Fetching links for "${esc(patternBase!)}" groups` : "Fetching all group links";
       await bot.api.editMessageText(chatId, msgId,
@@ -4941,6 +4976,7 @@ async function fetchGroupLinksBackground(
 
   const wasCancelled = getLinkCancelRequests.has(Number(userId));
   getLinkCancelRequests.delete(Number(userId));
+  cancelDialogActiveFor.delete(Number(userId));
 
   // If there are pending (failed) links and the user didn't cancel,
   // store the retry state so the "🔄 Retry Pending" button has data
@@ -5413,6 +5449,7 @@ bot.callbackQuery("rm_skip_exclude", async (ctx) => {
 
 bot.callbackQuery("rm_cancel_request", async (ctx) => {
   await ctx.answerCallbackQuery();
+  cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
       .text("✅ Yes, Stop Removing", "rm_cancel_confirm")
@@ -5421,6 +5458,7 @@ bot.callbackQuery("rm_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("rm_cancel_no", async (ctx) => {
+  cancelDialogActiveFor.delete(ctx.from.id);
   await ctx.answerCallbackQuery({ text: "Removing continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "rm_cancel_request"),
@@ -5430,6 +5468,9 @@ bot.callbackQuery("rm_cancel_no", async (ctx) => {
 bot.callbackQuery("rm_cancel_confirm", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
   removeMembersCancelRequests.add(ctx.from.id);
+  // Keep the dialog flag on; it gets cleared in the background task's
+  // finally cleanup so the in-flight progress edit can't pop the
+  // "❌ Cancel" button back.
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
@@ -5546,14 +5587,15 @@ async function removeAllGroupMembersBackground(
 
       // Update progress every 5 removals
       if (pi % 5 === 0 || pi === nonAdmins.length - 1) {
-        try {
-          if (msgId) {
+        // Skip overwrite if user is staring at the cancel-confirm dialog.
+        if (msgId && !cancelDialogActiveFor.has(Number(userId))) {
+          try {
             await bot.api.editMessageText(chatId, msgId,
               `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n🗑️ Removing: ${pi + 1}/${nonAdmins.length}\n✅ Removed: ${removed} | ❌ Failed: ${failed}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rm_cancel_request") }
             );
-          }
-        } catch {}
+          } catch {}
+        }
       }
 
       await new Promise((r) => setTimeout(r, 500));
@@ -5566,6 +5608,7 @@ async function removeAllGroupMembersBackground(
 
   const wasCancelled = removeMembersCancelRequests.has(Number(userId));
   removeMembersCancelRequests.delete(Number(userId));
+  cancelDialogActiveFor.delete(Number(userId));
 
   if (wasCancelled) fullResult += `⛔ <b>Stopped by user.</b>\n\n`;
   fullResult += `━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing group(s)!</b>`;
@@ -9512,15 +9555,20 @@ bot.on("message:text", async (ctx) => {
         const res = await joinGroupWithLink(String(userId), cleanLinks[ji]);
         const line = res.success ? `✅ Joined Group: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(res.error || "Unknown")}`;
         results.push(line);
-        try {
-          await bot.api.editMessageText(joinChatId, joinMsgId,
-            `⏳ <b>Joining: ${ji + 1}/${cleanLinks.length}</b>\n\n${results.join("\n")}`,
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
-          );
-        } catch {}
+        // Skip overwrite if user is staring at the cancel-confirm dialog —
+        // otherwise the Yes/No buttons get wiped and cancel looks broken.
+        if (!cancelDialogActiveFor.has(userId)) {
+          try {
+            await bot.api.editMessageText(joinChatId, joinMsgId,
+              `⏳ <b>Joining: ${ji + 1}/${cleanLinks.length}</b>\n\n${results.join("\n")}`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
+            );
+          } catch {}
+        }
         if (ji < cleanLinks.length - 1) await new Promise((r) => setTimeout(r, 1500));
       }
       joinCancelRequests.delete(userId);
+      cancelDialogActiveFor.delete(userId);
       result += results.join("\n");
       if (cancelled) result += "\n\n⛔ <b>Joining stopped by user.</b>";
       try {
