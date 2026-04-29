@@ -131,18 +131,33 @@ async function main() {
       }
     }, 60 * 1000);
 
-    // Har 5 minute mein GC chalao memory free karne ke liye + heap usage log
+    // Har 5 minute mein GC chalao memory free karne ke liye + heap usage log.
+    // Double-pass: first gc() catches dead old-gen objects, second pass after
+    // a 50ms gap catches anything promoted during the first sweep AND lets
+    // glibc malloc (capped to 2 arenas via MALLOC_ARENA_MAX=2 in the start
+    // script) actually return freed pages to the OS. Without these two pieces
+    // RSS climbs slowly with uptime even when the JS heap is flat — that's
+    // the textbook Linux Node.js "memory creep".
     const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(0)}MB`;
     setInterval(() => {
       const before = process.memoryUsage();
       if (typeof (global as any).gc === "function") {
-        (global as any).gc();
+        try { (global as any).gc(); } catch {}
+        setTimeout(() => {
+          try { (global as any).gc(); } catch {}
+          const after = process.memoryUsage();
+          console.log(
+            `[MEM] rss=${fmtMb(after.rss)} heap=${fmtMb(after.heapUsed)}/${fmtMb(after.heapTotal)} ` +
+            `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
+          );
+        }, 50);
+      } else {
+        const after = process.memoryUsage();
+        console.log(
+          `[MEM] rss=${fmtMb(after.rss)} heap=${fmtMb(after.heapUsed)}/${fmtMb(after.heapTotal)} ` +
+          `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
+        );
       }
-      const after = process.memoryUsage();
-      console.log(
-        `[MEM] rss=${fmtMb(after.rss)} heap=${fmtMb(after.heapUsed)}/${fmtMb(after.heapTotal)} ` +
-        `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
-      );
     }, 5 * 60 * 1000);
 
     // ─── Memory watchdog ────────────────────────────────────────────────────

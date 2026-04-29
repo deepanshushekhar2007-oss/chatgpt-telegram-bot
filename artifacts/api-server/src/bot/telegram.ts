@@ -1286,8 +1286,17 @@ setInterval(() => {
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
   removeMembersCancelRequests.clear();
+  // Double-pass GC with a small wait between passes. A single gc() leaves
+  // partially-promoted objects in the old generation; doing a second pass
+  // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
+  // we've capped to 2 arenas via MALLOC_ARENA_MAX=2) a chance to actually
+  // return freed pages to the OS — which is what makes RSS visibly drop
+  // instead of climbing forever as uptime grows.
   if (typeof (global as any).gc === "function") {
-    (global as any).gc();
+    try { (global as any).gc(); } catch {}
+    setTimeout(() => {
+      try { (global as any).gc(); } catch {}
+    }, 50);
   }
   const mem = process.memoryUsage();
   const rssMb = Math.round(mem.rss / 1024 / 1024);
