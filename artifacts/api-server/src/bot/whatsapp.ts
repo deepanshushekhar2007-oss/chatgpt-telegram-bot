@@ -65,6 +65,30 @@ export function markSessionActive(userId: string): void {
   if (s) s.lastActivityAt = Date.now();
 }
 
+// Internal: same as `sessions.get(userId)` but ALSO bumps the session's
+// last-activity timestamp. EVERY exported WhatsApp helper that uses the
+// socket goes through this so that real socket usage (fetching a link,
+// adding members, leaving a group, sending a message, etc.) counts as
+// activity. Without this the 30-minute idle eviction sweep evicts the
+// session even while the user is actively using the bot — because the
+// bumps were only happening on session restore / isConnected() checks,
+// not on the actual socket calls.
+function useSession(userId: string): WhatsAppSession | undefined {
+  const s = sessions.get(userId);
+  if (s) s.lastActivityAt = Date.now();
+  return s;
+}
+
+// Sessions that have been bumped within this window are considered
+// "actively in use" and are protected from memory-pressure LRU eviction.
+// This prevents the situation where heavy concurrent usage briefly
+// pushes RSS over the threshold and the sweep accidentally kills the
+// user who is RIGHT NOW pressing buttons. The 30-minute idle eviction
+// (pass 1 of the sweep) is unaffected — it only fires when the session
+// has been idle past IDLE_EVICTION_MS, so an actively-used session
+// already gets skipped there.
+const ACTIVE_SESSION_PROTECTION_MS = 60 * 1000;
+
 function evictSessionSocket(userId: string, session: WhatsAppSession): void {
   // Close the underlying socket but keep the session record so isConnected()
   // reports false, the user sees "WhatsApp not connected", and lazy restore
@@ -94,12 +118,19 @@ export function sweepIdleSessions(): { evicted: number; total: number } {
 
   // 2. If we're still over the live-session cap or under memory pressure,
   //    evict least-recently-used sessions until we're back in budget.
+  //    IMPORTANT: sessions that were active within the last
+  //    ACTIVE_SESSION_PROTECTION_MS window are excluded from this LRU
+  //    eviction — they belong to users who are right now pressing
+  //    buttons, and killing them would cause the exact "WhatsApp
+  //    disconnected mid-use" bug we're trying to prevent. Idle
+  //    sessions still get cleaned up; only ACTIVE ones are protected.
   const rssMb = process.memoryUsage().rss / 1024 / 1024;
   const overCap = sessions.size > MAX_LIVE_SESSIONS;
   const memoryHigh = rssMb > MEMORY_PRESSURE_RSS_MB;
   if (overCap || memoryHigh) {
+    const protectionCutoff = now - ACTIVE_SESSION_PROTECTION_MS;
     const candidates = [...sessions.entries()]
-      .filter(([, s]) => !s.connectLock)
+      .filter(([, s]) => !s.connectLock && s.lastActivityAt < protectionCutoff)
       .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
     while (
       candidates.length > 0 &&
@@ -793,7 +824,7 @@ export async function refreshWhatsAppSession(
 }
 
 export async function disconnectWhatsApp(userId: string): Promise<void> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (session) {
     session.socketGenId = -1;
     if (session.socket) {
@@ -812,7 +843,7 @@ export async function disconnectWhatsApp(userId: string): Promise<void> {
 // through ensureSessionLoaded(), which silently restores the socket
 // from the saved Mongo creds — no re-pairing needed.
 export async function idleDisconnectWhatsApp(userId: string): Promise<void> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session) return;
   session.socketGenId = -1;
   evictSessionSocket(userId, session);
@@ -830,7 +861,7 @@ export async function createWhatsAppGroup(
   groupName: string,
   participants: string[] = []
 ): Promise<GroupResult | null> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
 
   // Clean numbers (digits only) and build raw JIDs.
@@ -946,7 +977,7 @@ export async function applyGroupSettings(
   perms: GroupPermissions,
   description: string
 ): Promise<void> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return;
   const sock = session.socket;
 
@@ -976,7 +1007,7 @@ export async function setGroupDisappearingMessages(
   groupId: string,
   duration: number
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupToggleEphemeral(groupId, duration);
@@ -992,7 +1023,7 @@ export async function setGroupIcon(
   groupId: string,
   imageBuffer: Buffer
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.updateProfilePicture(groupId, imageBuffer);
@@ -1016,7 +1047,7 @@ export async function joinGroupWithLink(
   userId: string,
   link: string
 ): Promise<{ success: boolean; groupName?: string; error?: string }> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
   }
@@ -1047,7 +1078,7 @@ export async function getGroupPendingRequests(
   userId: string,
   groupId: string
 ): Promise<string[]> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const requests = await session.socket.groupRequestParticipantsList(groupId);
@@ -1064,7 +1095,7 @@ export async function getGroupPendingRequestsJids(
   userId: string,
   groupId: string
 ): Promise<string[]> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const requests = await session.socket.groupRequestParticipantsList(groupId);
@@ -1091,7 +1122,7 @@ export async function getGroupPendingRequestsDetailed(
   userId: string,
   groupId: string
 ): Promise<Array<{ jid: string; phone: string }>> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const requests = await session.socket.groupRequestParticipantsList(groupId);
@@ -1147,7 +1178,7 @@ export async function checkContactsInGroup(
   groupId: string,
   phoneNumbers: string[]
 ): Promise<{ inMembers: string[]; inPending: string[]; notFound: string[]; pendingAvailable: boolean; allMemberPhones: Set<string>; allPendingPhones: Set<string> }> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return { inMembers: [], inPending: [], notFound: phoneNumbers, pendingAvailable: false, allMemberPhones: new Set(), allPendingPhones: new Set() };
   }
@@ -1237,7 +1268,7 @@ export async function getGroupIdFromLink(
   userId: string,
   inviteLink: string
 ): Promise<{ id: string; subject: string } | null> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
   try {
     const code = extractInviteCode(inviteLink);
@@ -1262,7 +1293,7 @@ function normalizeJid(jid: string): string {
 }
 
 export async function getAllGroups(userId: string): Promise<GroupInfo[]> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const groups = await session.socket.groupFetchAllParticipating();
@@ -1327,7 +1358,7 @@ function isFatalInviteError(err: any): boolean {
 }
 
 export async function getGroupInviteLink(userId: string, groupId: string, maxRetries: number = 5): Promise<string | null> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
 
   // Exponential backoff: 1.5s, 3s, 5s, 8s, 12s. Total worst-case ~30s for 5
@@ -1372,7 +1403,7 @@ export async function getGroupInviteLink(userId: string, groupId: string, maxRet
 }
 
 export async function leaveGroup(userId: string, groupId: string): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupLeave(groupId);
@@ -1391,7 +1422,7 @@ export interface ParticipantInfo {
 }
 
 export async function getGroupParticipants(userId: string, groupId: string): Promise<ParticipantInfo[]> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const meta = await session.socket.groupMetadata(groupId);
@@ -1420,7 +1451,7 @@ export async function getGroupParticipants(userId: string, groupId: string): Pro
 export async function getGroupPendingList(
   userId: string
 ): Promise<Array<{ groupId: string; groupName: string; pendingCount: number }>> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
     const groups = await session.socket.groupFetchAllParticipating();
@@ -1483,7 +1514,7 @@ export async function removeGroupParticipant(
   groupId: string,
   participantJid: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupParticipantsUpdate(groupId, [participantJid], "remove");
@@ -1499,7 +1530,7 @@ export async function makeGroupAdmin(
   groupId: string,
   participantJid: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupParticipantsUpdate(groupId, [participantJid], "promote");
@@ -1515,7 +1546,7 @@ export async function approveGroupParticipant(
   groupId: string,
   participantJid: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupRequestParticipantsUpdate(groupId, [participantJid], "approve");
@@ -1533,7 +1564,7 @@ export async function rejectGroupParticipant(
   groupId: string,
   participantJid: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.groupRequestParticipantsUpdate(groupId, [participantJid], "reject");
@@ -1552,7 +1583,7 @@ export async function rejectGroupParticipantsBulk(
   groupId: string,
   participantJids: string[]
 ): Promise<number> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return 0;
   if (!participantJids.length) return 0;
   try {
@@ -1582,7 +1613,7 @@ export async function setGroupApprovalMode(
   groupId: string,
   mode: "on" | "off"
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await (session.socket as any).groupJoinApprovalMode(groupId, mode);
@@ -1616,7 +1647,7 @@ export async function addGroupParticipant(
   groupId: string,
   phoneNumber: string
 ): Promise<{ success: boolean; error?: string }> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
   }
@@ -1661,7 +1692,7 @@ export async function addGroupParticipantsBulk(
   groupId: string,
   phoneNumbers: string[]
 ): Promise<Array<{ phone: string; success: boolean; error?: string }>> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return phoneNumbers.map(p => ({ phone: p, success: false, error: "WhatsApp not connected" }));
   }
@@ -1770,7 +1801,7 @@ export async function isUserInGroup(
   userId: string,
   groupId: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     const groups = await session.socket.groupFetchAllParticipating();
@@ -1785,7 +1816,7 @@ export async function sendGroupMessage(
   groupId: string,
   text: string
 ): Promise<boolean> {
-  const session = sessions.get(userId);
+  const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
     await session.socket.sendMessage(groupId, { text });
