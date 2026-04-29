@@ -9152,7 +9152,7 @@ bot.on("message:text", async (ctx) => {
         return;
       }
     }
-    await ctx.reply("💬 Use /start to begin.", { reply_markup: mainMenu(userId) });
+    await ctx.reply("💬 Use /start to begin.");
     return;
   }
 
