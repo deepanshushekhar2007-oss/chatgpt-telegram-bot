@@ -1064,6 +1064,32 @@ export interface GroupPermissions {
   approveJoin: boolean;
 }
 
+// Rename a single group. Returns ok:true on success or ok:false with a
+// human-readable error string. Used by the "Change Group Name" feature.
+export async function setGroupName(
+  userId: string,
+  groupId: string,
+  newName: string
+): Promise<{ ok: boolean; error?: string }> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) {
+    return { ok: false, error: "WhatsApp not connected" };
+  }
+  const trimmed = (newName || "").trim();
+  if (!trimmed) return { ok: false, error: "Empty name" };
+  // WhatsApp's hard limit on group subject length is 25 characters in the
+  // official client. The server actually accepts a bit more, but to keep
+  // results predictable we cap here and surface a clean error instead of
+  // silently failing later.
+  if (trimmed.length > 100) return { ok: false, error: "Name too long (max 100 chars)" };
+  try {
+    await session.socket.groupUpdateSubject(groupId, trimmed);
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Unknown error" };
+  }
+}
+
 export async function applyGroupSettings(
   userId: string,
   groupId: string,
