@@ -1782,27 +1782,15 @@ bot.command("start", async (ctx) => {
   // applyLanguageSelection(), so the trial countdown only starts once the
   // user has actually entered the bot and the trial banner appears AFTER
   // the language is set (not bundled with the language picker).
-  const dataNow = await loadBotData();
+  //
+  // No access gate here. Per UX request, /start always shows the user the
+  // language picker (and then the menu). The "your free access has ended"
+  // / "subscription required" gate is enforced inside each feature handler
+  // — so a user without access will see all the buttons, but tapping any
+  // feature button will show the gate inside that feature. This avoids
+  // the confusing case where a user with an ACTIVE trial saw the
+  // access-ended message just because of a stale check on /start.
   if (!hasUserLang(userId)) {
-    // For brand-new users we still need to surface the access gate (refer
-    // required / subscription required) BEFORE the language picker, but we
-    // don't create the trial yet — that happens after language selection.
-    if (!isAdmin(userId) && !(await hasAccess(userId))) {
-      if (dataNow.referMode) {
-        await sendReferRequired(ctx, userId);
-      } else {
-        await ctx.reply(
-          `🔒 <b>Subscription Required!</b>\n\n` +
-          `This bot requires a subscription to use.\n\n` +
-          `👤 Contact owner: <b>${OWNER_USERNAME}</b>\n` +
-          `📩 Ask admin for access.`,
-          { parse_mode: "HTML" }
-        );
-        return;
-      }
-      // refer mode: still allow language pick first; trial will be created
-      // after language selection and the access check will run again then.
-    }
     userStates.delete(userId);
     await sendLanguagePicker(ctx, true);
     return;
@@ -1820,25 +1808,22 @@ bot.command("start", async (ctx) => {
     if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
   }
 
-  if (!(await hasAccess(userId))) {
-    // Two distinct messages depending on which mode is active.
-    if (dataNow.referMode) {
-      await sendReferRequired(ctx, userId);
-    } else {
-      await ctx.reply(
-        `🔒 <b>Subscription Required!</b>\n\n` +
-        `This bot requires a subscription to use.\n\n` +
-        `👤 Contact owner: <b>${OWNER_USERNAME}</b>\n` +
-        `📩 Ask admin for access.`,
-        { parse_mode: "HTML" }
-      );
-    }
-    return;
-  }
+  // No access gate here either. The gate lives inside each feature
+  // handler (see hasAccess() / sendReferRequired() call sites). This
+  // means /start always shows the menu with all buttons — even for
+  // users whose trial has expired. They see the gate only when they
+  // actually try to USE a feature.
   userStates.delete(userId);
-  // Show live "connecting WhatsApp" progress bar before the menu, so users
-  // immediately see the status of their saved WhatsApp session.
-  await showWhatsAppConnectingProgress(ctx, userId);
+
+  // Show live "connecting WhatsApp" progress bar before the menu, so
+  // users immediately see the status of their saved WhatsApp session.
+  // Skip this for users who have no access — for them WhatsApp is
+  // unusable until they renew, so spending time/RAM on a connection
+  // attempt is wasteful and could trigger needless reconnects.
+  const userHasAccess = isAdmin(userId) || (await hasAccess(userId));
+  if (userHasAccess) {
+    await showWhatsAppConnectingProgress(ctx, userId);
+  }
   if (trialJustStarted) {
     await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
   }
