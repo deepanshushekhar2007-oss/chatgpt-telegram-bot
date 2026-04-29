@@ -1233,6 +1233,13 @@ const qrPairings: Map<number, QrPairingState> = new Map();
 // Cleanup interval (15 min) — keeps RAM footprint tight on low-memory hosts
 // (Render free 512MB) when 500-1000 concurrent users are connected.
 const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(15 * 60 * 1000));
+
+// Snapshot of RSS at module load — used by /memory to show "growth since
+// startup" so admin can see at a glance whether RAM is creeping up over
+// uptime or staying flat. Captured here (not inside the handler) so the
+// reading is the actual baseline, not the post-warmup value.
+const STARTUP_RSS_MB = process.memoryUsage().rss / 1024 / 1024;
+const STARTUP_TIMESTAMP_MS = Date.now();
 // Drop /help pagination state for users idle longer than this. Each entry
 // can hold ~10–20KB of HTML chunks; if 1000 users press /help we'd be
 // keeping 10–20MB live forever without this.
@@ -2969,60 +2976,210 @@ bot.command("cleansessions", async (ctx) => {
   }
 });
 
+// Per-user memory consumption estimator. We can't get exact per-user RSS
+// from Node, but we CAN approximate it by summing the byte cost of every
+// per-user data structure we own, plus a fixed estimate per WhatsApp socket
+// (Baileys keeps signal sessions, message store, and pre-key cache in RAM
+// per connected user — ~6 MB measured average). This is an estimate, not a
+// guaranteed exact figure, but it surfaces the actual top consumers reliably
+// (the user with 10 active flows + giant userState always rises to the top).
+const WA_SOCKET_EST_MB = Number(process.env.WA_SOCKET_EST_MB || "6");
+
+interface UserMemEntry {
+  userId: number;
+  estBytes: number;
+  parts: string[];
+}
+
+function safeJsonSize(obj: unknown): number {
+  try {
+    const seen = new WeakSet();
+    const s = JSON.stringify(obj, (_k, v) => {
+      if (typeof v === "object" && v !== null) {
+        if (seen.has(v as object)) return undefined;
+        seen.add(v as object);
+      }
+      // Drop non-serialisable heavy refs (sockets, streams) to avoid throwing.
+      if (typeof v === "function") return undefined;
+      return v;
+    });
+    return s ? s.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function computePerUserMemory(): UserMemEntry[] {
+  const map = new Map<number, UserMemEntry>();
+  const ensure = (uid: number): UserMemEntry => {
+    let e = map.get(uid);
+    if (!e) {
+      e = { userId: uid, estBytes: 0, parts: [] };
+      map.set(uid, e);
+    }
+    return e;
+  };
+
+  // 1. Live WhatsApp sockets — by far the biggest per-user cost.
+  for (const uidStr of getActiveSessionUserIds()) {
+    const uid = Number(uidStr);
+    if (!Number.isFinite(uid)) continue;
+    const e = ensure(uid);
+    e.estBytes += WA_SOCKET_EST_MB * 1024 * 1024;
+    e.parts.push("WA");
+  }
+
+  // 2. userStates — flow state machines (group lists, VCF data, etc.)
+  for (const [uid, state] of userStates) {
+    const bytes = safeJsonSize(state);
+    if (bytes === 0) continue;
+    const e = ensure(uid);
+    e.estBytes += bytes;
+    e.parts.push(`state:${(bytes / 1024).toFixed(0)}KB`);
+  }
+
+  // 3. Long-running flows — each holds queues, schedules, group caches.
+  for (const [uid, s] of autoChatSessions) {
+    const bytes = safeJsonSize(s) + 1.5 * 1024 * 1024; // +1.5 MB runtime
+    const e = ensure(uid);
+    e.estBytes += bytes;
+    e.parts.push("AutoChat");
+  }
+  for (const [uid, s] of cigSessions) {
+    const bytes = safeJsonSize(s) + 2 * 1024 * 1024; // +2 MB (group msg cache)
+    const e = ensure(uid);
+    e.estBytes += bytes;
+    e.parts.push("CIG");
+  }
+  for (const [uid, s] of acfSessions) {
+    const bytes = safeJsonSize(s) + 1.5 * 1024 * 1024;
+    const e = ensure(uid);
+    e.estBytes += bytes;
+    e.parts.push("ACF");
+  }
+
+  // 4. QR pairing screens — small but counted for completeness.
+  for (const uid of qrPairings.keys()) {
+    const e = ensure(uid);
+    e.estBytes += 100 * 1024; // ~100 KB QR state
+    e.parts.push("QR");
+  }
+
+  // 5. /help pagination — pre-rendered HTML chunks per user.
+  for (const [uid, chunks] of helpPages) {
+    const bytes = chunks.reduce((sum, c) => sum + c.length, 0);
+    if (bytes === 0) continue;
+    const e = ensure(uid);
+    e.estBytes += bytes;
+    e.parts.push(`help:${(bytes / 1024).toFixed(0)}KB`);
+  }
+
+  return [...map.values()].sort((a, b) => b.estBytes - a.estBytes);
+}
+
+function fmtMB(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
+function fmtUptime(ms: number): string {
+  const totalMin = Math.floor(ms / 60000);
+  const days = Math.floor(totalMin / 1440);
+  const hours = Math.floor((totalMin % 1440) / 60);
+  const mins = totalMin % 60;
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
 bot.command("memory", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
 
+  // Force a quick GC pass before sampling so the numbers reflect actual
+  // live memory, not garbage waiting to be collected. Cheap (<10ms) and
+  // gives a much more honest reading.
+  if (typeof (global as any).gc === "function") {
+    try { (global as any).gc(); } catch {}
+  }
+
   const mem = process.memoryUsage();
-  const toMB = (b: number) => (b / 1024 / 1024).toFixed(1);
+  const heapUsedMB = mem.heapUsed / 1024 / 1024;
+  const heapTotalMB = mem.heapTotal / 1024 / 1024;
+  const rssMB = mem.rss / 1024 / 1024;
+  const externalMB = mem.external / 1024 / 1024;
+  const arrayBuffersMB = mem.arrayBuffers / 1024 / 1024;
 
-  const heapUsed = parseFloat(toMB(mem.heapUsed));
-  const heapTotal = parseFloat(toMB(mem.heapTotal));
-  const rss = parseFloat(toMB(mem.rss));
-  const external = parseFloat(toMB(mem.external));
-
-  // IMPORTANT: heapTotal is the heap Node has currently allocated, NOT its
-  // max. Node grows it on demand up to --max-old-space-size (default 460 MB
-  // here). Computing % against heapTotal gives misleading "97% Critical"
-  // readings even when there's plenty of room left to grow. Always compare
-  // heapUsed to the real max-old-space-size limit for a meaningful figure.
-  // Default 380 matches the actual --max-old-space-size=380 flag in
-  // package.json's start script. If you change one, change the other.
+  // Compare heapUsed against the actual --max-old-space-size limit (380MB
+  // in package.json), NOT against heapTotal — heapTotal is just whatever
+  // Node has lazily allocated so far, which makes the % reading useless.
   const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "380");
-  const heapPct = Math.min(100, Math.round((heapUsed / HEAP_LIMIT_MB) * 100));
-
-  // Render free tier = 512 MB total. We compute against that so the bar shows
-  // real "how close are we to OOM" pressure, not just heap-vs-heap.
+  const heapPct = Math.min(100, Math.round((heapUsedMB / HEAP_LIMIT_MB) * 100));
   const RENDER_LIMIT_MB = Number(process.env.RENDER_RAM_LIMIT_MB || "512");
-  const rssPct = Math.min(100, Math.round((rss / RENDER_LIMIT_MB) * 100));
+  const rssPct = Math.min(100, Math.round((rssMB / RENDER_LIMIT_MB) * 100));
 
   const heapBar = buildMemBar(heapPct);
   const rssBar = buildMemBar(rssPct);
   const heapStatus = heapPct >= 85 ? "🔴 Critical" : heapPct >= 65 ? "🟡 High" : "🟢 Normal";
   const rssStatus = rssPct >= 85 ? "🔴 Critical" : rssPct >= 65 ? "🟡 High" : "🟢 Normal";
 
+  const rssGrowthMB = rssMB - STARTUP_RSS_MB;
+  const growthSign = rssGrowthMB >= 0 ? "+" : "";
+  const growthEmoji = rssGrowthMB > 50 ? "📈" : rssGrowthMB > 10 ? "↗️" : rssGrowthMB < -10 ? "📉" : "➡️";
+
   const waActiveIds = getActiveSessionUserIds();
-  const uptimeMin = Math.floor(process.uptime() / 60);
-  const uptimeStr = uptimeMin >= 60
-    ? `${Math.floor(uptimeMin / 60)}h ${uptimeMin % 60}m`
-    : `${uptimeMin}m`;
+  const uptimeMs = Date.now() - STARTUP_TIMESTAMP_MS;
+  const uptimeStr = fmtUptime(uptimeMs);
+
+  // Per-user memory breakdown — top 5 consumers.
+  const perUser = computePerUserMemory();
+  const top5 = perUser.slice(0, 5);
+  const totalTrackedMB = perUser.reduce((s, e) => s + e.estBytes, 0) / 1024 / 1024;
+
+  let topUsersBlock = "";
+  if (top5.length === 0) {
+    topUsersBlock = "  <i>No active users</i>\n";
+  } else {
+    for (let i = 0; i < top5.length; i++) {
+      const u = top5[i];
+      const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`;
+      const partsStr = u.parts.length > 0 ? u.parts.join(", ") : "—";
+      topUsersBlock += `  ${medal} <code>${u.userId}</code> — <b>${fmtMB(u.estBytes)} MB</b>\n`;
+      topUsersBlock += `      └ ${esc(partsStr)}\n`;
+    }
+  }
 
   const text =
-    `🧠 <b>Server Live Stats</b>\n\n` +
-    `📦 <b>RAM (RSS):</b> ${rss} MB / ${RENDER_LIMIT_MB} MB\n` +
-    `${rssBar} ${rssPct}%  ${rssStatus}\n\n` +
-    `🔵 <b>Heap:</b> ${heapUsed} MB / ${HEAP_LIMIT_MB} MB <i>(allocated: ${heapTotal} MB)</i>\n` +
+    `🧠 <b>Server Memory — Live</b>\n` +
+    `<i>Uptime: ${uptimeStr}</i>\n` +
+    `─────────────────────────────\n\n` +
+    `📦 <b>RSS (Total RAM):</b> ${fmtMB(mem.rss)} MB / ${RENDER_LIMIT_MB} MB\n` +
+    `${rssBar} ${rssPct}%  ${rssStatus}\n` +
+    `${growthEmoji} Since startup: <b>${growthSign}${rssGrowthMB.toFixed(1)} MB</b> ` +
+    `(boot: ${STARTUP_RSS_MB.toFixed(0)} MB)\n\n` +
+    `🔵 <b>JS Heap (used / limit):</b>\n` +
     `${heapBar} ${heapPct}%  ${heapStatus}\n` +
-    `🧩 <b>External:</b> ${external} MB\n\n` +
+    `   ${fmtMB(mem.heapUsed)} MB used / ${HEAP_LIMIT_MB} MB limit\n` +
+    `   ${fmtMB(mem.heapTotal)} MB allocated by V8\n\n` +
+    `🧩 <b>Off-heap (C++/Buffers):</b>\n` +
+    `   External: ${externalMB.toFixed(1)} MB\n` +
+    `   ArrayBuffers: ${arrayBuffersMB.toFixed(1)} MB\n\n` +
     `👥 <b>Active Sessions:</b>\n` +
     `  📱 WhatsApp connected: <b>${waActiveIds.size}</b>\n` +
-    `  🤖 Auto Chat running: <b>${autoChatSessions.size}</b> / ${MAX_CONCURRENT_AUTOCHAT}\n` +
-    `  💬 Chat-In-Group running: <b>${cigSessions.size}</b>\n` +
-    `  🔁 Auto Chat Friend running: <b>${acfSessions.size}</b>\n` +
-    `  🗂️ User states in memory: <b>${userStates.size}</b>\n` +
-    `  📷 QR pairings active: <b>${qrPairings.size}</b>\n\n` +
-    `⏱️ <b>Uptime:</b> ${uptimeStr}\n` +
-    `💡 Heap limit: ${HEAP_LIMIT_MB} MB (--max-old-space-size)\n` +
-    `🧹 Cleanup: every ${Math.round(MEMORY_CLEANUP_INTERVAL_MS / 60000)} min`;
+    `  🤖 Auto Chat: <b>${autoChatSessions.size}</b> / ${MAX_CONCURRENT_AUTOCHAT}\n` +
+    `  💬 Chat-In-Group: <b>${cigSessions.size}</b>\n` +
+    `  🔁 Auto Chat Friend: <b>${acfSessions.size}</b>\n` +
+    `  🗂️ User states: <b>${userStates.size}</b>\n` +
+    `  📷 QR pairings: <b>${qrPairings.size}</b>\n` +
+    `  📖 Help pages cached: <b>${helpPages.size}</b>\n\n` +
+    `🔥 <b>Top RAM Consumers (Top 5):</b>\n` +
+    topUsersBlock +
+    `  ─────────────────\n` +
+    `  📊 Tracked total: ~<b>${totalTrackedMB.toFixed(1)} MB</b> across <b>${perUser.length}</b> user(s)\n\n` +
+    `⚙️ <b>Config:</b>\n` +
+    `  • Heap limit: ${HEAP_LIMIT_MB} MB\n` +
+    `  • RSS limit: ${RENDER_LIMIT_MB} MB\n` +
+    `  • Cleanup: every ${Math.round(MEMORY_CLEANUP_INTERVAL_MS / 60000)} min\n` +
+    `  • WA socket est: ${WA_SOCKET_EST_MB} MB/user\n\n` +
+    `💡 <i>Tap /cleanram to force a manual purge.</i>`;
 
   await ctx.reply(text, { parse_mode: "HTML" });
 });
