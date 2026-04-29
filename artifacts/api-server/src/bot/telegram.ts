@@ -316,26 +316,41 @@ bot.use(async (ctx, next) => {
 
         let connected = false;
         try {
+          // 60s timeout. WhatsApp Baileys cold reconnect on Render free
+          // tier (high latency, modest CPU) typically takes 15-45 sec
+          // including the WebSocket handshake, key exchange, and initial
+          // sync. The previous 30s cap was firing the timeout message
+          // even though the reconnect was ~5-10s away from completing,
+          // and by the time the user read the error the socket was
+          // already up — bumping to 60s catches those near-misses.
           connected = await waitForWhatsAppConnected(String(userId), {
-            timeoutMs: 30_000,
+            timeoutMs: 60_000,
             pollMs: 500,
           });
         } catch {}
 
         if (!connected) {
           // Timeout — let the user know and answer the spinner so it
-          // doesn't keep spinning on their tapped button.
+          // doesn't keep spinning on their tapped button. Note: the
+          // ORIGINAL inline keyboard is still attached to this message
+          // (we only ever edit text, never reply_markup), so the user
+          // can simply tap the SAME button again to retry — no need
+          // to /start over. The reconnect is also probably still
+          // happening in the background and will be done in a few
+          // more seconds.
           try {
             await ctx.answerCallbackQuery({
-              text: "❌ Reconnect failed. /start dabao aur dobara try karo.",
+              text: "⏳ Reconnect ho raha hai. 10-15 sec wait karke wahi button dobara dabao.",
               show_alert: true,
             });
           } catch {}
           if (statusEdited) {
             try {
               await ctx.editMessageText(
-                `❌ <b>WhatsApp reconnect timed out</b>\n\n` +
-                `<i>Server slow ho sakta hai. /start dabao aur dobara try karo.</i>`,
+                `⏳ <b>WhatsApp abhi connect ho raha hai</b>\n\n` +
+                `<i>Render free tier slow ho sakta hai. 10-15 second wait karo, ` +
+                `phir wahi button dobara dabao — tab tak background mein connect ho jayega.</i>\n\n` +
+                `<i>Agar baar baar ho to /start dabao.</i>`,
                 { parse_mode: "HTML" }
               );
             } catch {}
