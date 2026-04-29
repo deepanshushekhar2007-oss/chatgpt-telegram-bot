@@ -5339,6 +5339,7 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
   await ctx.editMessageText(
     `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}\n\n` +
     `📱 <b>Exclude Numbers</b>\n\n` +
+    `🛡️ <b>Admins hamesha safe rahenge</b> — unhe kabhi remove nahi karta, chahe aap exclude karo ya na karo.\n\n` +
     `Aap do tarah se exclude kar sakte ho (ek per line, dono mix bhi kar sakte ho):\n\n` +
     `1️⃣ <b>Pura number</b> — sirf wahi number exclude hoga.\n` +
     `   Example:\n   <code>+919912345678\n   +919998887777</code>\n\n` +
