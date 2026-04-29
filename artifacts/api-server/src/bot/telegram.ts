@@ -3064,6 +3064,56 @@ export interface MemoryPurgeResult {
   waTotal: number;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-user state purge — call this whenever a user disconnects WhatsApp so
+// their slice of every in-memory Map/Set is dropped right away. Without this,
+// even after disconnectWhatsApp() releases the Baileys socket, all the
+// follow-on per-user objects (state machines, activity timestamps, paginated
+// help pages, QR intervals, cancellation flags, auto-chat session objects)
+// keep their share of RAM until the next global purge — which is the bug the
+// user is seeing on their 512MB Render dyno.
+// ─────────────────────────────────────────────────────────────────────────────
+function clearUserMemoryState(telegramUserId: number): void {
+  // 1. State machine + transient form state
+  userStates.delete(telegramUserId);
+
+  // 2. Per-user activity / cooldown bookkeeping
+  userActivity.delete(telegramUserId);
+
+  // 3. /help paginated message buffers (can hold large translated strings)
+  helpPages.delete(telegramUserId);
+  helpPagesLastTouched.delete(telegramUserId);
+
+  // 4. QR pairing UI — interval refers to the (now stale) socket, must be cleared
+  const qr = qrPairings.get(telegramUserId);
+  if (qr?.interval) {
+    try { clearInterval(qr.interval); } catch {}
+  }
+  qrPairings.delete(telegramUserId);
+
+  // 5. Long-running auto-chat / chat-in-group / add-chat-friends sessions
+  const ac = autoChatSessions.get(telegramUserId);
+  if (ac) { ac.cancelled = true; ac.running = false; }
+  autoChatSessions.delete(telegramUserId);
+
+  const cig = cigSessions.get(telegramUserId);
+  if (cig) { (cig as any).cancelled = true; (cig as any).running = false; }
+  cigSessions.delete(telegramUserId);
+
+  const acf = acfSessions.get(telegramUserId);
+  if (acf) { (acf as any).cancelled = true; (acf as any).running = false; }
+  acfSessions.delete(telegramUserId);
+
+  // 6. One-shot cancellation flag sets
+  joinCancelRequests.delete(telegramUserId);
+  getLinkCancelRequests.delete(telegramUserId);
+  addMembersCancelRequests.delete(telegramUserId);
+  removeMembersCancelRequests.delete(telegramUserId);
+
+  // 7. New-session flag
+  newSessionFlag.delete(telegramUserId);
+}
+
 export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult> {
   const memBefore = process.memoryUsage();
   const rssBefore = memBefore.rss / 1024 / 1024;
@@ -4443,10 +4493,18 @@ const GL_BATCH_DELAY_MS = 800;
 // After a fetch failure, wait a little longer before the next group so we
 // don't pile up calls during a WhatsApp throttle window.
 const GL_AFTER_FAIL_DELAY_MS = 2500;
-// How long to wait before the manual retry pass — gives WA full cool-down.
-const GL_RETRY_PASS_PRE_DELAY_MS = 5000;
-// Spacing between retries during the manual retry pass.
-const GL_RETRY_PASS_DELAY_MS = 2000;
+// How long to wait before the manual retry pass — gives WA a brief cool-down.
+// Was 5s; lowered to 1.5s because the user had to sit and wait staring at a
+// blank "retrying..." screen before anything happened.
+const GL_RETRY_PASS_PRE_DELAY_MS = 1500;
+// Spacing between retries during the manual retry pass. Was 2s; lowered to
+// 600ms — the same pacing the initial fetch uses on success.
+const GL_RETRY_PASS_DELAY_MS = 600;
+// Per-group cap for the retry pass. The initial fetch already burned the
+// full 5-attempt budget on these groups; doing 5 more attempts each makes
+// the retry feel completely frozen (5×30s = 2.5 min for just 5 groups).
+// 2 quick attempts is plenty to catch a transient WA throttle window.
+const GL_RETRY_PER_GROUP_ATTEMPTS = 2;
 // How long we keep the per-user retry state in memory after the result
 // is sent. After this window the "🔄 Retry" button becomes a no-op
 // with a friendly "session expired" message.
@@ -4691,6 +4749,11 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
     return;
   }
 
+  // Reset any stale cancel flag from a previous run so the retry
+  // pass starts cleanly, and wire the cancel button onto progress.
+  getLinkCancelRequests.delete(userId);
+  const cancelKb = new InlineKeyboard().text("❌ Cancel", "gl_cancel_request");
+
   // Show a fresh progress message for the retry pass. We try to
   // edit the existing result message; if it's gone (deleted/too
   // old), send a new one and switch chatId/msgId to it for the
@@ -4701,37 +4764,73 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
     `🔄 <b>Retrying pending link(s)...</b>\n\n` +
     `📊 ${k}/${failedIndexes.length} retried`;
   try {
-    await bot.api.editMessageText(workChatId, workMsgId, retryProgress(0), { parse_mode: "HTML" });
+    await bot.api.editMessageText(workChatId, workMsgId, retryProgress(0), {
+      parse_mode: "HTML",
+      reply_markup: cancelKb,
+    });
   } catch {
     try {
-      const fresh = await ctx.reply(retryProgress(0), { parse_mode: "HTML" });
+      const fresh = await ctx.reply(retryProgress(0), {
+        parse_mode: "HTML",
+        reply_markup: cancelKb,
+      });
       workChatId = fresh.chat.id;
       workMsgId = fresh.message_id;
     } catch {}
   }
 
   // Brief cool-down before retrying so WA's throttle window clears.
-  await new Promise((r) => setTimeout(r, GL_RETRY_PASS_PRE_DELAY_MS));
+  // Honor cancel even during this initial wait.
+  const preDelayStart = Date.now();
+  while (Date.now() - preDelayStart < GL_RETRY_PASS_PRE_DELAY_MS) {
+    if (getLinkCancelRequests.has(userId)) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
 
+  let cancelled = false;
   for (let k = 0; k < failedIndexes.length; k++) {
+    if (getLinkCancelRequests.has(userId)) { cancelled = true; break; }
     const idx = failedIndexes[k];
     try {
-      const link = await getGroupInviteLink(String(userId), state.results[idx].groupId, 5);
+      // Use a tight per-group attempt cap during the retry pass —
+      // the initial fetch already burned the full retry budget on
+      // these groups, so doing 5 more attempts each makes the user
+      // wait minutes for nothing. 2 quick attempts catches transient
+      // WA throttle without making the UI feel frozen.
+      const link = await getGroupInviteLink(
+        String(userId),
+        state.results[idx].groupId,
+        GL_RETRY_PER_GROUP_ATTEMPTS,
+      );
       if (link) state.results[idx].link = link;
     } catch {}
     try {
-      await bot.api.editMessageText(workChatId, workMsgId, retryProgress(k + 1), { parse_mode: "HTML" });
+      await bot.api.editMessageText(workChatId, workMsgId, retryProgress(k + 1), {
+        parse_mode: "HTML",
+        reply_markup: cancelKb,
+      });
     } catch {}
     if (k < failedIndexes.length - 1) {
-      await new Promise((r) => setTimeout(r, GL_RETRY_PASS_DELAY_MS));
+      // Cancel-aware delay so a tap on Cancel breaks out of the
+      // wait instead of forcing the user to sit through it.
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < GL_RETRY_PASS_DELAY_MS) {
+        if (getLinkCancelRequests.has(userId)) { cancelled = true; break; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (cancelled) break;
     }
   }
 
+  // Always clear the cancel flag so the next /get_link run starts fresh.
+  getLinkCancelRequests.delete(userId);
+
   // Send the final, combined result. canRetry=false so the retry
-  // button is NOT shown again — single-use as requested.
+  // button is NOT shown again — single-use as requested. wasCancelled
+  // is forwarded so the result message reflects the user's choice.
   await sendGetLinkResult(
     state.results, state.mode, state.patternBase,
-    workChatId, workMsgId, false, false,
+    workChatId, workMsgId, cancelled, false,
   );
 });
 
@@ -6425,7 +6524,17 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     }); return;
   }
+  // 1. Drop the live Baileys socket + auth state and pending reconnect timers.
   await disconnectWhatsApp(String(userId));
+  // 2. Drop this user's slice of every per-user in-memory Map/Set so RAM
+  //    actually returns to baseline instead of being held by orphaned state.
+  clearUserMemoryState(userId);
+  // 3. Also clear the Auto-Chat WhatsApp socket if it's open under the
+  //    derived auto-userId — otherwise that second socket keeps ~5-10MB.
+  try { await disconnectWhatsApp(getAutoUserId(String(userId))); } catch {}
+  // 4. Run a global purge to flush translation caches + nudge V8/glibc to
+  //    actually release pages back to the OS so RSS visibly drops.
+  void runMemoryPurge("user disconnect");
   await ctx.editMessageText("✅ <b>WhatsApp disconnected!</b>", {
     parse_mode: "HTML", reply_markup: mainMenu(userId),
   });
@@ -6625,10 +6734,26 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const autoUserId = getAutoUserId(String(userId));
+  // Drop the auto-chat Baileys socket + its pending reconnect timers.
   await disconnectWhatsApp(autoUserId);
+  // Stop and forget the auto-chat session object.
   const session = autoChatSessions.get(userId);
   if (session) { session.cancelled = true; session.running = false; }
   autoChatSessions.delete(userId);
+  // Also drop CIG/ACF sessions which run on top of the auto socket and the
+  // matching cancellation flags, so RAM actually returns to baseline.
+  const cig = cigSessions.get(userId);
+  if (cig) { (cig as any).cancelled = true; (cig as any).running = false; }
+  cigSessions.delete(userId);
+  const acf = acfSessions.get(userId);
+  if (acf) { (acf as any).cancelled = true; (acf as any).running = false; }
+  acfSessions.delete(userId);
+  joinCancelRequests.delete(userId);
+  getLinkCancelRequests.delete(userId);
+  addMembersCancelRequests.delete(userId);
+  removeMembersCancelRequests.delete(userId);
+  // Nudge GC so RSS drops promptly on the 512MB free-tier dyno.
+  void runMemoryPurge("auto-chat disconnect");
   await ctx.editMessageText("✅ <b>Auto Chat WhatsApp disconnected!</b>", {
     parse_mode: "HTML", reply_markup: mainMenu(userId),
   });

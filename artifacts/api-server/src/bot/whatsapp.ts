@@ -45,6 +45,51 @@ interface WhatsAppSession {
 
 const sessions: Map<string, WhatsAppSession> = new Map();
 
+// ── Per-session timer tracker ─────────────────────────────────────────────
+// Every reconnect / pairing-code retry uses setTimeout. The callback closes
+// over the (large) Baileys socket and auth-state objects. If we don't cancel
+// these timers when a session is disconnected/evicted, the closure keeps
+// the socket & creds + signal keys alive for the full delay (up to 2 min
+// for 403 backoff). On a 512MB host that single retained closure can pin
+// 5–10 MB per disconnected user — so RAM never drops after a logout.
+const sessionTimers: Map<string, Set<NodeJS.Timeout>> = new Map();
+
+function trackSessionTimer(userId: string, fn: () => void | Promise<void>, ms: number): NodeJS.Timeout {
+  const t = setTimeout(async () => {
+    sessionTimers.get(userId)?.delete(t);
+    try { await fn(); } catch (err: any) {
+      console.error(`[WA][TIMER][${userId}] error:`, err?.message);
+    }
+  }, ms);
+  let bucket = sessionTimers.get(userId);
+  if (!bucket) { bucket = new Set(); sessionTimers.set(userId, bucket); }
+  bucket.add(t);
+  return t;
+}
+
+function clearAllSessionTimers(userId: string): number {
+  const bucket = sessionTimers.get(userId);
+  if (!bucket) return 0;
+  let cleared = 0;
+  for (const t of bucket) { clearTimeout(t); cleared++; }
+  bucket.clear();
+  sessionTimers.delete(userId);
+  return cleared;
+}
+
+// Try to actually return freed pages to the OS. V8's gc() reclaims heap
+// objects, but on Linux glibc malloc holds onto freed regions in its
+// arena (RSS stays high even though the JS heap shrunk). A best-effort
+// double-gc + small wait gives V8 multiple passes and lets the OS reclaim.
+async function forceMemoryReclaim(): Promise<void> {
+  if (typeof (global as any).gc !== "function") return;
+  try {
+    (global as any).gc();
+    await new Promise((r) => setTimeout(r, 50));
+    (global as any).gc();
+  } catch {}
+}
+
 // ── Memory-aware idle session eviction ─────────────────────────────────────
 // Cap raised to 500 per request. NOTE: 500 simultaneous Baileys sockets
 // will NOT actually fit in 512MB — each socket holds ~5-10MB (WebSocket +
@@ -90,6 +135,12 @@ function useSession(userId: string): WhatsAppSession | undefined {
 const ACTIVE_SESSION_PROTECTION_MS = 60 * 1000;
 
 function evictSessionSocket(userId: string, session: WhatsAppSession): void {
+  // Cancel ANY pending reconnect/pairing timers FIRST — otherwise their
+  // closures keep the soon-to-be-orphaned socket + auth state alive in RAM
+  // until they fire (up to 2 min on 403 backoff).
+  const cleared = clearAllSessionTimers(userId);
+  // Invalidate the gen so anything still in-flight ignores this socket.
+  session.socketGenId = -1;
   // Close the underlying socket but keep the session record so isConnected()
   // reports false, the user sees "WhatsApp not connected", and lazy restore
   // can pick it back up from MongoDB on next interaction.
@@ -100,7 +151,9 @@ function evictSessionSocket(userId: string, session: WhatsAppSession): void {
   // Remove the session entry entirely so the next interaction triggers a
   // full lazy restore (which loads creds from MongoDB and reopens the socket).
   sessions.delete(userId);
-  console.log(`[WA][EVICT][${userId}] Idle socket closed to free memory`);
+  console.log(`[WA][EVICT][${userId}] Idle socket closed to free memory (cleared ${cleared} timers)`);
+  // Best-effort: ask V8 to reclaim now so RSS actually drops on disconnect.
+  void forceMemoryReclaim();
 }
 
 export function sweepIdleSessions(): { evicted: number; total: number } {
@@ -327,7 +380,7 @@ async function createSocket(
       } catch (err: any) {
         console.error(`[WA][${userId}] requestPairingCode failed gen=${myGenId}: ${err?.message}`);
         session.codeRequested = false;
-        setTimeout(async () => {
+        trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId || !sessions.has(userId)) return;
           session.codeRequested = false;
           try {
@@ -342,6 +395,7 @@ async function createSocket(
             console.error(`[WA][${userId}] requestPairingCode retry also failed gen=${myGenId}: ${err2?.message}`);
             closeSocketSafe(sock);
             session.socket = null;
+            clearAllSessionTimers(userId);
             sessions.delete(userId);
             onDisconnected("Pairing code nahi mil raha. Thodi der baad dobara try karein.");
           }
@@ -435,8 +489,12 @@ async function createSocket(
       if (statusCode === DisconnectReason.loggedOut) {
         console.log(`[WA][${userId}] Logout detected gen=${myGenId}`);
         clearSessionData(userId);
+        closeSocketSafe(sock);
+        session.socket = null;
+        clearAllSessionTimers(userId);
         sessions.delete(userId);
         onDisconnected("WhatsApp ne logout kar diya. Dobara connect karein.");
+        void forceMemoryReclaim();
         return;
       }
 
@@ -450,18 +508,21 @@ async function createSocket(
         session.retryCount++;
 
         if (session.retryCount > 3) {
+          clearAllSessionTimers(userId);
           sessions.delete(userId);
           onDisconnected("Connection baar baar fail ho raha hai. Dobara try karein.");
+          void forceMemoryReclaim();
           return;
         }
 
-        setTimeout(async () => {
+        trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId) return;
           const currentSession = sessions.get(userId);
           if (!currentSession || currentSession !== session) return;
           try {
             await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
           } catch (e: any) {
+            clearAllSessionTimers(userId);
             sessions.delete(userId);
             onDisconnected(`Retry failed: ${e?.message}`);
           }
@@ -481,19 +542,22 @@ async function createSocket(
         session.retryCount++;
 
         if (session.retryCount > 8) {
+          clearAllSessionTimers(userId);
           sessions.delete(userId);
           onDisconnected("Bahut zyada reconnect attempts. Dobara try karein.");
+          void forceMemoryReclaim();
           return;
         }
 
         const delay = session.wasConnected ? 3000 : 2000;
-        setTimeout(async () => {
+        trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId) return;
           const currentSession = sessions.get(userId);
           if (!currentSession || currentSession !== session) return;
           try {
             await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
           } catch (e: any) {
+            clearAllSessionTimers(userId);
             sessions.delete(userId);
             onDisconnected(`Reconnect failed: ${e?.message}`);
           }
@@ -510,22 +574,25 @@ async function createSocket(
           console.log(`[WA][${userId}] 403 repeated ${session.retryCount}x — WhatsApp permanently rejected. Stopping reconnect.`);
           closeSocketSafe(sock);
           session.socket = null;
+          clearAllSessionTimers(userId);
           sessions.delete(userId);
           clearSessionData(userId);
           onDisconnected("WhatsApp ne connection reject kar diya (403). Dobara connect karein.");
+          void forceMemoryReclaim();
           return;
         }
         // Exponential backoff for 403: 10s, 20s, 40s... up to 2 min
         const delay = Math.min(10000 * Math.pow(2, session.retryCount - 1), 120000);
         console.log(`[WA][${userId}] 403 retry ${session.retryCount}/${MAX_403_RETRIES} in ${delay / 1000}s gen=${myGenId}...`);
         session.codeRequested = false;
-        setTimeout(async () => {
+        trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId) return;
           const currentSession = sessions.get(userId);
           if (!currentSession || currentSession !== session) return;
           try {
             await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
           } catch (e: any) {
+            clearAllSessionTimers(userId);
             sessions.delete(userId);
             onDisconnected(`Reconnect failed: ${e?.message}`);
           }
@@ -541,20 +608,23 @@ async function createSocket(
         console.log(`[WA][${userId}] Too many retries (${session.retryCount}) — stopping reconnect to prevent memory leak.`);
         closeSocketSafe(sock);
         session.socket = null;
+        clearAllSessionTimers(userId);
         sessions.delete(userId);
         onDisconnected("Connection baar baar fail ho raha hai. Dobara connect karein.");
+        void forceMemoryReclaim();
         return;
       }
       // Exponential backoff: 5s → 10s → 20s → max 2 min
       const reconnectDelay = Math.min(5000 * Math.pow(1.5, Math.floor(session.retryCount / 5)), 120000);
       console.log(`[WA][${userId}] Will reconnect in ${reconnectDelay / 1000}s gen=${myGenId}...`);
-      setTimeout(async () => {
+      trackSessionTimer(userId, async () => {
         if (session.socketGenId !== myGenId) return;
         const currentSession = sessions.get(userId);
         if (!currentSession || currentSession !== session) return;
         try {
           await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
         } catch (e: any) {
+          clearAllSessionTimers(userId);
           sessions.delete(userId);
           onDisconnected(`Reconnect failed: ${e?.message}`);
         }
@@ -582,6 +652,9 @@ export async function connectWhatsApp(
     closeSocketSafe(existing.socket);
     existing.socket = null;
   }
+  // Cancel any leftover timers from a previous failed attempt so they don't
+  // fire after we've already started a fresh socket below.
+  clearAllSessionTimers(userId);
   sessions.delete(userId);
 
   const session: WhatsAppSession = {
@@ -628,6 +701,9 @@ export async function connectWhatsAppQr(
     closeSocketSafe(existing.socket);
     existing.socket = null;
   }
+  // Cancel any leftover timers from a previous failed attempt so they don't
+  // step on the fresh QR socket we're about to create below.
+  clearAllSessionTimers(userId);
   sessions.delete(userId);
 
   const session: WhatsAppSession = {
@@ -793,6 +869,9 @@ export async function refreshWhatsAppSession(
     closeSocketSafe(existing.socket);
     existing.socket = null;
   }
+  // Cancel any pending reconnect/pairing timers from the previous socket so
+  // they don't fire and step on the fresh socket we're about to create.
+  clearAllSessionTimers(userId);
   existing.connected = false;
   existing.connecting = true;
   existing.connectLock = true;
@@ -825,15 +904,29 @@ export async function refreshWhatsAppSession(
 
 export async function disconnectWhatsApp(userId: string): Promise<void> {
   const session = useSession(userId);
+  // Cancel pending reconnect/pairing timers BEFORE doing anything else so
+  // the closures (which retain the socket + auth state) become unreachable
+  // and GC-able as soon as we drop the session entry.
+  const clearedTimers = clearAllSessionTimers(userId);
   if (session) {
     session.socketGenId = -1;
     if (session.socket) {
       try { await session.socket.logout(); } catch {}
       closeSocketSafe(session.socket);
+      session.socket = null;
     }
+    session.connected = false;
+    session.connecting = false;
   }
   sessions.delete(userId);
-  clearSessionData(userId);
+  // Fire-and-forget Mongo cleanup — don't block the user's UI on it.
+  void clearSessionData(userId);
+  console.log(`[WA][DISCONNECT][${userId}] Session removed (cleared ${clearedTimers} timers)`);
+  // Force V8 to actually reclaim the socket + creds + signal-key cache so
+  // RSS drops right after disconnect, not 30+ minutes later when the next
+  // sweep runs. Without this the user observes "WhatsApp disconnected but
+  // RAM is still high" — which is exactly the bug being fixed.
+  void forceMemoryReclaim();
 }
 
 // Memory-only disconnect for the idle timer.
