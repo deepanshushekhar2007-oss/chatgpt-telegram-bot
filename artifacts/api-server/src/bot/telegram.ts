@@ -923,6 +923,7 @@ interface UserState {
   removeExcludeData?: {
     selectedGroups: Array<{ id: string; subject: string }>;
     excludeNumbers: Set<string>;
+    excludePrefixes: Set<string>;
   };
   similarData?: {
     patterns: SimilarGroup[];
@@ -5330,6 +5331,7 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
     removeExcludeData: {
       selectedGroups,
       excludeNumbers: new Set(),
+      excludePrefixes: new Set(),
     },
   });
 
@@ -5337,9 +5339,12 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
   await ctx.editMessageText(
     `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}\n\n` +
     `📱 <b>Exclude Numbers</b>\n\n` +
-    `If you do NOT want to remove certain numbers, send them now (one per line, with country code).\n\n` +
-    `Example:\n<code>+919912345678\n+919998887777</code>\n\n` +
-    `If you don't want to exclude any numbers, tap <b>Skip</b>:`,
+    `Aap do tarah se exclude kar sakte ho (ek per line, dono mix bhi kar sakte ho):\n\n` +
+    `1️⃣ <b>Pura number</b> — sirf wahi number exclude hoga.\n` +
+    `   Example:\n   <code>+919912345678\n   +919998887777</code>\n\n` +
+    `2️⃣ <b>Sirf country code</b> (1-4 digits, + optional) — uss country ke <i>saare</i> numbers exclude honge.\n` +
+    `   Example:\n   <code>+91\n   +92</code>\n   (India aur Pakistan ke saare numbers safe rahenge)\n\n` +
+    `Agar kuch bhi exclude nahi karna to <b>Skip</b> dabao:`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -5355,7 +5360,7 @@ bot.callbackQuery("rm_skip_exclude", async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.removeExcludeData) return;
 
-  await startRemoveMembersProcess(ctx, userId, state.removeExcludeData.selectedGroups, new Set());
+  await startRemoveMembersProcess(ctx, userId, state.removeExcludeData.selectedGroups, new Set(), new Set());
 });
 
 bot.callbackQuery("rm_cancel_request", async (ctx) => {
@@ -5384,7 +5389,8 @@ async function startRemoveMembersProcess(
   ctx: any,
   userId: number,
   selectedGroups: Array<{ id: string; subject: string }>,
-  excludeNumbers: Set<string>
+  excludeNumbers: Set<string>,
+  excludePrefixes: Set<string>
 ) {
   const chatId = ctx.callbackQuery?.message?.chat.id || ctx.chat?.id;
   const msgId = ctx.callbackQuery?.message?.message_id;
@@ -5392,11 +5398,13 @@ async function startRemoveMembersProcess(
   userStates.delete(userId);
 
   const excludeList = Array.from(excludeNumbers).map(n => n.replace(/[^0-9]/g, ""));
+  const prefixList = Array.from(excludePrefixes).map(p => p.replace(/[^0-9]/g, ""));
 
   const groupList = selectedGroups.map(g => `• ${esc(g.subject)}`).join("\n");
-  const excludeText = excludeList.length > 0
-    ? `\n🚫 <b>Excluding ${excludeList.length} number(s)</b>`
-    : "";
+  const excludeBits: string[] = [];
+  if (excludeList.length > 0) excludeBits.push(`🚫 <b>Excluding ${excludeList.length} number(s)</b>`);
+  if (prefixList.length > 0) excludeBits.push(`🌐 <b>Excluding country code(s):</b> ${prefixList.map(p => "+" + p).join(", ")}`);
+  const excludeText = excludeBits.length > 0 ? "\n" + excludeBits.join("\n") : "";
 
   const statusText = `⏳ <b>Removing members from ${selectedGroups.length} group(s)...</b>\n\n${groupList}${excludeText}\n\n⌛ Please wait...`;
 
@@ -5415,18 +5423,23 @@ async function startRemoveMembersProcess(
   } catch {}
 
   removeMembersCancelRequests.delete(userId);
-  void removeAllGroupMembersBackground(String(userId), selectedGroups, excludeList, chatId, msgId);
+  void removeAllGroupMembersBackground(String(userId), selectedGroups, excludeList, prefixList, chatId, msgId);
 }
 
 async function removeAllGroupMembersBackground(
   userId: string,
   groups: Array<{ id: string; subject: string }>,
   excludeNumbers: string[],
+  excludePrefixes: string[],
   chatId: number,
   msgId: number | undefined
 ) {
   let fullResult = "🗑️ <b>Remove Members Result</b>\n\n";
   const excludeSet = new Set(excludeNumbers);
+  // Pre-compute the digit-only prefix list once (already stripped, but be safe).
+  const prefixDigitsList = excludePrefixes
+    .map(p => p.replace(/[^0-9]/g, ""))
+    .filter(p => p.length >= 1 && p.length <= 4);
 
   for (let gi = 0; gi < groups.length; gi++) {
     const group = groups[gi];
@@ -5457,6 +5470,14 @@ async function removeAllGroupMembersBackground(
       const pNum = (p.phone || p.jid.replace(/:\d+@/, "@").split("@")[0]).replace(/[^0-9]/g, "");
       const pLast10 = pNum.slice(-10);
       if (pLast10.length >= 7 && excludeLast10Set.has(pLast10)) return false;
+      // Country-code prefix exclusion: if the participant's full number
+      // starts with any excluded prefix, skip them. pNum is digits only
+      // (no leading +), e.g. "919912345678" — so prefix "91" matches.
+      if (prefixDigitsList.length > 0) {
+        for (const pref of prefixDigitsList) {
+          if (pNum.startsWith(pref)) return false;
+        }
+      }
       return true;
     });
 
@@ -9489,24 +9510,53 @@ bot.on("message:text", async (ctx) => {
     if (!state.removeExcludeData) return;
     const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
     const excludeNumbers = new Set<string>();
+    const excludePrefixes = new Set<string>();
     for (const line of lines) {
-      const cleaned = line.replace(/[^0-9+]/g, "");
-      if (cleaned.length >= 7) excludeNumbers.add(cleaned);
+      const digits = line.replace(/[^0-9]/g, "");
+      if (digits.length === 0) continue;
+      // 1-4 digits → treated as a country-code prefix (excludes ALL numbers
+      // from that country in the group).
+      // 7+ digits → treated as a full phone number (exact match by last 10
+      // digits, original behavior).
+      // 5-6 digits → ambiguous, ignored.
+      if (digits.length >= 1 && digits.length <= 4) {
+        excludePrefixes.add(digits);
+      } else if (digits.length >= 7) {
+        excludeNumbers.add(line.replace(/[^0-9+]/g, ""));
+      }
     }
 
-    if (excludeNumbers.size === 0) {
-      await ctx.reply("❌ No valid numbers found. Please send numbers with country code like +919912345678\n\nOr tap Skip to not exclude anyone.",
-        { reply_markup: new InlineKeyboard().text("⏭️ Skip", "rm_skip_exclude").text("❌ Cancel", "main_menu") }
+    if (excludeNumbers.size === 0 && excludePrefixes.size === 0) {
+      await ctx.reply(
+        "❌ Koi valid input nahi mila.\n\n" +
+        "• Pura number bhejo with country code (e.g. <code>+919912345678</code>), ya\n" +
+        "• Sirf country code bhejo (1-4 digits, e.g. <code>+91</code> ya <code>91</code>)\n\n" +
+        "Ya Skip dabao to kuch bhi exclude nahi hoga.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("⏭️ Skip", "rm_skip_exclude").text("❌ Cancel", "main_menu"),
+        }
       );
       return;
     }
 
-    const excludeList = Array.from(excludeNumbers).map(n => `• ${esc(n)}`).join("\n");
+    const sections: string[] = [];
+    if (excludeNumbers.size > 0) {
+      const numList = Array.from(excludeNumbers).map(n => `• ${esc(n)}`).join("\n");
+      sections.push(`✅ <b>${excludeNumbers.size} number(s) will be excluded:</b>\n\n${numList}`);
+    }
+    if (excludePrefixes.size > 0) {
+      const prefList = Array.from(excludePrefixes).map(p => `• +${esc(p)} <i>(saare numbers iss country code se)</i>`).join("\n");
+      sections.push(`🌐 <b>${excludePrefixes.size} country code(s) will be excluded:</b>\n\n${prefList}`);
+    }
+
     await ctx.reply(
-      `✅ <b>${excludeNumbers.size} number(s) will be excluded:</b>\n\n${excludeList}\n\n⚠️ These numbers will NOT be removed from the groups.`,
+      sections.join("\n\n") +
+      `\n\n⚠️ Ye sab numbers groups se NOT remove honge.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm & Start", "rm_confirm_with_exclude").text("❌ Cancel", "main_menu") }
     );
     state.removeExcludeData.excludeNumbers = excludeNumbers;
+    state.removeExcludeData.excludePrefixes = excludePrefixes;
     state.step = "remove_exclude_confirm";
     return;
   }
@@ -9702,7 +9752,13 @@ bot.callbackQuery("rm_confirm_with_exclude", async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.removeExcludeData) return;
 
-  await startRemoveMembersProcess(ctx, userId, state.removeExcludeData.selectedGroups, state.removeExcludeData.excludeNumbers);
+  await startRemoveMembersProcess(
+    ctx,
+    userId,
+    state.removeExcludeData.selectedGroups,
+    state.removeExcludeData.excludeNumbers,
+    state.removeExcludeData.excludePrefixes,
+  );
 });
 
 // ─── Photo Handler ───────────────────────────────────────────────────────────
