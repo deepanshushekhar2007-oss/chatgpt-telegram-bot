@@ -46,12 +46,18 @@ interface WhatsAppSession {
 const sessions: Map<string, WhatsAppSession> = new Map();
 
 // ── Memory-aware idle session eviction ─────────────────────────────────────
-// On a 512MB box, ~6 live Baileys sockets is the realistic ceiling. To stay
-// within budget we close ("evict") sockets that haven't been used for a
-// while and lazy-restore them when the user comes back. The session metadata
-// stays in MongoDB, so reconnect just reuses existing creds — no re-pairing.
+// Cap raised to 500 per request. NOTE: 500 simultaneous Baileys sockets
+// will NOT actually fit in 512MB — each socket holds ~5-10MB (WebSocket +
+// Signal-protocol keys + auth state + buffers), so the realistic ceiling
+// on a 512MB Render box is ~25-30 live sockets before OOM. The
+// MEMORY_PRESSURE_RSS_MB guard below will start evicting LRU sockets
+// once RSS climbs past the threshold, so even with the cap at 500 the
+// process will stay within memory budget — extra sessions just get
+// evicted faster. Set WA_MAX_LIVE_SESSIONS to a smaller number via env
+// if you upgrade to a paid Render plan and want a hard cap that matches
+// your real RAM budget.
 const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 30 * 60 * 1000); // 30 min
-const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 15);
+const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 500);
 const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 380);
 
 export function markSessionActive(userId: string): void {
