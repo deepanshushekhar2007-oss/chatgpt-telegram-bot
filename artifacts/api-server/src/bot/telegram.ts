@@ -4378,10 +4378,107 @@ const GL_BATCH_DELAY_MS = 800;
 // After a fetch failure, wait a little longer before the next group so we
 // don't pile up calls during a WhatsApp throttle window.
 const GL_AFTER_FAIL_DELAY_MS = 2500;
-// How long to wait before the dedicated retry pass — gives WA full cool-down.
+// How long to wait before the manual retry pass — gives WA full cool-down.
 const GL_RETRY_PASS_PRE_DELAY_MS = 5000;
-// Spacing between retries during the second pass.
+// Spacing between retries during the manual retry pass.
 const GL_RETRY_PASS_DELAY_MS = 2000;
+// How long we keep the per-user retry state in memory after the result
+// is sent. After this window the "🔄 Retry" button becomes a no-op
+// with a friendly "session expired" message.
+const GL_RETRY_STATE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// Per-user state for the manual retry button. The user can press the
+// retry button at most ONCE — we delete the entry as soon as the retry
+// callback consumes it. We also auto-cleanup after TTL to bound memory.
+type GetLinkRetryState = {
+  results: Array<{ subject: string; link: string | null; groupId: string }>;
+  mode: "all" | "similar";
+  patternBase?: string;
+  chatId: number;
+  msgId: number;
+  cleanupTimer: NodeJS.Timeout;
+};
+const getLinkRetryState = new Map<number, GetLinkRetryState>();
+
+function clearGetLinkRetryState(userId: number): void {
+  const s = getLinkRetryState.get(userId);
+  if (s) {
+    clearTimeout(s.cleanupTimer);
+    getLinkRetryState.delete(userId);
+  }
+}
+
+// Renders the final get-link result (success links + pending list) and
+// posts it to the user. If `canRetry` is true AND there are failed
+// groups, a "🔄 Retry Pending" button is added; the caller is
+// responsible for storing the matching retry state in
+// `getLinkRetryState` BEFORE invoking this with canRetry=true.
+async function sendGetLinkResult(
+  results: Array<{ subject: string; link: string | null; groupId: string }>,
+  mode: "all" | "similar",
+  patternBase: string | undefined,
+  chatId: number,
+  msgId: number,
+  wasCancelled: boolean,
+  canRetry: boolean,
+): Promise<void> {
+  const totalCount = results.length;
+  const successCount = results.filter((r) => r.link).length;
+  const failedResults = results
+    .filter((r) => !r.link)
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+  const successResults = results
+    .filter((r) => r.link)
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+
+  let result: string;
+  if (mode === "similar") {
+    result = `🔗 <b>"${esc(patternBase!)}" Pattern</b>\n`;
+    result += `📊 <b>Total: ${totalCount} groups | ✅ ${successCount} links fetched</b>\n\n`;
+  } else {
+    result = `📋 <b>All Group Links</b>\n📊 <b>Total: ${totalCount} groups | ✅ ${successCount} links fetched</b>\n\n`;
+  }
+  if (wasCancelled) result += "⛔ <b>Fetch stopped by user.</b>\n\n";
+
+  for (const r of successResults) {
+    result += `📌 ${esc(r.subject)}\n${r.link}\n\n`;
+  }
+
+  if (failedResults.length) {
+    result += "⚠️ <b>Links Not Fetched</b>\n";
+    for (const r of failedResults) result += `• ${esc(r.subject)}\n`;
+    if (canRetry && !wasCancelled) {
+      result += `\n💡 <i>Tap below to retry the ${failedResults.length} pending link(s). You can retry only once.</i>`;
+    }
+  }
+
+  // Build the action keyboard.
+  const kb = new InlineKeyboard();
+  if (canRetry && failedResults.length > 0 && !wasCancelled) {
+    kb.text(`🔄 Retry ${failedResults.length} Pending`, "gl_retry_pending").row();
+  }
+  if (mode === "similar") {
+    kb.text("🔙 Back", "gl_similar").text("🏠 Menu", "main_menu");
+  } else {
+    kb.text("🏠 Main Menu", "main_menu");
+  }
+
+  const chunks = splitMessage(result, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+      reply_markup: chunks.length === 1 ? kb : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+      reply_markup: i === chunks.length - 1 ? kb : undefined,
+    });
+  }
+}
 
 async function fetchGroupLinksBackground(
   userId: string,
@@ -4407,7 +4504,11 @@ async function fetchGroupLinksBackground(
     } catch {}
   };
 
-  // ── Pass 1: fetch each group's link with per-group retries ──
+  // ── Single fetch pass: try each group once. We DO NOT auto-retry
+  // failed groups anymore. Per user request, the result (with all
+  // successful links) is sent immediately, and a "🔄 Retry Pending"
+  // button is attached so the user can manually trigger the retry
+  // for the failed ones — but only once. ──
   for (let i = 0; i < groups.length; i += GL_BATCH_SIZE) {
     if (getLinkCancelRequests.has(Number(userId))) break;
     const batch = groups.slice(i, i + GL_BATCH_SIZE);
@@ -4433,88 +4534,141 @@ async function fetchGroupLinksBackground(
     await updateProgress();
     if (i + GL_BATCH_SIZE < groups.length) {
       // Adaptive backpressure: if WA is throttling (3+ consecutive fails)
-      // back off harder so the retry pass has a clean window.
+      // back off harder so we don't drown the connection.
       let delay = batchHadFailure ? GL_AFTER_FAIL_DELAY_MS : GL_BATCH_DELAY_MS;
       if (consecutiveFailures >= 3) delay = Math.max(delay, 5000);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
 
-  // ── Pass 2: dedicated retry for groups that failed in pass 1 ──
-  // This is the key fix for "7-8 out of 10 fetched" — those 2-3 missing ones
-  // are almost always WA throttle artifacts, not real failures. After a brief
-  // cool-down we try them again, slowly, and they almost always succeed.
-  const failedIndexes: number[] = [];
-  for (let i = 0; i < results.length; i++) {
-    if (!results[i].link) failedIndexes.push(i);
-  }
-
-  if (failedIndexes.length > 0 && !getLinkCancelRequests.has(Number(userId))) {
-    await updateProgress(`🔄 Retrying ${failedIndexes.length} pending link(s)...`);
-    await new Promise((r) => setTimeout(r, GL_RETRY_PASS_PRE_DELAY_MS));
-
-    for (let k = 0; k < failedIndexes.length; k++) {
-      if (getLinkCancelRequests.has(Number(userId))) break;
-      const idx = failedIndexes[k];
-      try {
-        const link = await getGroupInviteLink(userId, results[idx].groupId, 5);
-        if (link) {
-          results[idx].link = link;
-          successCount++;
-        }
-      } catch {}
-      await updateProgress(`🔄 Retrying ${k + 1}/${failedIndexes.length} pending link(s)...`);
-      if (k < failedIndexes.length - 1) {
-        await new Promise((r) => setTimeout(r, GL_RETRY_PASS_DELAY_MS));
-      }
-    }
-  }
-
   const wasCancelled = getLinkCancelRequests.has(Number(userId));
   getLinkCancelRequests.delete(Number(userId));
 
-  let result: string;
-  if (mode === "similar") {
-    result = `🔗 <b>"${esc(patternBase!)}" Pattern</b>\n`;
-    result += `📊 <b>Total: ${groups.length} groups | ✅ ${successCount} links fetched</b>\n\n`;
-  } else {
-    result = `📋 <b>All Group Links</b>\n📊 <b>Total: ${groups.length} groups | ✅ ${successCount} links fetched</b>\n\n`;
-  }
-
-  if (wasCancelled) result += "⛔ <b>Fetch stopped by user.</b>\n\n";
-
-  const successResults = results.filter((r) => r.link).sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
-  const failedResults = results.filter((r) => !r.link).sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
-
-  for (const r of successResults) {
-    result += `📌 ${esc(r.subject)}\n${r.link}\n\n`;
-  }
-
-  if (failedResults.length) {
-    result += "⚠️ <b>Links Not Fetched</b>\n";
-    for (const r of failedResults) result += `• ${esc(r.subject)}\n`;
-  }
-
-  const kb = mode === "similar"
-    ? new InlineKeyboard().text("🔙 Back", "gl_similar").text("🏠 Menu", "main_menu")
-    : new InlineKeyboard().text("🏠 Main Menu", "main_menu");
-
-  const chunks = splitMessage(result, 4000);
-  try {
-    await bot.api.editMessageText(chatId, msgId, chunks[0], {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      reply_markup: chunks.length === 1 ? kb : undefined,
+  // If there are pending (failed) links and the user didn't cancel,
+  // store the retry state so the "🔄 Retry Pending" button has data
+  // to operate on. The state is single-use (consumed by the retry
+  // handler) and auto-expires after GL_RETRY_STATE_TTL_MS.
+  const failedCount = results.filter((r) => !r.link).length;
+  const numUserId = Number(userId);
+  clearGetLinkRetryState(numUserId);
+  let canRetry = false;
+  if (failedCount > 0 && !wasCancelled) {
+    const cleanupTimer = setTimeout(() => {
+      getLinkRetryState.delete(numUserId);
+    }, GL_RETRY_STATE_TTL_MS);
+    getLinkRetryState.set(numUserId, {
+      results,
+      mode,
+      patternBase,
+      chatId,
+      msgId,
+      cleanupTimer,
     });
-  } catch {}
-  for (let i = 1; i < chunks.length; i++) {
-    await bot.api.sendMessage(chatId, chunks[i], {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      reply_markup: i === chunks.length - 1 ? kb : undefined,
-    });
+    canRetry = true;
   }
+
+  await sendGetLinkResult(results, mode, patternBase, chatId, msgId, wasCancelled, canRetry);
 }
+
+// ── "🔄 Retry Pending" — manual single-use retry for failed links. ──
+bot.callbackQuery("gl_retry_pending", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+
+  // Consume the retry state immediately so a double-tap can't fire
+  // the retry twice. If there's no state, it was already consumed
+  // (or expired) — tell the user instead of silently doing nothing.
+  const state = getLinkRetryState.get(userId);
+  if (state) {
+    clearTimeout(state.cleanupTimer);
+    getLinkRetryState.delete(userId);
+  }
+  if (!state) {
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    try {
+      await ctx.reply(
+        "⚠️ <b>Retry session expired</b>\n\n" +
+        "Aap ek hi baar retry kar sakte the, ya 1 hour ka window khatam ho gaya. " +
+        "Naye se link fetch karne ke liye menu se Get Link dobara dabao.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
+  const failedIndexes: number[] = [];
+  for (let i = 0; i < state.results.length; i++) {
+    if (!state.results[i].link) failedIndexes.push(i);
+  }
+  if (failedIndexes.length === 0) {
+    // Nothing to retry — just resend the result with no retry button.
+    await sendGetLinkResult(
+      state.results, state.mode, state.patternBase,
+      state.chatId, state.msgId, false, false,
+    );
+    return;
+  }
+
+  // Bail out early if WhatsApp isn't connected — retrying without a
+  // socket would just produce another wave of failures.
+  if (!isConnected(String(userId))) {
+    try {
+      await bot.api.editMessageText(state.chatId, state.msgId,
+        "❌ <b>WhatsApp not connected</b>\n\n" +
+        "Retry nahi ho sakta — pehle WhatsApp connect karo, phir Get Link dobara dabao.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
+  // Show a fresh progress message for the retry pass. We try to
+  // edit the existing result message; if it's gone (deleted/too
+  // old), send a new one and switch chatId/msgId to it for the
+  // final result render.
+  let workChatId = state.chatId;
+  let workMsgId = state.msgId;
+  const retryProgress = (k: number) =>
+    `🔄 <b>Retrying pending link(s)...</b>\n\n` +
+    `📊 ${k}/${failedIndexes.length} retried`;
+  try {
+    await bot.api.editMessageText(workChatId, workMsgId, retryProgress(0), { parse_mode: "HTML" });
+  } catch {
+    try {
+      const fresh = await ctx.reply(retryProgress(0), { parse_mode: "HTML" });
+      workChatId = fresh.chat.id;
+      workMsgId = fresh.message_id;
+    } catch {}
+  }
+
+  // Brief cool-down before retrying so WA's throttle window clears.
+  await new Promise((r) => setTimeout(r, GL_RETRY_PASS_PRE_DELAY_MS));
+
+  for (let k = 0; k < failedIndexes.length; k++) {
+    const idx = failedIndexes[k];
+    try {
+      const link = await getGroupInviteLink(String(userId), state.results[idx].groupId, 5);
+      if (link) state.results[idx].link = link;
+    } catch {}
+    try {
+      await bot.api.editMessageText(workChatId, workMsgId, retryProgress(k + 1), { parse_mode: "HTML" });
+    } catch {}
+    if (k < failedIndexes.length - 1) {
+      await new Promise((r) => setTimeout(r, GL_RETRY_PASS_DELAY_MS));
+    }
+  }
+
+  // Send the final, combined result. canRetry=false so the retry
+  // button is NOT shown again — single-use as requested.
+  await sendGetLinkResult(
+    state.results, state.mode, state.patternBase,
+    workChatId, workMsgId, false, false,
+  );
+});
 
 // ─── Leave Group ─────────────────────────────────────────────────────────────
 
