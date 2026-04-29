@@ -316,29 +316,48 @@ bot.use(async (ctx, next) => {
 
         let connected = false;
         try {
-          // 180s (3 min) timeout. Per user request, the user-visible
-          // "reconnect timed out" message should essentially never
-          // appear. WhatsApp Baileys cold reconnect on Render free tier
-          // takes 15-45 sec normally, occasionally up to 90 sec under
-          // heavy load. 180s gives ~4x headroom over the worst observed
-          // case so the timeout effectively never fires. The Telegram
-          // per-button spinner stays visible for the user the whole
-          // time, which is the loading feedback we want.
+          // 20s timeout per user request. WhatsApp Baileys cold reconnect
+          // on Render free tier normally takes 5-15 sec when the session
+          // credentials are still valid. If 20 sec pass without the
+          // socket reaching `open` state, the user's WhatsApp device is
+          // almost certainly truly disconnected (logged out from phone,
+          // device unlinked, or session creds invalidated by WhatsApp)
+          // — not a slow-network case. So we tell the user clearly
+          // instead of silently spinning.
           connected = await waitForWhatsAppConnected(String(userId), {
-            timeoutMs: 180_000,
+            timeoutMs: 20_000,
             pollMs: 500,
           });
         } catch {}
 
         if (!connected) {
-          // True timeout (3 min elapsed without socket open). Extremely
-          // rare — usually means the device was actually logged out from
-          // WhatsApp's side or the network is fully down. Silently
-          // answer the spinner and return. The "🔄 Reconnecting..."
-          // status message stays in place; the user's original inline
-          // keyboard is still attached so they can tap any button again
-          // when network recovers.
+          // 20 sec elapsed without socket open → treat as a real
+          // disconnection. Show the user a clear, actionable message so
+          // they know what happened and how to fix it (re-link via the
+          // QR / pairing-code flow inside the WhatsApp menu).
           try { await ctx.answerCallbackQuery(); } catch {}
+          try {
+            await ctx.editMessageText(
+              `❌ <b>WhatsApp disconnected</b>\n\n` +
+              `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
+              `WhatsApp → Linked Devices kholo, bot wala device check ` +
+              `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
+              `link karna hoga:\n\n` +
+              `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
+              `re-link karo.`,
+              { parse_mode: "HTML" }
+            );
+          } catch {
+            try {
+              await ctx.reply(
+                `❌ <b>WhatsApp disconnected</b>\n\n` +
+                `Aapka WhatsApp session disconnect ho gaya hai. Menu se ` +
+                `<b>Connect WhatsApp</b> dabake QR ya Pairing Code se ` +
+                `dobara link karo.`,
+                { parse_mode: "HTML" }
+              );
+            } catch {}
+          }
           return;
         }
         // Connected — fall through to the normal handler dispatch below.
