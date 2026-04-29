@@ -38,6 +38,7 @@ import {
   getActiveSessionUserIds,
   setDisconnectNotifier,
   setGroupDisappearingMessages,
+  setGroupName,
   ensureSessionLoaded,
   hasStoredWhatsAppSession,
   waitForWhatsAppConnected,
@@ -998,6 +999,41 @@ interface UserState {
     botMode?: "single" | "both";
   };
   autoConnectStep?: string;
+  // ── Change Group Name feature ────────────────────────────────────────────
+  // Two sub-flows share this state:
+  //   "manual"  → user picks groups, then types names (auto-numbered or custom)
+  //   "auto"    → user picks pending-only groups, uploads one VCF per group,
+  //               bot matches each VCF to the group whose pending list contains
+  //               it, then user chooses "same as VCF name" or "custom prefix"
+  changeGroupNameData?: {
+    mode: "manual" | "auto";
+    // Manual: pool of admin groups the user is selecting from
+    allGroups?: Array<{ id: string; subject: string }>;
+    patterns?: SimilarGroup[];
+    // Manual: which subset is currently being shown (similar pattern or all)
+    selectionPool?: Array<{ id: string; subject: string }>;
+    selectionPoolLabel?: string;
+    // Insertion-ordered selection (so the user sees 1️⃣, 2️⃣, …)
+    selectedGroupIds?: string[];
+    page?: number;
+    // Manual naming
+    namingMode?: "auto" | "custom";
+    baseName?: string;
+    finalNames?: string[];
+    // Auto: pool of groups that have pending requests
+    pendingPool?: Array<{ groupId: string; groupName: string; pendingCount: number }>;
+    pendingSelectedIds?: string[];
+    pendingPage?: number;
+    // Auto: collected VCF files (one per selected group, in upload order)
+    vcfFiles?: Array<{ fileName: string; phones: string[] }>;
+    // Auto naming
+    autoNameMode?: "same_vcf" | "custom_vcf";
+    customPrefix?: string;
+    // Final review: list of {groupId, oldName, newName, vcfFileName?}
+    renamePlan?: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }>;
+    // Cancel signal for the background rename loop
+    cancel?: boolean;
+  };
 }
 
 interface AutoChatSession {
@@ -1655,7 +1691,7 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
-    .text("⚙️ Edit Settings", "edit_settings").row();
+    .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -2293,8 +2329,26 @@ bot.command("help", async (ctx) => {
     `• Review karke Apply — har group ka live progress dikhega\n` +
     `• Beech mein cancel bhi kar sakte ho\n\n` +
 
+    `🏷️ 13. Change Group Name\n` +
+    `• Rename multiple groups in one go. Two modes:\n` +
+    `  ✏️ Manual (by name):\n` +
+    `   • Pick Similar Groups or All Groups (like Get Link)\n` +
+    `   • Tap groups to select — buttons show 1, 2, 3… in tap order\n` +
+    `   • Choose Auto-numbered (e.g. "Spidy 1, Spidy 2…") or Custom Names (one per line)\n` +
+    `   • Review and confirm — bot renames in your tap order with live progress + Cancel\n` +
+    `  📁 Auto (VCF + name):\n` +
+    `   • Only groups with pending requests are shown (like Pending List)\n` +
+    `   • Select groups, then upload one VCF file per selected group (any order)\n` +
+    `   • Bot matches each VCF to a group by checking pending phone numbers\n` +
+    `   • Choose name source:\n` +
+    `      ◦ Same as VCF name → group name = VCF filename without .vcf\n` +
+    `        (e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61")\n` +
+    `      ◦ Customize name → you give a prefix template; bot keeps the trailing number from the VCF\n` +
+    `        (e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61")\n` +
+    `   • Review and confirm — live progress + Cancel\n\n` +
+
     (canUserSeeAutoChat(userId) ?
-    `🤖 13. Auto Chat  ⭐ Paid Service\n` +
+    `🤖 14. Auto Chat  ⭐ Paid Service\n` +
     `• Auto Chat ke liye 2nd WhatsApp connect karo\n` +
     `• Chat Friend: funny/study messages auto send hote rahenge jab tak Stop na dabao\n` +
     `• Chat In Group: selected common groups mein funny/study messages rotate hote rahenge\n` +
@@ -2302,7 +2356,7 @@ bot.command("help", async (ctx) => {
     `• Delay rotation: 10 sec, 1 min, 10 min, 20 min, 30 min, 1 hour, 2 hours\n` +
     `• Live status, sent/failed count, refresh aur stop controls milte hain\n\n`
     :
-    `🤖 13. Auto Chat  ⭐ Paid Service\n` +
+    `🤖 14. Auto Chat  ⭐ Paid Service\n` +
     `• Automatically send messages to friends or groups on WhatsApp\n` +
     `• Random delay rotation keeps it natural and safe\n` +
     `• To buy Auto Chat access, message ${OWNER_USERNAME} on Telegram\n\n`) +
@@ -4413,6 +4467,15 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
       continue;
     }
     result += `📋 <b>${esc(gr.groupName)}</b>\n`;
+    // Show the group invite link right under the title so the user can copy it.
+    result += `   🔗 ${esc(gr.link)}\n`;
+    // Show the unique VCF file name(s) supplied for this group. Usually just
+    // one file per group, but we de-dupe in case the user sent multiple VCFs
+    // and they all got attached to the same pair.
+    const vcfNames = Array.from(new Set(gr.vcfContacts.map(c => c.vcfFileName).filter(Boolean)));
+    if (vcfNames.length > 0) {
+      for (const vn of vcfNames) result += `   📁 ${esc(vn)}\n`;
+    }
     if (!gr.pendingAvailable) {
       result += `   ⚠️ <i>Pending detection off — need admin + "Approval required" ON</i>\n`;
     }
@@ -8437,6 +8500,862 @@ async function applyEditSettingsBackground(
   } catch {}
 }
 
+// ─── Change Group Name Feature ────────────────────────────────────────────────
+// Two sub-flows:
+//   • Manual (by name): scan admin groups → similar/all → user taps groups
+//     in order (buttons show 1, 2, 3…) → choose Auto-numbered or Custom
+//     names → review → background rename in selection order with live
+//     progress + Cancel.
+//   • Auto (VCF + name): scan groups with pending requests → user selects
+//     groups → user uploads one VCF per selected group → bot matches each
+//     VCF to a group by checking which group's pending list contains the
+//     VCF's phones → user chooses "same as VCF name" or "custom prefix" →
+//     review → background rename + Cancel.
+// Cancel-confirm dialog is protected by `cancelDialogActiveFor` (same
+// pattern used by Join/Get-Links/Remove-Members).
+
+const CGN_PAGE_SIZE = 20;
+
+// Strip a trailing number from a VCF basename so we can keep just the
+// number for the "custom prefix" mode.
+//   "Expedia 酒店回饋活動FL_61.vcf" → "61"
+//   "SPIDY group 12.vcf"         → "12"
+//   "no number here.vcf"         → ""
+function extractTrailingNumber(vcfFileName: string): string {
+  const base = vcfFileName.replace(/\.vcf$/i, "");
+  const m = base.match(/(\d+)\s*$/);
+  return m ? m[1] : "";
+}
+
+// Strip the .vcf extension to use as a group name directly.
+function vcfBasename(vcfFileName: string): string {
+  return vcfFileName.replace(/\.vcf$/i, "").trim();
+}
+
+// ── Entry: ask user to pick Manual or Auto ──
+bot.callbackQuery("change_group_name", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+    });
+    return;
+  }
+  userStates.delete(userId);
+  const kb = new InlineKeyboard()
+    .text("✏️ Manual (by name)", "cgn_manual").row()
+    .text("📁 Auto (VCF + name)", "cgn_auto").row()
+    .text("🏠 Main Menu", "main_menu");
+  await ctx.editMessageText(
+    "🏷️ <b>Change Group Name</b>\n\n" +
+    "Pick a mode:\n\n" +
+    "✏️ <b>Manual (by name)</b>\n" +
+    "• Pick groups (Similar / All) by tapping — order matters\n" +
+    "• Type names yourself (auto-numbered or one per line)\n" +
+    "• Bot renames in your tap order\n\n" +
+    "📁 <b>Auto (VCF + name)</b>\n" +
+    "• Only groups with pending requests are shown\n" +
+    "• Upload one VCF per selected group — bot matches each VCF to its group by checking pending phones\n" +
+    "• Group name comes from the VCF filename (same or with your custom prefix)",
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+// ═══ MANUAL MODE ════════════════════════════════════════════════════════════
+
+bot.callbackQuery("cgn_manual", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ WhatsApp not connected.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+
+  const groups = await getAllGroups(String(userId));
+  const adminGroups = groups.filter((g) => g.isAdmin);
+  if (!adminGroups.length) {
+    await ctx.editMessageText(
+      "📭 <b>No admin groups found.</b>\n\nYou must be an admin in a group to rename it.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+    return;
+  }
+
+  const allSimple = adminGroups
+    .map((g) => ({ id: g.id, subject: g.subject }))
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+  const patterns = detectSimilarGroups(allSimple);
+
+  userStates.set(userId, {
+    step: "cgn_manual_menu",
+    changeGroupNameData: {
+      mode: "manual",
+      allGroups: allSimple,
+      patterns,
+      selectedGroupIds: [],
+      page: 0,
+    },
+  });
+
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔗 Similar Groups", "cgn_m_similar").text("📋 All Groups", "cgn_m_all").row();
+  else kb.text("📋 All Groups", "cgn_m_all").row();
+  kb.text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `✏️ <b>Manual Rename</b>\n\n` +
+    `📱 Admin groups found: <b>${adminGroups.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 Similar patterns: <b>${patterns.length}</b>\n\n` : `\n`) +
+    `Pick which set of groups to choose from:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("cgn_m_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.patterns) return;
+  const patterns = state.changeGroupNameData.patterns;
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "cgn_manual").text("🏠 Menu", "main_menu"),
+    });
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    kb.text(`🔗 ${patterns[i].base} (${patterns[i].groups.length})`, `cgn_m_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", "cgn_manual").text("🏠 Menu", "main_menu");
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern — its groups will be the selection pool:",
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^cgn_m_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.patterns) return;
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.changeGroupNameData.patterns[idx];
+  if (!pattern) return;
+  state.changeGroupNameData.selectionPool = pattern.groups;
+  state.changeGroupNameData.selectionPoolLabel = pattern.base;
+  state.changeGroupNameData.selectedGroupIds = [];
+  state.changeGroupNameData.page = 0;
+  state.step = "cgn_manual_select_pool";
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.allGroups) return;
+  state.changeGroupNameData.selectionPool = state.changeGroupNameData.allGroups;
+  state.changeGroupNameData.selectionPoolLabel = "All Admin Groups";
+  state.changeGroupNameData.selectedGroupIds = [];
+  state.changeGroupNameData.page = 0;
+  state.step = "cgn_manual_select_pool";
+  await renderCgnManualSelect(ctx);
+});
+
+function buildCgnManualKeyboard(state: UserState): InlineKeyboard {
+  const data = state.changeGroupNameData!;
+  const pool = data.selectionPool || [];
+  const selectedIds = data.selectedGroupIds || [];
+  const page = data.page || 0;
+  const totalPages = Math.max(1, Math.ceil(pool.length / CGN_PAGE_SIZE));
+  const start = page * CGN_PAGE_SIZE;
+  const end = Math.min(start + CGN_PAGE_SIZE, pool.length);
+
+  const kb = new InlineKeyboard();
+  for (let i = start; i < end; i++) {
+    const g = pool[i];
+    const orderIdx = selectedIds.indexOf(g.id);
+    const tag = orderIdx >= 0 ? `✅ ${orderIdx + 1}.` : "☐";
+    kb.text(`${tag} ${g.subject}`, `cgn_m_tog_${i}`).row();
+  }
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "cgn_m_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cgn_m_page_info").text(next, "cgn_m_next_page").row();
+  }
+  kb.text("☑️ Select All", "cgn_m_select_all").text("🧹 Clear", "cgn_m_clear_all").row();
+  if (selectedIds.length > 0) kb.text(`▶️ Next: Choose Names (${selectedIds.length})`, "cgn_m_proceed").row();
+  kb.text("🔙 Back", "cgn_manual").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
+async function renderCgnManualSelect(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  const count = (data.selectedGroupIds || []).length;
+  await ctx.editMessageText(
+    `✏️ <b>Manual Rename — Select Groups</b>\n\n` +
+    `📂 Pool: <b>${esc(data.selectionPoolLabel || "")}</b> (${(data.selectionPool || []).length} groups)\n` +
+    `📌 Selected: <b>${count}</b>\n\n` +
+    `Tap groups in the order you want them renamed. Numbers on the buttons (1, 2, 3…) show your tap order — the bot will use the same order when you pick names.`,
+    { parse_mode: "HTML", reply_markup: buildCgnManualKeyboard(state) }
+  );
+}
+
+bot.callbackQuery(/^cgn_m_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.selectionPool) return;
+  const data = state.changeGroupNameData;
+  const idx = parseInt(ctx.match![1]);
+  const g = data.selectionPool![idx];
+  if (!g) return;
+  data.selectedGroupIds = data.selectedGroupIds || [];
+  const at = data.selectedGroupIds.indexOf(g.id);
+  if (at >= 0) data.selectedGroupIds.splice(at, 1);
+  else data.selectedGroupIds.push(g.id);
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  if ((data.page || 0) > 0) data.page = (data.page || 0) - 1;
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.selectionPool) return;
+  const data = state.changeGroupNameData;
+  const totalPages = Math.ceil(data.selectionPool!.length / CGN_PAGE_SIZE);
+  if ((data.page || 0) < totalPages - 1) data.page = (data.page || 0) + 1;
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+});
+
+bot.callbackQuery("cgn_m_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.selectionPool) return;
+  const data = state.changeGroupNameData;
+  data.selectedGroupIds = data.selectionPool!.map((g) => g.id);
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.selectedGroupIds = [];
+  await renderCgnManualSelect(ctx);
+});
+
+bot.callbackQuery("cgn_m_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.selectedGroupIds?.length) return;
+  state.step = "cgn_manual_naming_choose";
+  const count = state.changeGroupNameData.selectedGroupIds.length;
+  await ctx.editMessageText(
+    `✏️ <b>Manual Rename — Choose Naming Mode</b>\n\n` +
+    `📌 Selected groups: <b>${count}</b>\n\n` +
+    `🔢 <b>Auto-numbered:</b> You give one base name, bot generates ${count} numbered names (e.g. "Spidy 1, Spidy 2, Spidy 3…"). If your base ends in a number, bot continues from that number.\n\n` +
+    `✏️ <b>Custom Names:</b> You send all ${count} names yourself, one per line, in the same order you tapped the groups.`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔢 Auto-numbered", "cgn_m_naming_auto")
+        .text("✏️ Custom Names", "cgn_m_naming_custom").row()
+        .text("🔙 Back", "cgn_m_all").text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("cgn_m_naming_auto", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.namingMode = "auto";
+  state.step = "cgn_manual_naming_auto_input";
+  const count = (state.changeGroupNameData.selectedGroupIds || []).length;
+  await ctx.editMessageText(
+    `🔢 <b>Auto-numbered Names</b>\n\n` +
+    `Send the <b>base name</b> for ${count} group(s).\n\n` +
+    `Examples:\n` +
+    `• <code>Spidy</code> → Spidy 1, Spidy 2, … Spidy ${count}\n` +
+    `• <code>Spidy 5</code> → Spidy 5, Spidy 6, … Spidy ${4 + count} (continues numbering)`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("cgn_m_naming_custom", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.namingMode = "custom";
+  state.step = "cgn_manual_naming_custom_input";
+  const count = (state.changeGroupNameData.selectedGroupIds || []).length;
+  await ctx.editMessageText(
+    `✏️ <b>Custom Names</b>\n\n` +
+    `Send <b>${count}</b> names, one per line, in the order you tapped the groups:\n\n` +
+    `<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// Build the rename plan for manual mode and show review
+async function showCgnManualReview(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  const ids = data.selectedGroupIds || [];
+  const allMap = new Map((data.allGroups || []).map((g) => [g.id, g.subject] as const));
+  const plan: Array<{ groupId: string; oldName: string; newName: string }> = [];
+  for (let i = 0; i < ids.length; i++) {
+    plan.push({
+      groupId: ids[i],
+      oldName: allMap.get(ids[i]) || "(unknown)",
+      newName: (data.finalNames || [])[i] || "(missing)",
+    });
+  }
+  data.renamePlan = plan;
+  state.step = "cgn_manual_review";
+  const previewLines = plan.slice(0, 10)
+    .map((p, i) => `${i + 1}. <code>${esc(p.oldName)}</code>\n   → <code>${esc(p.newName)}</code>`)
+    .join("\n\n");
+  const more = plan.length > 10 ? `\n\n<i>… +${plan.length - 10} more</i>` : "";
+  const text =
+    `📋 <b>Rename Review</b>\n\n` +
+    `Groups to rename: <b>${plan.length}</b>\n\n${previewLines}${more}\n\n` +
+    `🚀 Ready to rename?`;
+  const markup = new InlineKeyboard()
+    .text("✅ Start Rename", "cgn_confirm")
+    .text("❌ Cancel", "main_menu");
+  try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: markup }); }
+  catch { await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup }); }
+}
+
+// ═══ AUTO MODE ══════════════════════════════════════════════════════════════
+
+bot.callbackQuery("cgn_auto", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ WhatsApp not connected.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  await ctx.editMessageText("⏳ <b>Fetching groups with pending requests...</b>\n\nPlease wait...", { parse_mode: "HTML" });
+
+  const list = await getGroupPendingList(String(userId));
+  const pendingOnly = list.filter((g) => g.pendingCount > 0);
+  if (!pendingOnly.length) {
+    await ctx.editMessageText(
+      "📋 <b>Auto Rename</b>\n\nNo groups with pending requests found.\n\nThis mode only works for groups that have at least one pending member request — that's how the bot matches a VCF to the right group.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
+  pendingOnly.sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true, sensitivity: "base" }));
+
+  userStates.set(userId, {
+    step: "cgn_auto_select_pool",
+    changeGroupNameData: {
+      mode: "auto",
+      pendingPool: pendingOnly,
+      pendingSelectedIds: [],
+      pendingPage: 0,
+      vcfFiles: [],
+    },
+  });
+  await renderCgnAutoSelect(ctx);
+});
+
+function buildCgnAutoSelectKeyboard(state: UserState): InlineKeyboard {
+  const data = state.changeGroupNameData!;
+  const pool = data.pendingPool || [];
+  const selectedIds = data.pendingSelectedIds || [];
+  const page = data.pendingPage || 0;
+  const totalPages = Math.max(1, Math.ceil(pool.length / CGN_PAGE_SIZE));
+  const start = page * CGN_PAGE_SIZE;
+  const end = Math.min(start + CGN_PAGE_SIZE, pool.length);
+
+  const kb = new InlineKeyboard();
+  for (let i = start; i < end; i++) {
+    const g = pool[i];
+    const orderIdx = selectedIds.indexOf(g.groupId);
+    const tag = orderIdx >= 0 ? `✅ ${orderIdx + 1}.` : "☐";
+    kb.text(`${tag} ${g.groupName} (${g.pendingCount})`, `cgn_a_tog_${i}`).row();
+  }
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "cgn_a_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cgn_a_page_info").text(next, "cgn_a_next_page").row();
+  }
+  kb.text("☑️ Select All", "cgn_a_select_all").text("🧹 Clear", "cgn_a_clear_all").row();
+  if (selectedIds.length > 0) kb.text(`▶️ Next: Upload VCFs (${selectedIds.length})`, "cgn_a_proceed").row();
+  kb.text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
+async function renderCgnAutoSelect(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  const count = (data.pendingSelectedIds || []).length;
+  await ctx.editMessageText(
+    `📁 <b>Auto Rename — Select Groups</b>\n\n` +
+    `📊 Groups with pending: <b>${(data.pendingPool || []).length}</b>\n` +
+    `📌 Selected: <b>${count}</b>\n\n` +
+    `Tap groups to select. After this you'll upload one VCF per group — the bot matches each VCF to the group whose pending list contains it.`,
+    { parse_mode: "HTML", reply_markup: buildCgnAutoSelectKeyboard(state) }
+  );
+}
+
+bot.callbackQuery(/^cgn_a_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.pendingPool) return;
+  const data = state.changeGroupNameData;
+  const idx = parseInt(ctx.match![1]);
+  const g = data.pendingPool![idx];
+  if (!g) return;
+  data.pendingSelectedIds = data.pendingSelectedIds || [];
+  const at = data.pendingSelectedIds.indexOf(g.groupId);
+  if (at >= 0) data.pendingSelectedIds.splice(at, 1);
+  else data.pendingSelectedIds.push(g.groupId);
+  await renderCgnAutoSelect(ctx);
+});
+
+bot.callbackQuery("cgn_a_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  if ((data.pendingPage || 0) > 0) data.pendingPage = (data.pendingPage || 0) - 1;
+  await renderCgnAutoSelect(ctx);
+});
+
+bot.callbackQuery("cgn_a_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.pendingPool) return;
+  const data = state.changeGroupNameData;
+  const totalPages = Math.ceil(data.pendingPool!.length / CGN_PAGE_SIZE);
+  if ((data.pendingPage || 0) < totalPages - 1) data.pendingPage = (data.pendingPage || 0) + 1;
+  await renderCgnAutoSelect(ctx);
+});
+
+bot.callbackQuery("cgn_a_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+});
+
+bot.callbackQuery("cgn_a_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.pendingPool) return;
+  const data = state.changeGroupNameData;
+  data.pendingSelectedIds = data.pendingPool!.map((g) => g.groupId);
+  await renderCgnAutoSelect(ctx);
+});
+
+bot.callbackQuery("cgn_a_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.pendingSelectedIds = [];
+  await renderCgnAutoSelect(ctx);
+});
+
+bot.callbackQuery("cgn_a_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.pendingSelectedIds?.length) return;
+  state.changeGroupNameData.vcfFiles = [];
+  state.step = "cgn_auto_collect_vcf";
+  const count = state.changeGroupNameData.pendingSelectedIds.length;
+  await ctx.editMessageText(
+    `📁 <b>Upload VCF Files</b>\n\n` +
+    `Send <b>${count}</b> VCF file(s) — one per selected group.\n\n` +
+    `📌 You can upload them in any order. The bot will match each VCF to the right group by checking which group's pending list contains the VCF's phone numbers.\n\n` +
+    `Progress: <b>0 / ${count}</b> received`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// Once all VCFs are uploaded, this is called by the document handler.
+async function cgnAutoAfterVcfUploaded(ctx: any) {
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  const need = (data.pendingSelectedIds || []).length;
+  const have = (data.vcfFiles || []).length;
+  if (have < need) {
+    await ctx.reply(
+      `✅ VCF received (${have}/${need}). Send ${need - have} more.`,
+      { reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    );
+    return;
+  }
+  // All VCFs collected — ask which naming mode
+  state.step = "cgn_auto_name_choose";
+  await ctx.reply(
+    `✅ <b>All ${need} VCF file(s) received!</b>\n\n` +
+    `Choose how the new group names should be built:\n\n` +
+    `📁 <b>Same as VCF name</b>\n` +
+    `Each group's new name = its VCF filename without ".vcf"\n` +
+    `<i>e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61"</i>\n\n` +
+    `✏️ <b>Customize name</b>\n` +
+    `You give a prefix like <code>SPIDY 酒店EMPIRE動FL_</code>. The bot keeps just the trailing number from each VCF filename and appends it.\n` +
+    `<i>e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61"</i>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("📁 Same as VCF name", "cgn_a_name_same")
+        .text("✏️ Customize name", "cgn_a_name_custom").row()
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+}
+
+bot.callbackQuery("cgn_a_name_same", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.autoNameMode = "same_vcf";
+  await buildAndShowCgnAutoReview(ctx);
+});
+
+bot.callbackQuery("cgn_a_name_custom", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  state.changeGroupNameData.autoNameMode = "custom_vcf";
+  state.step = "cgn_auto_custom_prefix_input";
+  await ctx.editMessageText(
+    `✏️ <b>Custom Prefix</b>\n\n` +
+    `Send the prefix you want before the trailing number from each VCF filename.\n\n` +
+    `Example:\n` +
+    `• Prefix: <code>SPIDY 酒店EMPIRE動FL_</code>\n` +
+    `• VCF filename: <code>Expedia 酒店回饋活動FL_61.vcf</code>\n` +
+    `• Final group name: <code>SPIDY 酒店EMPIRE動FL_61</code>\n\n` +
+    `<i>Tip: include a separator (space, _, -) at the end of your prefix if you want one.</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// Build the rename plan for auto mode (matches each VCF to a group by
+// pending-phone overlap) and show the review screen.
+async function buildAndShowCgnAutoReview(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData) return;
+  const data = state.changeGroupNameData;
+  const selectedIds = data.pendingSelectedIds || [];
+  const vcfs = data.vcfFiles || [];
+
+  // Tell the user we're matching — could take a few seconds for many groups.
+  let matchingMsg: any = null;
+  try {
+    matchingMsg = await ctx.reply(
+      `⏳ <b>Matching ${vcfs.length} VCF(s) to ${selectedIds.length} group(s)...</b>\n\nFetching pending requests for each group.`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+
+  // For each selected group, fetch its pending phone numbers.
+  // Then for each group, pick the VCF with most overlap (≥1) as its match.
+  const poolMap = new Map((data.pendingPool || []).map((g) => [g.groupId, g] as const));
+  const groupPendingPhones: Map<string, Set<string>> = new Map(); // last10 set
+  for (const gid of selectedIds) {
+    try {
+      const detailed = await getGroupPendingRequestsDetailed(String(userId), gid);
+      const last10s = new Set<string>();
+      for (const p of detailed) {
+        const cleaned = (p.phone || "").replace(/[^0-9]/g, "");
+        if (cleaned.length >= 7) last10s.add(cleaned.slice(-10));
+      }
+      groupPendingPhones.set(gid, last10s);
+    } catch {
+      groupPendingPhones.set(gid, new Set());
+    }
+  }
+
+  // Pre-compute each VCF's last-10 phone set
+  const vcfLast10: Array<{ idx: number; fileName: string; last10: Set<string> }> = vcfs.map((v, i) => ({
+    idx: i,
+    fileName: v.fileName,
+    last10: new Set(v.phones.map((p) => p.replace(/[^0-9]/g, "").slice(-10)).filter((s) => s.length >= 7)),
+  }));
+
+  // Greedy matching: for each VCF, find best group (most overlap, ≥1).
+  // Once a group is taken, it can't be re-used. If two VCFs tie for the
+  // same group, the higher-overlap VCF wins; the loser stays unmatched.
+  const groupTaken = new Set<string>();
+  const vcfToGroup = new Map<number, string>(); // vcfIdx -> groupId
+  // Compute all (vcf, group) overlap candidates, sort descending, then assign.
+  type Cand = { vcfIdx: number; groupId: string; overlap: number };
+  const cands: Cand[] = [];
+  for (const v of vcfLast10) {
+    for (const gid of selectedIds) {
+      const gset = groupPendingPhones.get(gid)!;
+      let overlap = 0;
+      for (const p of v.last10) if (gset.has(p)) overlap++;
+      if (overlap > 0) cands.push({ vcfIdx: v.idx, groupId: gid, overlap });
+    }
+  }
+  cands.sort((a, b) => b.overlap - a.overlap);
+  const vcfTaken = new Set<number>();
+  for (const c of cands) {
+    if (vcfTaken.has(c.vcfIdx) || groupTaken.has(c.groupId)) continue;
+    vcfToGroup.set(c.vcfIdx, c.groupId);
+    vcfTaken.add(c.vcfIdx);
+    groupTaken.add(c.groupId);
+  }
+
+  // Build rename plan in selection order. For each selected group:
+  //   • find the matched VCF (if any)
+  //   • compute new name based on autoNameMode
+  const plan: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }> = [];
+  // Reverse map: groupId -> matched vcf
+  const groupToVcf = new Map<string, { vcfIdx: number; fileName: string }>();
+  for (const [vidx, gid] of vcfToGroup.entries()) {
+    groupToVcf.set(gid, { vcfIdx: vidx, fileName: vcfs[vidx].fileName });
+  }
+
+  for (const gid of selectedIds) {
+    const groupName = poolMap.get(gid)?.groupName || "(unknown)";
+    const matched = groupToVcf.get(gid);
+    if (!matched) {
+      plan.push({ groupId: gid, oldName: groupName, newName: "(no matching VCF — will skip)" });
+      continue;
+    }
+    let newName = "";
+    if (data.autoNameMode === "same_vcf") {
+      newName = vcfBasename(matched.fileName);
+    } else {
+      const num = extractTrailingNumber(matched.fileName);
+      newName = (data.customPrefix || "") + num;
+    }
+    plan.push({ groupId: gid, oldName: groupName, newName, vcfFileName: matched.fileName });
+  }
+
+  // Also note any VCFs that didn't match any group
+  const unmatchedVcfs: string[] = [];
+  for (const v of vcfLast10) {
+    if (!vcfTaken.has(v.idx)) unmatchedVcfs.push(v.fileName);
+  }
+
+  data.renamePlan = plan;
+  state.step = "cgn_auto_review";
+
+  const previewLines = plan.slice(0, 12).map((p, i) => {
+    const vcfTag = p.vcfFileName ? `   📁 ${esc(p.vcfFileName)}\n` : "";
+    return `${i + 1}. <code>${esc(p.oldName)}</code>\n${vcfTag}   → <code>${esc(p.newName)}</code>`;
+  }).join("\n\n");
+  const more = plan.length > 12 ? `\n\n<i>… +${plan.length - 12} more</i>` : "";
+  const validCount = plan.filter((p) => !p.newName.startsWith("(no matching")).length;
+  const skipCount = plan.length - validCount;
+
+  let warn = "";
+  if (skipCount > 0) warn += `\n⚠️ ${skipCount} group(s) had no matching VCF — they will be skipped.`;
+  if (unmatchedVcfs.length > 0) {
+    warn += `\n⚠️ ${unmatchedVcfs.length} VCF(s) didn't match any group:\n` +
+      unmatchedVcfs.slice(0, 3).map((n) => `   • ${esc(n)}`).join("\n");
+    if (unmatchedVcfs.length > 3) warn += `\n   … +${unmatchedVcfs.length - 3} more`;
+  }
+
+  const text =
+    `📋 <b>Auto Rename — Review</b>\n\n` +
+    `Will rename: <b>${validCount}</b> / ${plan.length} groups${warn}\n\n` +
+    `${previewLines}${more}\n\n` +
+    `🚀 Ready to rename?`;
+  const markup = new InlineKeyboard();
+  if (validCount > 0) markup.text("✅ Start Rename", "cgn_confirm").text("❌ Cancel", "main_menu");
+  else markup.text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu");
+
+  try {
+    if (matchingMsg) {
+      await ctx.api.editMessageText(matchingMsg.chat.id, matchingMsg.message_id, text, {
+        parse_mode: "HTML",
+        reply_markup: markup,
+      });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup });
+    }
+  } catch {
+    try { await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup }); } catch {}
+  }
+}
+
+// ═══ SHARED: Confirm + Background Rename + Cancel ═══════════════════════════
+
+bot.callbackQuery("cgn_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.changeGroupNameData?.renamePlan) return;
+  const plan = state.changeGroupNameData.renamePlan.filter((p) => !p.newName.startsWith("(no matching"));
+  if (!plan.length) return;
+  const chatId = ctx.callbackQuery.message?.chat.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+  if (!chatId || !msgId) return;
+
+  state.step = "cgn_renaming";
+  state.changeGroupNameData.cancel = false;
+
+  await ctx.editMessageText(
+    `⏳ <b>Renaming ${plan.length} group(s)...</b>\n\n🔄 0/${plan.length} done...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request") }
+  );
+
+  void runChangeGroupNameBackground(userId, chatId, msgId, plan);
+});
+
+bot.callbackQuery("cgn_cancel_request", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  cancelDialogActiveFor.add(ctx.from.id);
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard()
+      .text("✅ Yes, Stop Renaming", "cgn_cancel_confirm")
+      .text("↩️ Continue", "cgn_cancel_no"),
+  });
+});
+
+bot.callbackQuery("cgn_cancel_no", async (ctx) => {
+  cancelDialogActiveFor.delete(ctx.from.id);
+  await ctx.answerCallbackQuery({ text: "Renaming continued" });
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request"),
+  });
+});
+
+bot.callbackQuery("cgn_cancel_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Stopping after current group..." });
+  const state = userStates.get(ctx.from.id);
+  if (state?.changeGroupNameData) state.changeGroupNameData.cancel = true;
+  // Keep dialog flag on; background loop's cleanup clears it.
+  await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+});
+
+async function runChangeGroupNameBackground(
+  userId: number,
+  chatId: number,
+  msgId: number,
+  plan: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }>,
+) {
+  const results: Array<{ groupId: string; oldName: string; newName: string; ok: boolean; error?: string }> = [];
+  let done = 0;
+  let cancelled = false;
+
+  for (let i = 0; i < plan.length; i++) {
+    const state = userStates.get(userId);
+    if (state?.changeGroupNameData?.cancel) {
+      cancelled = true;
+      break;
+    }
+    const p = plan[i];
+    const r = await setGroupName(String(userId), p.groupId, p.newName);
+    results.push({ groupId: p.groupId, oldName: p.oldName, newName: p.newName, ok: r.ok, error: r.error });
+    done++;
+
+    // Live progress — skip overwrite if user is staring at the cancel-confirm dialog.
+    if (!cancelDialogActiveFor.has(userId)) {
+      try {
+        const last5 = results.slice(-5).map((res) => {
+          const tag = res.ok ? "✅" : "❌";
+          return `${tag} ${esc(res.oldName)} → ${esc(res.newName)}${res.ok ? "" : ` (${esc(res.error || "fail")})`}`;
+        }).join("\n");
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Renaming ${done}/${plan.length}...</b>\n\n${last5}`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request") }
+        );
+      } catch {}
+    }
+
+    // Small delay between renames to avoid hammering WhatsApp.
+    if (i < plan.length - 1) await new Promise((r) => setTimeout(r, 800));
+  }
+
+  // Cleanup cancel-dialog flag so the next flow starts clean.
+  cancelDialogActiveFor.delete(userId);
+
+  const ok = results.filter((r) => r.ok).length;
+  const fail = results.length - ok;
+  const skipped = plan.length - results.length; // remaining when cancelled
+  const header = cancelled
+    ? `🛑 <b>Cancelled</b> (${ok} renamed, ${fail} failed, ${skipped} skipped)`
+    : `🎉 <b>Done!</b> (${ok} renamed, ${fail} failed)`;
+  const lines = results.map((r) => {
+    if (r.ok) return `✅ ${esc(r.oldName)} → ${esc(r.newName)}`;
+    return `❌ ${esc(r.oldName)} → ${esc(r.newName)} <i>(${esc(r.error || "fail")})</i>`;
+  }).join("\n");
+
+  const fullText = `${header}\n\n${lines}`;
+  const chunks = splitMessage(fullText, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1
+        ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+        : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    try {
+      await bot.api.sendMessage(chatId, chunks[i], {
+        parse_mode: "HTML",
+        reply_markup: i === chunks.length - 1
+          ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+          : undefined,
+      });
+    } catch {}
+  }
+
+  // Clear the user's state once we're done.
+  const finalState = userStates.get(userId);
+  if (finalState && finalState.step?.startsWith("cgn_")) {
+    userStates.delete(userId);
+  }
+}
+
+
 // ─── Add Members Feature ──────────────────────────────────────────────────────
 
 bot.callbackQuery("add_members", async (ctx) => {
@@ -9268,6 +10187,45 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  // ── Change Group Name: text inputs ──
+  if (state.step === "cgn_manual_naming_auto_input" && state.changeGroupNameData) {
+    const data = state.changeGroupNameData;
+    const count = (data.selectedGroupIds || []).length;
+    if (!text) {
+      await ctx.reply("⚠️ Empty name. Send a base name like <code>Spidy</code>.", { parse_mode: "HTML" });
+      return;
+    }
+    data.baseName = text;
+    data.finalNames = generateGroupNames(text, count);
+    await showCgnManualReview(ctx);
+    return;
+  }
+  if (state.step === "cgn_manual_naming_custom_input" && state.changeGroupNameData) {
+    const data = state.changeGroupNameData;
+    const count = (data.selectedGroupIds || []).length;
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+    if (lines.length !== count) {
+      await ctx.reply(
+        `⚠️ Got <b>${lines.length}</b> name(s) but selected <b>${count}</b> group(s). Send exactly ${count} names, one per line.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    data.finalNames = lines;
+    await showCgnManualReview(ctx);
+    return;
+  }
+  if (state.step === "cgn_auto_custom_prefix_input" && state.changeGroupNameData) {
+    const data = state.changeGroupNameData;
+    if (!text) {
+      await ctx.reply("⚠️ Empty prefix. Send the prefix text (e.g. <code>SPIDY 酒店EMPIRE動FL_</code>).", { parse_mode: "HTML" });
+      return;
+    }
+    data.customPrefix = text;
+    await buildAndShowCgnAutoReview(ctx);
+    return;
+  }
+
   if (state.step === "acig_enter_message" && state.chatInGroupData) {
     state.chatInGroupData.message = text;
     state.step = "acig_confirm";
@@ -9941,6 +10899,37 @@ bot.on("message:document", async (ctx) => {
       }
       state.approvalData.targetPhones = phoneNumbers;
       await showAdminApprovalChoice(ctx, userId);
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── Change Group Name (Auto): collect one VCF per selected group ──
+  if (state.step === "cgn_auto_collect_vcf" && state.changeGroupNameData) {
+    try {
+      const data = state.changeGroupNameData;
+      const need = (data.pendingSelectedIds || []).length;
+      data.vcfFiles = data.vcfFiles || [];
+      if (data.vcfFiles.length >= need) {
+        await ctx.reply("✅ All required VCF files already received.");
+        return;
+      }
+      const file = await ctx.api.getFile(doc.file_id);
+      if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
+      const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      const rawContacts = parseVCF(content);
+      const phones: string[] = [];
+      for (const c of rawContacts) {
+        const cleaned = (c.phone || "").replace(/[^0-9]/g, "");
+        if (cleaned.length >= 7) phones.push(cleaned);
+      }
+      if (phones.length === 0) {
+        await ctx.reply("❌ No valid phone numbers found in this VCF. Send a different file.");
+        return;
+      }
+      data.vcfFiles.push({ fileName: doc.file_name || "(unnamed.vcf)", phones });
+      await cgnAutoAfterVcfUploaded(ctx);
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
     }
