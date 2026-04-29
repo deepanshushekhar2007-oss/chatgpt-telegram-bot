@@ -2976,7 +2976,9 @@ bot.command("memory", async (ctx) => {
   // here). Computing % against heapTotal gives misleading "97% Critical"
   // readings even when there's plenty of room left to grow. Always compare
   // heapUsed to the real max-old-space-size limit for a meaningful figure.
-  const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "460");
+  // Default 380 matches the actual --max-old-space-size=380 flag in
+  // package.json's start script. If you change one, change the other.
+  const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "380");
   const heapPct = Math.min(100, Math.round((heapUsed / HEAP_LIMIT_MB) * 100));
 
   // Render free tier = 512 MB total. We compute against that so the bar shows
@@ -3022,8 +3024,9 @@ function buildMemBar(pct: number): string {
   return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
 
-// /cleanram — admin-only aggressive memory purge.
-// Clears every cache that's safe to drop without breaking active users:
+// runMemoryPurge — shared implementation behind both the admin /cleanram
+// command and the automatic memory watchdog (see index.ts). Clears every
+// cache that's safe to drop without breaking active users:
 //   • i18n translation cache + negative cache (will re-translate on demand)
 //   • /help pagination state (users will re-paginate)
 //   • Expired QR pairings (active QR scans untouched)
@@ -3032,19 +3035,39 @@ function buildMemBar(pct: number): string {
 //   • Idle WhatsApp sockets via sweepIdleSessions (doesn't kick live users)
 //   • newSessionFlag (per-update flag, safe to clear)
 // Then forces 3 GC passes (V8 needs multiple to reclaim across heap regions)
-// and reports before/after RSS so you can see exactly how much was freed.
+// and returns before/after RSS plus per-bucket counts so the caller can
+// log/display them.
 //
 // SAFE: Does NOT touch userStates of users with ongoing flows, in-flight
 // translation promises, autoChat/cig/acf sessions, or live WA sockets that
 // have been active recently. Those would break user experience.
-bot.command("cleanram", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+//
+// `reason` is only used for the [MEM-PURGE] log line so we can tell apart
+// admin-triggered runs (`/cleanram`) from automatic ones (`auto-watchdog
+// rss=4XX`).
+export interface MemoryPurgeResult {
+  rssBefore: number;
+  rssAfter: number;
+  rssDelta: number;
+  heapBefore: number;
+  heapAfter: number;
+  heapDelta: number;
+  i18nMemCleared: number;
+  i18nNegCleared: number;
+  helpPagesCleared: number;
+  qrCleared: number;
+  userStatesCleared: number;
+  activityCleared: number;
+  cancelCleared: number;
+  newSessionCleared: number;
+  waEvicted: number;
+  waTotal: number;
+}
 
+export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult> {
   const memBefore = process.memoryUsage();
   const rssBefore = memBefore.rss / 1024 / 1024;
   const heapBefore = memBefore.heapUsed / 1024 / 1024;
-
-  const statusMsg = await ctx.reply("🧹 <b>Cleaning RAM...</b>\n\nClearing caches and running garbage collection...", { parse_mode: "HTML" });
 
   // 1. Translation caches (biggest non-session leak source)
   const i18nCleared = clearTranslationCaches();
@@ -3128,6 +3151,48 @@ bot.command("cleanram", async (ctx) => {
   const heapAfter = memAfter.heapUsed / 1024 / 1024;
   const rssDelta = rssBefore - rssAfter;
   const heapDelta = heapBefore - heapAfter;
+
+  console.log(
+    `[MEM-PURGE] ${reason}: rss ${rssBefore.toFixed(0)}MB -> ${rssAfter.toFixed(0)}MB ` +
+    `(freed ${rssDelta.toFixed(0)}MB), heap ${heapBefore.toFixed(0)}MB -> ${heapAfter.toFixed(0)}MB, ` +
+    `i18n=${i18nCleared.memCleared}+${i18nCleared.negCleared} states=${userStatesCleared} ` +
+    `wa=${waEvicted}evicted/${waTotal}live`
+  );
+
+  return {
+    rssBefore, rssAfter, rssDelta,
+    heapBefore, heapAfter, heapDelta,
+    i18nMemCleared: i18nCleared.memCleared,
+    i18nNegCleared: i18nCleared.negCleared,
+    helpPagesCleared, qrCleared, userStatesCleared, activityCleared,
+    cancelCleared, newSessionCleared, waEvicted, waTotal,
+  };
+}
+
+// /cleanram — admin-only manual trigger for runMemoryPurge.
+// Replies with a before/after breakdown so admin can see exactly what was
+// freed. Underlying logic is the same as the automatic watchdog.
+bot.command("cleanram", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+
+  const statusMsg = await ctx.reply("🧹 <b>Cleaning RAM...</b>\n\nClearing caches and running garbage collection...", { parse_mode: "HTML" });
+
+  const r = await runMemoryPurge("admin /cleanram");
+  const i18nCleared = { memCleared: r.i18nMemCleared, negCleared: r.i18nNegCleared };
+  const helpPagesCleared = r.helpPagesCleared;
+  const qrCleared = r.qrCleared;
+  const userStatesCleared = r.userStatesCleared;
+  const activityCleared = r.activityCleared;
+  const cancelCleared = r.cancelCleared;
+  const newSessionCleared = r.newSessionCleared;
+  const waEvicted = r.waEvicted;
+  const waTotal = r.waTotal;
+  const rssBefore = r.rssBefore;
+  const rssAfter = r.rssAfter;
+  const heapBefore = r.heapBefore;
+  const heapAfter = r.heapAfter;
+  const rssDelta = r.rssDelta;
+  const heapDelta = r.heapDelta;
 
   const fmt = (n: number) => n.toFixed(1);
   const sign = (n: number) => (n >= 0 ? "−" : "+"); // we report freed as positive

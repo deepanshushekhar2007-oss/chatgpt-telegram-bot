@@ -1,6 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
-import { startBot } from "./bot/telegram";
+import { startBot, runMemoryPurge } from "./bot/telegram";
 import { getActiveSessionUserIds, sweepIdleSessions } from "./bot/whatsapp";
 import { getMongoDb, closeMongoDb } from "./bot/mongodb";
 import { cleanupStaleSessions } from "./bot/mongo-auth-state";
@@ -144,6 +144,62 @@ async function main() {
         `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
       );
     }, 5 * 60 * 1000);
+
+    // ─── Memory watchdog ────────────────────────────────────────────────────
+    // Render free tier is hard-capped at 512 MB RSS. Once we cross that the
+    // host kills the process and ALL connected WhatsApp sessions die at once
+    // (visible to users as a sudden mass disconnect). Until now the only
+    // proactive cleanup was the once-every-5-min GC interval and the once-
+    // every-1-min idle sweep — neither flushes the i18n translation cache,
+    // /help pagination, stale userActivity, etc., so a user could watch RSS
+    // climb to 380+ MB and stay there until the admin manually ran /cleanram.
+    //
+    // This watchdog fixes that by running the same routine /cleanram does
+    // (clearTranslationCaches + stale userStates/activity + cancel flags +
+    // newSessionFlag + idle-WA sweep + 3 GC passes), automatically, whenever
+    // RSS crosses MEM_WATCHDOG_HIGH_MB. Cooldown stops it from thrashing if
+    // the cleanup doesn't immediately bring RSS back under the line.
+    //
+    // Knobs (env-tunable so you can adjust without redeploying code):
+    //   MEM_WATCHDOG_HIGH_MB     — RSS in MB at which auto-purge fires
+    //                              (default 360, i.e. ~70% of 512 MB cap).
+    //                              Set lower for an earlier safety net,
+    //                              higher to give Baileys more buffer room.
+    //   MEM_WATCHDOG_COOLDOWN_MS — minimum gap between two purges in ms
+    //                              (default 120000 = 2 min). Prevents the
+    //                              watchdog from firing every 30 s when RSS
+    //                              stays flat above the threshold.
+    //   MEM_WATCHDOG_INTERVAL_MS — how often we sample RSS (default 30000
+    //                              = 30 s). Sampling is dirt cheap (one
+    //                              process.memoryUsage() call), so this
+    //                              can be tightened for faster response
+    //                              without measurable cost.
+    //
+    // SAFE: runMemoryPurge does NOT touch live users — see that function's
+    // header in telegram.ts. The worst case is: an idle WhatsApp socket
+    // gets evicted, and the user lazily-reconnects on next /start with no
+    // re-pairing required (creds are in MongoDB).
+    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "360");
+    const MEM_WATCHDOG_COOLDOWN_MS = Number(process.env["MEM_WATCHDOG_COOLDOWN_MS"] || String(2 * 60 * 1000));
+    const MEM_WATCHDOG_INTERVAL_MS = Number(process.env["MEM_WATCHDOG_INTERVAL_MS"] || String(30 * 1000));
+    let lastWatchdogPurgeAt = 0;
+    setInterval(() => {
+      const rssMb = process.memoryUsage().rss / 1024 / 1024;
+      if (rssMb < MEM_WATCHDOG_HIGH_MB) return;
+      const now = Date.now();
+      if (now - lastWatchdogPurgeAt < MEM_WATCHDOG_COOLDOWN_MS) return;
+      lastWatchdogPurgeAt = now;
+      // Fire-and-forget; the purge itself logs a [MEM-PURGE] line with the
+      // before/after numbers so we don't need to await + log here.
+      runMemoryPurge(`auto-watchdog rss=${rssMb.toFixed(0)}MB`).catch((err: any) => {
+        console.error(`[MEM-WATCHDOG] purge failed:`, err?.message);
+      });
+    }, MEM_WATCHDOG_INTERVAL_MS);
+    console.log(
+      `[INIT] Memory watchdog active: auto-purge when RSS > ${MEM_WATCHDOG_HIGH_MB}MB ` +
+      `(check every ${Math.round(MEM_WATCHDOG_INTERVAL_MS / 1000)}s, ` +
+      `cooldown ${Math.round(MEM_WATCHDOG_COOLDOWN_MS / 1000)}s).`
+    );
   });
 
   startBot();
