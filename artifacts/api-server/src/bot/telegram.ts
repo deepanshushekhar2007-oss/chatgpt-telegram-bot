@@ -103,6 +103,63 @@ const bot = new Bot(token || "placeholder");
 // Cached bot username for building referral deep links. Populated lazily on
 // first access so we don't have to await getMe() during startup.
 let cachedBotUsername: string | null = null;
+
+// ── Pending referrals (force-sub aware) ─────────────────────────────────────
+// When a user opens the bot via "/start ref_<referrerId>" but is NOT yet
+// joined to FORCE_SUB_CHANNEL, the original /start handler returns early
+// (force-sub guard) and the referral payload is lost — the referrer never
+// gets credit. This map stashes the referrer-id keyed by the new user's
+// telegram-id so the `check_joined` callback can credit the referral once
+// the user actually joins the channel.
+//
+// Entries are dropped after PENDING_REFERRAL_TTL_MS or after they're consumed
+// by check_joined / clearUserMemoryState. Cap is small (one entry per user
+// per /start) so unbounded growth is not a real concern, but the TTL sweep
+// keeps it tidy if a user opens the link and never joins.
+const pendingReferrals: Map<number, { referrerId: number; createdAt: number }> = new Map();
+const PENDING_REFERRAL_TTL_MS = 60 * 60 * 1000; // 1 hour
+setInterval(() => {
+  const cutoff = Date.now() - PENDING_REFERRAL_TTL_MS;
+  for (const [uid, entry] of pendingReferrals) {
+    if (entry.createdAt < cutoff) pendingReferrals.delete(uid);
+  }
+}, 15 * 60 * 1000);
+
+// Shared referral-award helper. Called from /start when the user is already
+// joined to the channel AND from `check_joined` when the user joins via the
+// force-sub flow. Idempotent: recordReferral() in db.ts dedupes — a user can
+// only ever earn one referrer credit, no matter how many times this runs.
+async function processReferralAward(newUserId: number, referrerId: number): Promise<void> {
+  if (!referrerId || !Number.isFinite(referrerId)) return;
+  if (referrerId === newUserId) return; // can't refer yourself
+  try {
+    const data = await loadBotData();
+    if (!data.referMode) return;
+    const result = await recordReferral(
+      newUserId, referrerId, REFERRAL_REWARD_MS, ADMIN_USER_ID
+    );
+    if (result.success && referrerId !== ADMIN_USER_ID) {
+      const totalText = result.totalReferred
+        ? `\n👥 <b>Total people you've referred:</b> ${result.totalReferred}`
+        : "";
+      const remaining = result.referrerExpiresAt
+        ? `\n⏰ <b>Your access now lasts:</b> ${formatRemaining(result.referrerExpiresAt)}`
+        : "";
+      bot.api.sendMessage(
+        referrerId,
+        `🎉 <b>New referral!</b>\n\n` +
+        `User <code>${newUserId}</code> just started the bot through your link.\n\n` +
+        `✅ <b>You've earned 1 extra day of free access.</b>${remaining}${totalText}`,
+        { parse_mode: "HTML" }
+      ).catch((err: any) => {
+        console.error(`[REFER] Failed to notify referrer ${referrerId}:`, err?.message);
+      });
+    }
+  } catch (err: any) {
+    console.error(`[REFER] processReferralAward error:`, err?.message);
+  }
+}
+
 async function getBotUsername(): Promise<string> {
   if (cachedBotUsername) return cachedBotUsername;
   try {
@@ -1591,6 +1648,19 @@ bot.callbackQuery("check_joined", async (ctx) => {
     if (["member", "administrator", "creator"].includes(member.status)) {
       const data = await loadBotData();
 
+      // ── Award any pending referral now that the user has joined the
+      // required channel. The referrer-id was stashed by /start when the
+      // user first opened "/start ref_<id>" but failed the force-sub
+      // guard. Awarding here means a user who joins the channel during
+      // the force-sub flow still earns the referrer their +1 day —
+      // previously this was silently dropped. Idempotent (recordReferral
+      // dedupes), and we delete the pending entry to free the map.
+      const pending = pendingReferrals.get(userId);
+      if (pending) {
+        pendingReferrals.delete(userId);
+        await processReferralAward(userId, pending.referrerId);
+      }
+
       // First-time users (no language picked yet) → show language picker.
       // Trial creation + trial banner are deferred until after language
       // selection (handled in applyLanguageSelection), matching the /start
@@ -1774,41 +1844,32 @@ bot.command("start", async (ctx) => {
     await ctx.reply("🚫 You are banned from using this bot.");
     return;
   }
-  if (!(await checkForceSub(ctx))) return;
 
-  // ── Referral payload handling ─────────────────────────────────────────
-  // If the user arrived through someone's referral link AND refer mode is
-  // currently ON AND the referrer is eligible to earn from this user, we
-  // record the referral, give the referrer +1 day, and notify them.
+  // ── Parse referral payload FIRST (before the force-sub guard) ─────────
+  // We need the referrer-id captured even if checkForceSub returns false,
+  // otherwise users who join the channel via the force-sub flow lose the
+  // referral credit (the original /start ref_<id> message is not available
+  // inside the check_joined callback). If force-sub fails below, we stash
+  // it in pendingReferrals; check_joined consumes it after a successful
+  // join. If force-sub passes (already joined), we award immediately so
+  // the existing fast-path behaviour is preserved.
   const payload = parseStartPayload(ctx.message?.text);
   const refMatch = payload.match(/^ref_(\d+)$/i);
   const referrerId = refMatch ? Number(refMatch[1]) : 0;
-  if (referrerId && Number.isFinite(referrerId)) {
-    const data = await loadBotData();
-    if (data.referMode) {
-      const result = await recordReferral(
-        userId, referrerId, REFERRAL_REWARD_MS, ADMIN_USER_ID
-      );
-      if (result.success && referrerId !== ADMIN_USER_ID) {
-        // Notify the referrer in their own chat — keeps them looped in
-        // and motivates more sharing. All copy in English.
-        const totalText = result.totalReferred
-          ? `\n👥 <b>Total people you've referred:</b> ${result.totalReferred}`
-          : "";
-        const remaining = result.referrerExpiresAt
-          ? `\n⏰ <b>Your access now lasts:</b> ${formatRemaining(result.referrerExpiresAt)}`
-          : "";
-        bot.api.sendMessage(
-          referrerId,
-          `🎉 <b>New referral!</b>\n\n` +
-          `User <code>${userId}</code> just started the bot through your link.\n\n` +
-          `✅ <b>You've earned 1 extra day of free access.</b>${remaining}${totalText}`,
-          { parse_mode: "HTML" }
-        ).catch((err: any) => {
-          console.error(`[REFER] Failed to notify referrer ${referrerId}:`, err?.message);
-        });
-      }
+
+  if (!(await checkForceSub(ctx))) {
+    // User is being asked to join the channel. Remember the referrer so
+    // we can credit it once they tap "✅ I Joined".
+    if (referrerId && Number.isFinite(referrerId) && referrerId !== userId) {
+      pendingReferrals.set(userId, { referrerId, createdAt: Date.now() });
     }
+    return;
+  }
+
+  // ── Referral award (channel-already-joined fast path) ─────────────────
+  // User is already a channel member, so award the referral right now.
+  if (referrerId && Number.isFinite(referrerId)) {
+    await processReferralAward(userId, referrerId);
   }
 
   // ── First-time users (no language set yet) → language picker FIRST.
