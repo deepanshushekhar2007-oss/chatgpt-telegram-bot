@@ -10215,8 +10215,10 @@ async function runChangeGroupNameBackground(
       } catch {}
     }
 
-    // Small delay between renames to avoid hammering WhatsApp.
-    if (i < plan.length - 1) await new Promise((r) => setTimeout(r, 800));
+    // Delay between renames to stay under WhatsApp's per-account rate limit
+    // for group-subject updates. Combined with the in-`setGroupName` retry
+    // logic, this should keep the failure rate near zero even on long batches.
+    if (i < plan.length - 1) await new Promise((r) => setTimeout(r, 1500));
   }
 
   // Cleanup cancel-dialog flag so the next flow starts clean.

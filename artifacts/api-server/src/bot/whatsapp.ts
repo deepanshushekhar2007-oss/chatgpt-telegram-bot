@@ -1118,12 +1118,43 @@ export async function setGroupName(
   // results predictable we cap here and surface a clean error instead of
   // silently failing later.
   if (trimmed.length > 100) return { ok: false, error: "Name too long (max 100 chars)" };
-  try {
-    await session.socket.groupUpdateSubject(groupId, trimmed);
-    return { ok: true };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || "Unknown error" };
+
+  // WhatsApp throttles group-subject updates per-account. When we batch-rename
+  // many groups back to back, the server returns "rate-overlimit" for any
+  // request that exceeded the throttle window. Instead of giving up on the
+  // first failure, transparently retry a few times with exponential backoff —
+  // the throttle window is short (a few seconds), so a brief pause almost
+  // always succeeds. This is invisible to the caller; only persistent
+  // failures bubble up.
+  const RETRY_DELAYS_MS = [4000, 10000, 25000]; // 4s, 10s, 25s
+  let lastErr = "Unknown error";
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      await session.socket.groupUpdateSubject(groupId, trimmed);
+      return { ok: true };
+    } catch (e: any) {
+      lastErr = e?.message || e?.data || "Unknown error";
+      const isRateLimit =
+        typeof lastErr === "string" &&
+        (lastErr.includes("rate-overlimit") ||
+          lastErr.includes("rate-limit") ||
+          lastErr.includes("overlimit"));
+      // Only retry rate-limit errors. Other errors (not-authorized, bad-request,
+      // forbidden, etc.) are permanent and should fail fast so the user sees
+      // the real reason.
+      if (!isRateLimit || attempt === RETRY_DELAYS_MS.length) {
+        return { ok: false, error: lastErr };
+      }
+      const waitMs = RETRY_DELAYS_MS[attempt];
+      console.log(`[WA][${userId}] setGroupName rate-limit on ${groupId}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${RETRY_DELAYS_MS.length})`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      // Re-check session is still alive before retrying.
+      if (!session.connected) {
+        return { ok: false, error: "WhatsApp disconnected during retry" };
+      }
+    }
   }
+  return { ok: false, error: lastErr };
 }
 
 export async function applyGroupSettings(
