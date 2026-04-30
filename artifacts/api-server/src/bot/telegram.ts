@@ -921,6 +921,8 @@ interface UserState {
   leaveData?: {
     groups: Array<{ id: string; subject: string; isAdmin: boolean }>;
     mode: "member" | "admin" | "all";
+    patterns?: SimilarGroup[];
+    selectedGroups?: Array<{ id: string; subject: string; isAdmin: boolean }>;
   };
   removeData?: {
     allGroups: Array<{ id: string; subject: string }>;
@@ -1697,7 +1699,7 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
-    .text("🛡️ Auto Accepter", "auto_accepter").text("❓ Help", "help_button").row();
+    .text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -5649,6 +5651,8 @@ bot.callbackQuery("ar_stop_job", async (ctx) => {
 
 // ─── Leave Group ─────────────────────────────────────────────────────────────
 
+const leaveJobCancel = new Set<number>();
+
 bot.callbackQuery("leave_group", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -5664,70 +5668,178 @@ bot.callbackQuery("leave_group", async (ctx) => {
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("👤 Leave Member Groups", "leave_member").text("👑 Leave Admin Groups", "leave_admin").row()
-        .text("🗑️ Leave All Groups", "leave_all").row()
+        .text("👤 Leave Member Groups", "lv_member").row()
+        .text("👑 Leave Admin Groups", "lv_admin").row()
         .text("🏠 Main Menu", "main_menu"),
     }
   );
 });
 
-async function showLeaveConfirmation(ctx: any, userId: number, mode: "member" | "admin" | "all") {
+async function showLeaveTypeMenu(ctx: any, userId: number, type: "member" | "admin") {
   await ctx.editMessageText("🔍 <b>Scanning groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
-  const filtered = mode === "member" ? allGroups.filter((g) => !g.isAdmin)
-    : mode === "admin" ? allGroups.filter((g) => g.isAdmin)
-    : allGroups;
+  const filtered = type === "member"
+    ? allGroups.filter((g) => !g.isAdmin)
+    : allGroups.filter((g) => g.isAdmin);
 
   if (!filtered.length) {
-    const label = mode === "member" ? "member" : mode === "admin" ? "admin" : "any";
-    await ctx.editMessageText(`📭 No ${label} groups found.`, {
+    await ctx.editMessageText(`📭 No ${type} groups found.`, {
       reply_markup: new InlineKeyboard().text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu"),
     }); return;
   }
 
-  const modeLabel = mode === "member" ? "👤 Member" : mode === "admin" ? "👑 Admin" : "🗑️ All";
-  let text = `🚪 <b>Leave ${modeLabel} Groups</b>\n\n`;
-  text += `📊 <b>Groups to leave: ${filtered.length}</b>\n\n`;
-  for (const g of filtered) text += `• ${esc(g.subject)} ${g.isAdmin ? "👑" : "👤"}\n`;
-  text += "\n⚠️ <b>Are you sure you want to leave these groups?</b>";
+  const simple = filtered.map((g) => ({ id: g.id, subject: g.subject }));
+  const patterns = detectSimilarGroups(simple);
 
   userStates.set(userId, {
-    step: "leave_confirm",
-    leaveData: { groups: filtered.map((g) => ({ id: g.id, subject: g.subject, isAdmin: g.isAdmin })), mode },
+    step: "lv_type_menu",
+    leaveData: {
+      groups: filtered.map((g) => ({ id: g.id, subject: g.subject, isAdmin: g.isAdmin })),
+      mode: type,
+      patterns,
+    },
   });
+
+  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) {
+    kb.text("🔗 Similar Groups", `lv_${type}_similar`).text("📋 All Groups", `lv_${type}_all`).row();
+  } else {
+    kb.text("📋 All Groups", `lv_${type}_all`).row();
+  }
+  kb.text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🚪 <b>Leave ${typeLabel} Groups</b>\n\n` +
+    `📊 Found <b>${filtered.length}</b> ${type} groups\n` +
+    (patterns.length > 0 ? `🔍 <b>${patterns.length}</b> similar patterns detected\n` : "") +
+    `\nChoose how to select groups:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
+bot.callbackQuery("lv_member", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveTypeMenu(ctx, ctx.from.id, "member"); });
+bot.callbackQuery("lv_admin", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveTypeMenu(ctx, ctx.from.id, "admin"); });
+
+async function showLeaveSimilarList(ctx: any, userId: number, type: "member" | "admin") {
+  const state = userStates.get(userId);
+  if (!state?.leaveData?.patterns) {
+    await ctx.editMessageText("⚠️ Session expired. Please start again.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "leave_group"),
+    }); return;
+  }
+  const patterns = state.leaveData.patterns!;
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", `lv_${type}`).text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    kb.text(`🔗 ${patterns[i].base} (${patterns[i].groups.length})`, `lv_${type}_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", `lv_${type}`).text("🏠 Menu", "main_menu");
+  await ctx.editMessageText(`🚪 <b>Similar Group Patterns</b>\n\nSelect a pattern to leave:`, {
+    parse_mode: "HTML", reply_markup: kb,
+  });
+}
+
+bot.callbackQuery("lv_member_similar", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveSimilarList(ctx, ctx.from.id, "member"); });
+bot.callbackQuery("lv_admin_similar", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveSimilarList(ctx, ctx.from.id, "admin"); });
+
+async function showLeavePatternGroups(ctx: any, userId: number, type: "member" | "admin", patIdx: number) {
+  const state = userStates.get(userId);
+  if (!state?.leaveData?.patterns) {
+    await ctx.editMessageText("⚠️ Session expired.", { reply_markup: new InlineKeyboard().text("🔙", "leave_group") }); return;
+  }
+  const pattern = state.leaveData.patterns![patIdx];
+  if (!pattern) {
+    await ctx.editMessageText("⚠️ Pattern not found.", { reply_markup: new InlineKeyboard().text("🔙", `lv_${type}_similar`) }); return;
+  }
+
+  const selectedGroups = state.leaveData.groups.filter((g) =>
+    pattern.groups.some((pg) => pg.id === g.id)
+  );
+  userStates.set(userId, { ...state, leaveData: { ...state.leaveData, selectedGroups } });
+
+  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
+  let text = `🚪 <b>Leave ${typeLabel} Groups — "${esc(pattern.base)}"</b>\n\n`;
+  text += `📊 <b>${selectedGroups.length} group(s) will be left:</b>\n\n`;
+  for (const g of selectedGroups) text += `• ${esc(g.subject)}\n`;
+  text += `\n⚠️ <b>Are you sure you want to leave these groups?</b>`;
 
   const chunks = splitMessage(text, 4000);
   for (let i = 0; i < chunks.length; i++) {
     const isLast = i === chunks.length - 1;
-    const kb = isLast ? new InlineKeyboard().text("✅ Yes, Leave All", "leave_confirm_yes").text("❌ Cancel", "leave_group") : undefined;
+    const kb = isLast
+      ? new InlineKeyboard().text("✅ Yes, Leave", "lv_confirm").text("❌ Cancel", "leave_group")
+      : undefined;
     if (i === 0) await ctx.editMessageText(chunks[i], { parse_mode: "HTML", reply_markup: kb });
     else await ctx.reply(chunks[i], { parse_mode: "HTML", reply_markup: kb });
   }
 }
 
-bot.callbackQuery("leave_member", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveConfirmation(ctx, ctx.from.id, "member"); });
-bot.callbackQuery("leave_admin", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveConfirmation(ctx, ctx.from.id, "admin"); });
-bot.callbackQuery("leave_all", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveConfirmation(ctx, ctx.from.id, "all"); });
+bot.callbackQuery(/^lv_member_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showLeavePatternGroups(ctx, ctx.from.id, "member", parseInt(ctx.match[1]));
+});
+bot.callbackQuery(/^lv_admin_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showLeavePatternGroups(ctx, ctx.from.id, "admin", parseInt(ctx.match[1]));
+});
 
-bot.callbackQuery("leave_confirm_yes", async (ctx) => {
+async function showLeaveAllConfirm(ctx: any, userId: number, type: "member" | "admin") {
+  const state = userStates.get(userId);
+  if (!state?.leaveData) {
+    await ctx.editMessageText("⚠️ Session expired.", { reply_markup: new InlineKeyboard().text("🔙", "leave_group") }); return;
+  }
+  const groups = state.leaveData.groups;
+  userStates.set(userId, { ...state, leaveData: { ...state.leaveData, selectedGroups: groups } });
+
+  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
+  let text = `🚪 <b>Leave All ${typeLabel} Groups</b>\n\n`;
+  text += `📊 <b>${groups.length} group(s) will be left:</b>\n\n`;
+  for (const g of groups) text += `• ${esc(g.subject)}\n`;
+  text += `\n⚠️ <b>Are you sure you want to leave these groups?</b>`;
+
+  const chunks = splitMessage(text, 4000);
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const kb = isLast
+      ? new InlineKeyboard().text("✅ Yes, Leave", "lv_confirm").text("❌ Cancel", "leave_group")
+      : undefined;
+    if (i === 0) await ctx.editMessageText(chunks[i], { parse_mode: "HTML", reply_markup: kb });
+    else await ctx.reply(chunks[i], { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
+bot.callbackQuery("lv_member_all", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveAllConfirm(ctx, ctx.from.id, "member"); });
+bot.callbackQuery("lv_admin_all", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveAllConfirm(ctx, ctx.from.id, "admin"); });
+
+bot.callbackQuery("lv_confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.leaveData) return;
-  const { groups } = state.leaveData;
+  if (!state?.leaveData?.selectedGroups?.length) return;
+  const groups = state.leaveData.selectedGroups;
 
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(`⏳ <b>Leaving ${groups.length} group(s)...</b>\n\n🔄 0/${groups.length} done...`, { parse_mode: "HTML" });
+  leaveJobCancel.delete(userId);
+
+  await ctx.editMessageText(
+    `⏳ <b>Leaving ${groups.length} group(s)...</b>\n\n🔄 0/${groups.length} done...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
+  );
 
   void (async () => {
-    let result = "🚪 <b>Leave Groups Result</b>\n\n";
     const lines: string[] = [];
-    let success = 0, failed = 0;
+    let success = 0, failed = 0, cancelled = false;
     for (let li = 0; li < groups.length; li++) {
+      if (leaveJobCancel.has(userId)) { cancelled = true; break; }
       const g = groups[li];
       const ok = await leaveGroup(String(userId), g.id);
       if (ok) { lines.push(`✅ Left: ${esc(g.subject)}`); success++; }
@@ -5735,12 +5847,16 @@ bot.callbackQuery("leave_confirm_yes", async (ctx) => {
       try {
         await bot.api.editMessageText(chatId, msgId,
           `⏳ <b>Leaving: ${li + 1}/${groups.length}</b>\n\n${lines.join("\n")}`,
-          { parse_mode: "HTML" }
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
       if (li < groups.length - 1) await new Promise((r) => setTimeout(r, 1000));
     }
-    result += lines.join("\n") + `\n\n📊 <b>Done! ✅ ${success} left | ❌ ${failed} failed</b>`;
+    leaveJobCancel.delete(userId);
+    const summary = cancelled
+      ? `\n\n⛔ <b>Cancelled! ✅ ${success} left | ❌ ${failed} failed</b>`
+      : `\n\n📊 <b>Done! ✅ ${success} left | ❌ ${failed} failed</b>`;
+    const result = `🚪 <b>Leave Groups Result</b>\n\n${lines.join("\n")}${summary}`;
     const chunks = splitMessage(result, 4000);
     try {
       await bot.api.editMessageText(chatId, msgId, chunks[0], {
@@ -5755,6 +5871,11 @@ bot.callbackQuery("leave_confirm_yes", async (ctx) => {
       });
     }
   })();
+});
+
+bot.callbackQuery("lv_cancel", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "⛔ Cancelling...", show_alert: false });
+  leaveJobCancel.add(ctx.from.id);
 });
 
 // ─── Remove Members ──────────────────────────────────────────────────────────
