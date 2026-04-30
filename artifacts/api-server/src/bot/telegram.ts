@@ -12021,6 +12021,38 @@ export async function startBot() {
     console.error(`[BOT] Error in update ${err.ctx?.update?.update_id}: ${desc || err.message}`);
   });
 
+  // Hydrate per-user language preferences from MongoDB before bot starts,
+  // so the very first outgoing message uses the right language.
+  try {
+    await loadUserLanguages();
+  } catch (err: any) {
+    console.error("[i18n] loadUserLanguages failed:", err?.message);
+  }
+
+  // ─── WEBHOOK MODE (Render production) ──────────────────────────────────────
+  // Jab RENDER_EXTERNAL_URL set ho: bot seedha bot.handleUpdate() se updates
+  // process karta hai — Grammy ke adapter ya timeout ke bina. Ye approach:
+  //   • Koi 10-second Grammy timeout nahi (WhatsApp ops ke liye safe)
+  //   • bot.start() ko touch nahi karta (koi Grammy override nahi)
+  //   • Telegram update aane pe instant response — polling delay zero
+  //   • Routes pe POST /api/telegram-webhook register hota hai separately
+  const renderUrl = process.env["RENDER_EXTERNAL_URL"];
+  if (renderUrl) {
+    try {
+      await bot.init();
+      const webhookUrl = `${renderUrl}/api/telegram-webhook`;
+      await bot.api.setWebhook(webhookUrl, { drop_pending_updates: false });
+      console.log(`[BOT] Webhook registered → ${webhookUrl}`);
+      console.log("[BOT] Running in webhook mode — instant response on every update!");
+    } catch (err: any) {
+      console.error("[BOT] Failed to set webhook:", err?.message);
+    }
+    return;
+  }
+
+  // ─── POLLING FALLBACK (local development only) ─────────────────────────────
+  // Sirf jab RENDER_EXTERNAL_URL nahi hota (local dev). Render pe ye path
+  // kabhi execute nahi hota.
   let retryCount = 0;
 
   async function launchBot() {
@@ -12071,14 +12103,6 @@ export async function startBot() {
     try { await bot.stop(); } catch {}
     process.exit(0);
   });
-
-  // Hydrate per-user language preferences from MongoDB before polling starts,
-  // so the very first outgoing message uses the right language.
-  try {
-    await loadUserLanguages();
-  } catch (err: any) {
-    console.error("[i18n] loadUserLanguages failed:", err?.message);
-  }
 
   launchBot();
 }
