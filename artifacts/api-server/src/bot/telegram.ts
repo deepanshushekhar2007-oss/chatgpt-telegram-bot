@@ -923,6 +923,14 @@ interface UserState {
     mode: "member" | "admin" | "all";
     patterns?: SimilarGroup[];
     selectedGroups?: Array<{ id: string; subject: string; isAdmin: boolean }>;
+    selectedIndices?: Set<number>;
+    page?: number;
+  };
+  arData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
   };
   removeData?: {
     allGroups: Array<{ id: string; subject: string }>;
@@ -5301,9 +5309,9 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
       const jids = await getGroupPendingInviteLinkJoins(userIdStr, groupId);
       for (const jid of jids) {
         if (!job.seenJids.has(jid)) {
-          job.seenJids.add(jid);
           const ok = await approveGroupParticipant(userIdStr, groupId, jid);
           if (ok) {
+            job.seenJids.add(jid);
             job.totalAccepted++;
             newCount++;
           }
@@ -5431,12 +5439,12 @@ bot.callbackQuery("auto_accepter", async (ctx) => {
 
   userStates.set(userId, {
     step: "ar_menu",
-    similarData: { patterns, allGroups: allGroupsSimple },
+    arData: { patterns, allGroups: allGroupsSimple, selectedIndices: new Set(), page: 0 },
   });
 
   const kb = new InlineKeyboard();
-  if (patterns.length > 0) kb.text("🔍 Similar Groups", "ar_similar").text("📋 All Groups", "ar_all").row();
-  else kb.text("📋 All Groups", "ar_all").row();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "ar_similar").text("📋 All Groups", "ar_show_all").row();
+  else kb.text("📋 All Groups", "ar_show_all").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -5444,18 +5452,51 @@ bot.callbackQuery("auto_accepter", async (ctx) => {
     `📱 <b>Admin Groups Found: ${adminGroups.length}</b>\n` +
     (patterns.length > 0 ? `🔍 <b>Similar Patterns: ${patterns.length}</b>\n` : `⚠️ No similar patterns found.\n`) +
     `\n📌 Select which groups to monitor:\n\n` +
-    `<i>Bot will auto-accept only invite-link joiners in selected groups.</i>`,
+    `<i>Bot will auto-accept all pending join requests in selected groups.</i>`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
+
+function buildArKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const allGroups = state.arData!.allGroups;
+  const selected = state.arData!.selectedIndices;
+  const page = state.arData!.page || 0;
+  const totalPages = Math.max(1, Math.ceil(allGroups.length / MA_PAGE_SIZE));
+  const start = page * MA_PAGE_SIZE;
+  const end = Math.min(start + MA_PAGE_SIZE, allGroups.length);
+
+  for (let i = start; i < end; i++) {
+    const g = allGroups[i];
+    const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `ar_tog_${i}`).row();
+  }
+
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "ar_prev_page").text(`📄 ${page + 1}/${totalPages}`, "ar_page_info").text(next, "ar_next_page").row();
+  }
+
+  if (allGroups.length > 1) {
+    kb.text("☑️ Select All", "ar_select_all").text("🧹 Clear All", "ar_clear_all").row();
+  }
+
+  if (selected.size > 0) {
+    kb.text(`▶️ Continue (${selected.size} selected)`, "ar_proceed").row();
+  }
+
+  kb.text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
+  return kb;
+}
 
 bot.callbackQuery("ar_similar", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.similarData) return;
+  if (!state?.arData) return;
 
-  const { patterns } = state.similarData;
+  const { patterns } = state.arData;
   if (!patterns.length) {
     await ctx.editMessageText("⚠️ No similar group patterns found.", {
       reply_markup: new InlineKeyboard().text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu"),
@@ -5464,14 +5505,12 @@ bot.callbackQuery("ar_similar", async (ctx) => {
 
   const kb = new InlineKeyboard();
   for (let i = 0; i < patterns.length; i++) {
-    const p = patterns[i];
-    kb.text(`🔍 ${p.base} (${p.groups.length})`, `ar_sim_${i}`).row();
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `ar_sim_${i}`).row();
   }
   kb.text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🔍 <b>Similar Group Patterns</b>\n\n` +
-    `Tap a pattern to select all groups in it:`,
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -5480,43 +5519,116 @@ bot.callbackQuery(/^ar_sim_(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.similarData) return;
+  if (!state?.arData) return;
 
   const idx = parseInt(ctx.match![1]);
-  const pattern = state.similarData.patterns[idx];
+  const pattern = state.arData.patterns[idx];
   if (!pattern) return;
 
-  state.step = "ar_time_select";
-  (state as any).arGroups = pattern.groups;
-
-  const previewGroups = pattern.groups.slice(0, 5).map((g: any) => `• ${esc(g.subject)}`).join("\n");
-  const moreText = pattern.groups.length > 5 ? `\n... +${pattern.groups.length - 5} more` : "";
-
-  const kb = new InlineKeyboard()
-    .text("⏱️ 15 min", "ar_time_15").text("⏱️ 30 min", "ar_time_30").row()
-    .text("⏱️ 1 hour", "ar_time_60").text("⏱️ 2 hours", "ar_time_120").row()
-    .text("🔙 Back", "ar_similar").text("🏠 Menu", "main_menu");
+  const patternIds = new Set(pattern.groups.map((g) => g.id));
+  state.arData.selectedIndices = new Set();
+  for (let i = 0; i < state.arData.allGroups.length; i++) {
+    if (patternIds.has(state.arData.allGroups[i].id)) state.arData.selectedIndices.add(i);
+  }
+  state.step = "ar_select";
+  state.arData.page = 0;
 
   await ctx.editMessageText(
-    `🛡️ <b>Auto Request Accepter</b>\n\n` +
-    `📋 <b>Selected Groups (${pattern.groups.length}):</b>\n${previewGroups}${moreText}\n\n` +
-    `⏰ <b>How long should it run?</b>`,
-    { parse_mode: "HTML", reply_markup: kb }
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>${state.arData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
 
-bot.callbackQuery("ar_all", async (ctx) => {
+bot.callbackQuery("ar_show_all", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.similarData) return;
+  if (!state?.arData) return;
+  state.step = "ar_select";
+  state.arData.page = 0;
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>Tap to select/deselect</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
 
-  const { allGroups } = state.similarData;
+bot.callbackQuery(/^ar_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.arData) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.arData.allGroups.length) return;
+  if (state.arData.selectedIndices.has(idx)) state.arData.selectedIndices.delete(idx);
+  else state.arData.selectedIndices.add(idx);
+  const cnt = state.arData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ar_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.arData) return;
+  if ((state.arData.page || 0) > 0) state.arData.page--;
+  const cnt = state.arData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ar_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.arData) return;
+  const totalPages = Math.ceil(state.arData.allGroups.length / MA_PAGE_SIZE);
+  if ((state.arData.page || 0) < totalPages - 1) state.arData.page++;
+  const cnt = state.arData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ar_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+
+bot.callbackQuery("ar_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.arData) return;
+  for (let i = 0; i < state.arData.allGroups.length; i++) state.arData.selectedIndices.add(i);
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\nAll <b>${state.arData.allGroups.length} groups selected</b>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ar_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.arData) return;
+  state.arData.selectedIndices.clear();
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>None selected yet</i>`,
+    { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ar_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.arData || !state.arData.selectedIndices.size) return;
+
+  const selectedGroups = Array.from(state.arData.selectedIndices).map((i) => state.arData!.allGroups[i]);
+  (state as any).arGroups = selectedGroups;
   state.step = "ar_time_select";
-  (state as any).arGroups = allGroups;
 
-  const previewGroups = allGroups.slice(0, 5).map((g: any) => `• ${esc(g.subject)}`).join("\n");
-  const moreText = allGroups.length > 5 ? `\n... +${allGroups.length - 5} more` : "";
+  const previewGroups = selectedGroups.slice(0, 8).map((g) => `• ${esc(g.subject)}`).join("\n");
+  const moreText = selectedGroups.length > 8 ? `\n... +${selectedGroups.length - 8} more` : "";
 
   const kb = new InlineKeyboard()
     .text("⏱️ 15 min", "ar_time_15").text("⏱️ 30 min", "ar_time_30").row()
@@ -5525,7 +5637,7 @@ bot.callbackQuery("ar_all", async (ctx) => {
 
   await ctx.editMessageText(
     `🛡️ <b>Auto Request Accepter</b>\n\n` +
-    `📋 <b>All Admin Groups (${allGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `📋 <b>Selected Groups (${selectedGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
     `⏰ <b>How long should it run?</b>`,
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -5652,6 +5764,40 @@ bot.callbackQuery("ar_stop_job", async (ctx) => {
 // ─── Leave Group ─────────────────────────────────────────────────────────────
 
 const leaveJobCancel = new Set<number>();
+const LV_PAGE_SIZE = 20;
+
+function buildLeaveKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const allGroups = state.leaveData!.groups;
+  const selected = state.leaveData!.selectedIndices!;
+  const page = state.leaveData!.page || 0;
+  const totalPages = Math.max(1, Math.ceil(allGroups.length / LV_PAGE_SIZE));
+  const start = page * LV_PAGE_SIZE;
+  const end = Math.min(start + LV_PAGE_SIZE, allGroups.length);
+
+  for (let i = start; i < end; i++) {
+    const g = allGroups[i];
+    const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `lv_tog_${i}`).row();
+  }
+
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "lv_prev_page").text(`📄 ${page + 1}/${totalPages}`, "lv_page_info").text(next, "lv_next_page").row();
+  }
+
+  if (allGroups.length > 1) {
+    kb.text("☑️ Select All", "lv_select_all").text("🧹 Clear All", "lv_clear_all").row();
+  }
+
+  if (selected.size > 0) {
+    kb.text(`▶️ Continue (${selected.size} selected)`, "lv_proceed").row();
+  }
+
+  kb.text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu");
+  return kb;
+}
 
 bot.callbackQuery("leave_group", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -5663,143 +5809,183 @@ bot.callbackQuery("leave_group", async (ctx) => {
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText(
-    "🚪 <b>Leave Groups</b>\n\nChoose which groups to leave:",
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text("👤 Leave Member Groups", "lv_member").row()
-        .text("👑 Leave Admin Groups", "lv_admin").row()
-        .text("🏠 Main Menu", "main_menu"),
-    }
-  );
-});
 
-async function showLeaveTypeMenu(ctx: any, userId: number, type: "member" | "admin") {
   await ctx.editMessageText("🔍 <b>Scanning groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
-  const filtered = type === "member"
-    ? allGroups.filter((g) => !g.isAdmin)
-    : allGroups.filter((g) => g.isAdmin);
-
-  if (!filtered.length) {
-    await ctx.editMessageText(`📭 No ${type} groups found.`, {
-      reply_markup: new InlineKeyboard().text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu"),
+  if (!allGroups.length) {
+    await ctx.editMessageText("📭 No groups found.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     }); return;
   }
 
-  const simple = filtered.map((g) => ({ id: g.id, subject: g.subject }));
+  const simple = allGroups.map((g) => ({ id: g.id, subject: g.subject }));
   const patterns = detectSimilarGroups(simple);
 
   userStates.set(userId, {
-    step: "lv_type_menu",
+    step: "lv_menu",
     leaveData: {
-      groups: filtered.map((g) => ({ id: g.id, subject: g.subject, isAdmin: g.isAdmin })),
-      mode: type,
+      groups: allGroups.map((g) => ({ id: g.id, subject: g.subject, isAdmin: g.isAdmin })),
+      mode: "all",
       patterns,
+      selectedIndices: new Set(),
+      page: 0,
     },
   });
 
-  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
   const kb = new InlineKeyboard();
-  if (patterns.length > 0) {
-    kb.text("🔗 Similar Groups", `lv_${type}_similar`).text("📋 All Groups", `lv_${type}_all`).row();
-  } else {
-    kb.text("📋 All Groups", `lv_${type}_all`).row();
-  }
-  kb.text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu");
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "lv_similar").text("📋 All Groups", "lv_show_all").row();
+  else kb.text("📋 All Groups", "lv_show_all").row();
+  kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🚪 <b>Leave ${typeLabel} Groups</b>\n\n` +
-    `📊 Found <b>${filtered.length}</b> ${type} groups\n` +
+    `🚪 <b>Select Groups to Leave</b>\n\n` +
+    `📊 Found <b>${allGroups.length}</b> groups\n` +
     (patterns.length > 0 ? `🔍 <b>${patterns.length}</b> similar patterns detected\n` : "") +
     `\nChoose how to select groups:`,
     { parse_mode: "HTML", reply_markup: kb }
   );
-}
+});
 
-bot.callbackQuery("lv_member", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveTypeMenu(ctx, ctx.from.id, "member"); });
-bot.callbackQuery("lv_admin", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveTypeMenu(ctx, ctx.from.id, "admin"); });
-
-async function showLeaveSimilarList(ctx: any, userId: number, type: "member" | "admin") {
+bot.callbackQuery("lv_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.leaveData?.patterns) {
-    await ctx.editMessageText("⚠️ Session expired. Please start again.", {
-      reply_markup: new InlineKeyboard().text("🔙 Back", "leave_group"),
-    }); return;
-  }
-  const patterns = state.leaveData.patterns!;
+  if (!state?.leaveData?.patterns) return;
+
+  const { patterns } = state.leaveData;
   if (!patterns.length) {
     await ctx.editMessageText("⚠️ No similar group patterns found.", {
-      reply_markup: new InlineKeyboard().text("🔙 Back", `lv_${type}`).text("🏠 Menu", "main_menu"),
+      reply_markup: new InlineKeyboard().text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu"),
     }); return;
   }
+
   const kb = new InlineKeyboard();
   for (let i = 0; i < patterns.length; i++) {
-    kb.text(`🔗 ${patterns[i].base} (${patterns[i].groups.length})`, `lv_${type}_sim_${i}`).row();
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `lv_sim_${i}`).row();
   }
-  kb.text("🔙 Back", `lv_${type}`).text("🏠 Menu", "main_menu");
-  await ctx.editMessageText(`🚪 <b>Similar Group Patterns</b>\n\nSelect a pattern to leave:`, {
+  kb.text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", {
     parse_mode: "HTML", reply_markup: kb,
   });
-}
+});
 
-bot.callbackQuery("lv_member_similar", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveSimilarList(ctx, ctx.from.id, "member"); });
-bot.callbackQuery("lv_admin_similar", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveSimilarList(ctx, ctx.from.id, "admin"); });
-
-async function showLeavePatternGroups(ctx: any, userId: number, type: "member" | "admin", patIdx: number) {
+bot.callbackQuery(/^lv_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.leaveData?.patterns) {
-    await ctx.editMessageText("⚠️ Session expired.", { reply_markup: new InlineKeyboard().text("🔙", "leave_group") }); return;
-  }
-  const pattern = state.leaveData.patterns![patIdx];
-  if (!pattern) {
-    await ctx.editMessageText("⚠️ Pattern not found.", { reply_markup: new InlineKeyboard().text("🔙", `lv_${type}_similar`) }); return;
-  }
+  if (!state?.leaveData?.patterns) return;
 
-  const selectedGroups = state.leaveData.groups.filter((g) =>
-    pattern.groups.some((pg) => pg.id === g.id)
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.leaveData.patterns![idx];
+  if (!pattern) return;
+
+  const patternIds = new Set(pattern.groups.map((g) => g.id));
+  state.leaveData.selectedIndices = new Set();
+  for (let i = 0; i < state.leaveData.groups.length; i++) {
+    if (patternIds.has(state.leaveData.groups[i].id)) state.leaveData.selectedIndices.add(i);
+  }
+  state.step = "lv_select";
+  state.leaveData.page = 0;
+
+  const cnt = state.leaveData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
-  userStates.set(userId, { ...state, leaveData: { ...state.leaveData, selectedGroups } });
-
-  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
-  let text = `🚪 <b>Leave ${typeLabel} Groups — "${esc(pattern.base)}"</b>\n\n`;
-  text += `📊 <b>${selectedGroups.length} group(s) will be left:</b>\n\n`;
-  for (const g of selectedGroups) text += `• ${esc(g.subject)}\n`;
-  text += `\n⚠️ <b>Are you sure you want to leave these groups?</b>`;
-
-  const chunks = splitMessage(text, 4000);
-  for (let i = 0; i < chunks.length; i++) {
-    const isLast = i === chunks.length - 1;
-    const kb = isLast
-      ? new InlineKeyboard().text("✅ Yes, Leave", "lv_confirm").text("❌ Cancel", "leave_group")
-      : undefined;
-    if (i === 0) await ctx.editMessageText(chunks[i], { parse_mode: "HTML", reply_markup: kb });
-    else await ctx.reply(chunks[i], { parse_mode: "HTML", reply_markup: kb });
-  }
-}
-
-bot.callbackQuery(/^lv_member_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await showLeavePatternGroups(ctx, ctx.from.id, "member", parseInt(ctx.match[1]));
-});
-bot.callbackQuery(/^lv_admin_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await showLeavePatternGroups(ctx, ctx.from.id, "admin", parseInt(ctx.match[1]));
 });
 
-async function showLeaveAllConfirm(ctx: any, userId: number, type: "member" | "admin") {
+bot.callbackQuery("lv_show_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.leaveData) {
-    await ctx.editMessageText("⚠️ Session expired.", { reply_markup: new InlineKeyboard().text("🔙", "leave_group") }); return;
-  }
-  const groups = state.leaveData.groups;
-  userStates.set(userId, { ...state, leaveData: { ...state.leaveData, selectedGroups: groups } });
+  if (!state?.leaveData) return;
+  state.step = "lv_select";
+  state.leaveData.page = 0;
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>None selected yet</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
 
-  const typeLabel = type === "member" ? "👤 Member" : "👑 Admin";
-  let text = `🚪 <b>Leave All ${typeLabel} Groups</b>\n\n`;
-  text += `📊 <b>${groups.length} group(s) will be left:</b>\n\n`;
-  for (const g of groups) text += `• ${esc(g.subject)}\n`;
+bot.callbackQuery(/^lv_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.leaveData?.selectedIndices) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.leaveData.groups.length) return;
+  if (state.leaveData.selectedIndices.has(idx)) state.leaveData.selectedIndices.delete(idx);
+  else state.leaveData.selectedIndices.add(idx);
+  const cnt = state.leaveData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("lv_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.leaveData) return;
+  if ((state.leaveData.page || 0) > 0) state.leaveData.page!--;
+  const cnt = state.leaveData.selectedIndices?.size || 0;
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("lv_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.leaveData) return;
+  const totalPages = Math.ceil(state.leaveData.groups.length / LV_PAGE_SIZE);
+  if ((state.leaveData.page || 0) < totalPages - 1) state.leaveData.page!++;
+  const cnt = state.leaveData.selectedIndices?.size || 0;
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("lv_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+
+bot.callbackQuery("lv_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.leaveData?.selectedIndices) return;
+  for (let i = 0; i < state.leaveData.groups.length; i++) state.leaveData.selectedIndices.add(i);
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\nAll <b>${state.leaveData.groups.length} groups selected</b>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("lv_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.leaveData?.selectedIndices) return;
+  state.leaveData.selectedIndices.clear();
+  await ctx.editMessageText(
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>None selected yet</i>`,
+    { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("lv_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.leaveData?.selectedIndices?.size) return;
+
+  const selectedGroups = Array.from(state.leaveData.selectedIndices)
+    .map((i) => state.leaveData!.groups[i]);
+  state.leaveData.selectedGroups = selectedGroups;
+
+  let text = `🚪 <b>Leave Groups — Confirm</b>\n\n`;
+  text += `📊 <b>${selectedGroups.length} group(s) will be left:</b>\n\n`;
+  for (const g of selectedGroups) text += `• ${esc(g.subject)} ${g.isAdmin ? "👑" : "👤"}\n`;
   text += `\n⚠️ <b>Are you sure you want to leave these groups?</b>`;
 
   const chunks = splitMessage(text, 4000);
@@ -5811,10 +5997,7 @@ async function showLeaveAllConfirm(ctx: any, userId: number, type: "member" | "a
     if (i === 0) await ctx.editMessageText(chunks[i], { parse_mode: "HTML", reply_markup: kb });
     else await ctx.reply(chunks[i], { parse_mode: "HTML", reply_markup: kb });
   }
-}
-
-bot.callbackQuery("lv_member_all", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveAllConfirm(ctx, ctx.from.id, "member"); });
-bot.callbackQuery("lv_admin_all", async (ctx) => { await ctx.answerCallbackQuery(); await showLeaveAllConfirm(ctx, ctx.from.id, "admin"); });
+});
 
 bot.callbackQuery("lv_confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
