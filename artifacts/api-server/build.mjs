@@ -30,6 +30,9 @@ async function buildAll() {
     external: [
       "*.node",
       "grammy",
+      "@whiskeysockets/baileys",
+      "mongodb",
+      "qrcode",
       "sharp",
       "better-sqlite3",
       "sqlite3",
