@@ -43,6 +43,7 @@ import {
   hasStoredWhatsAppSession,
   waitForWhatsAppConnected,
   sweepIdleSessions,
+  getGroupPendingInviteLinkJoins,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1695,7 +1696,8 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
-    .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row();
+    .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
+    .text("🛡️ Auto Accepter", "auto_accepter").text("❓ Help", "help_button").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -2364,6 +2366,20 @@ bot.command("help", async (ctx) => {
     `• Automatically send messages to friends or groups on WhatsApp\n` +
     `• Random delay rotation keeps it natural and safe\n` +
     `• To buy Auto Chat access, message ${OWNER_USERNAME} on Telegram\n\n`) +
+
+    `🛡️ 15. Auto Request Accepter\n` +
+    `• Automatically accept pending join requests in selected groups\n` +
+    `• Only accepts users who joined via invite link (NOT direct admin-adds)\n` +
+    `• How to use:\n` +
+    `   1. Tap "Auto Accepter" in main menu\n` +
+    `   2. Select groups — choose Similar Groups or All Groups\n` +
+    `   3. Pick duration: 15 min, 30 min, 1 hr, or 2 hrs\n` +
+    `   4. Review selected groups and confirm to start\n` +
+    `   5. Bot will poll every 30 seconds and auto-accept invite-link joiners\n` +
+    `   6. Tap "Cancel" button to stop early at any time\n` +
+    `• When the timer ends, you get a notification\n` +
+    `• Group must have "Approval required" mode ON\n` +
+    `• You must be admin in the group\n\n` +
 
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `💬 Commands:\n` +
@@ -5213,6 +5229,422 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
     state.results, state.mode, state.patternBase,
     workChatId, workMsgId, cancelled, false,
   );
+});
+
+// ─── Help Button (from main menu) ────────────────────────────────────────────
+
+bot.callbackQuery("help_button", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (await isBanned(userId)) return;
+
+  const codeBlock =
+    `🤖 WhatsApp Bot Manager — Help Guide\n\n` +
+    `Use /help command to see the full detailed guide.\n\n` +
+    `📋 Quick Feature List:\n\n` +
+    `1. Create Groups — Create multiple WA groups at once\n` +
+    `2. Join Groups — Join groups via invite links\n` +
+    `3. CTC Checker — Check if contacts are in group or pending\n` +
+    `4. Get Link — Get invite links for your groups\n` +
+    `5. Leave Group — Leave selected groups\n` +
+    `6. Remove Members — Remove members from groups\n` +
+    `7. Make Admin — Promote members to admin\n` +
+    `8. Approval — Approve/reject pending join requests\n` +
+    `9. Get Pending List — View all pending join requests\n` +
+    `10. Add Members — Add members to your groups\n` +
+    `11. Edit Settings — Change group settings/permissions\n` +
+    `12. Change Name — Rename your groups\n` +
+    `13. Auto Chat ⭐ — Auto send messages to friends/groups\n` +
+    `14. Auto Accepter — Auto-accept invite-link join requests\n\n` +
+    `💬 Commands:\n` +
+    `/start — Open main menu\n` +
+    `/help  — Full detailed help guide\n\n` +
+    `👤 Owner: ${OWNER_USERNAME}`;
+
+  await ctx.reply(
+    `<pre>${codeBlock}</pre>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    }
+  );
+});
+
+// ─── Auto Request Accepter ────────────────────────────────────────────────────
+
+interface AutoAccepterJob {
+  userId: number;
+  groupIds: string[];
+  groupNames: string[];
+  durationMs: number;
+  endsAt: number;
+  chatId: number;
+  statusMsgId: number;
+  pollTimer: ReturnType<typeof setInterval>;
+  endTimer: ReturnType<typeof setTimeout>;
+  totalAccepted: number;
+  seenJids: Set<string>;
+}
+
+const autoAccepterJobs: Map<number, AutoAccepterJob> = new Map();
+
+async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
+  const { userId, groupIds, groupNames, chatId, statusMsgId } = job;
+  const userIdStr = String(userId);
+  let newCount = 0;
+
+  for (let i = 0; i < groupIds.length; i++) {
+    const groupId = groupIds[i];
+    try {
+      const jids = await getGroupPendingInviteLinkJoins(userIdStr, groupId);
+      for (const jid of jids) {
+        if (!job.seenJids.has(jid)) {
+          job.seenJids.add(jid);
+          const ok = await approveGroupParticipant(userIdStr, groupId, jid);
+          if (ok) {
+            job.totalAccepted++;
+            newCount++;
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error(`[AutoAccepter][${userId}] Poll error for group ${groupNames[i]}:`, err?.message);
+    }
+  }
+
+  const remaining = Math.max(0, job.endsAt - Date.now());
+  const remainMins = Math.ceil(remaining / 60000);
+  const statusLines = groupNames.slice(0, 5).map(n => `• ${esc(n)}`).join("\n");
+  const moreText = groupNames.length > 5 ? `\n... +${groupNames.length - 5} more` : "";
+
+  try {
+    await bot.api.editMessageText(
+      chatId,
+      statusMsgId,
+      `🛡️ <b>Auto Request Accepter — Running</b>\n\n` +
+      `📋 <b>Groups (${groupNames.length}):</b>\n${statusLines}${moreText}\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
+      (newCount > 0 ? `🆕 <b>Just Accepted:</b> ${newCount}\n` : "") +
+      `⏰ <b>Time Remaining:</b> ~${remainMins} min\n\n` +
+      `<i>Polls every 30 seconds. Only accepts invite-link joiners.</i>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job"),
+      }
+    );
+  } catch {}
+}
+
+async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled"): Promise<void> {
+  const job = autoAccepterJobs.get(userId);
+  if (!job) return;
+
+  clearInterval(job.pollTimer);
+  clearTimeout(job.endTimer);
+  autoAccepterJobs.delete(userId);
+
+  const isDone = reason === "done";
+  const msg = isDone
+    ? `🛡️ <b>Auto Request Accepter — Finished</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
+      `⏱️ <b>Duration:</b> ${Math.round(job.durationMs / 60000)} min\n\n` +
+      `<b>Time is up! The Auto Request Accepter has been stopped.</b>\n` +
+      `Your selected groups will no longer auto-accept join requests.`
+    : `⛔ <b>Auto Request Accepter — Cancelled</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n\n` +
+      `You cancelled the Auto Request Accepter. No more requests will be auto-accepted.`;
+
+  try {
+    await bot.api.editMessageText(
+      job.chatId,
+      job.statusMsgId,
+      msg,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      }
+    );
+  } catch {}
+
+  // Also send a separate notification message
+  if (isDone) {
+    try {
+      await bot.api.sendMessage(
+        job.chatId,
+        `🔔 <b>Notification: Auto Request Accepter Stopped</b>\n\n` +
+        `The Auto Request Accepter has been turned off — your selected time duration has expired.\n\n` +
+        `✅ <b>Total requests accepted:</b> ${job.totalAccepted}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
+bot.callbackQuery("auto_accepter", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      `❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
+    ); return;
+  }
+
+  // If already running, show status
+  const existingJob = autoAccepterJobs.get(userId);
+  if (existingJob) {
+    const remaining = Math.max(0, existingJob.endsAt - Date.now());
+    const remainMins = Math.ceil(remaining / 60000);
+    await ctx.editMessageText(
+      `🛡️ <b>Auto Request Accepter</b>\n\n` +
+      `⚡ A job is already running!\n\n` +
+      `✅ Accepted so far: <b>${existingJob.totalAccepted}</b>\n` +
+      `⏰ Time remaining: <b>~${remainMins} min</b>\n\n` +
+      `Stop the current job first to start a new one.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Stop Current Job", "ar_stop_job").text("🏠 Menu", "main_menu") }
+    ); return;
+  }
+
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+
+  const groups = await getAllGroups(String(userId));
+  if (!groups.length) {
+    await ctx.editMessageText("📭 No groups found on your WhatsApp.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    }); return;
+  }
+
+  const adminGroups = groups.filter((g) => g.isAdmin);
+  if (!adminGroups.length) {
+    await ctx.editMessageText("❌ You are not an admin in any WhatsApp group.\n\nYou need to be admin to use this feature.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    }); return;
+  }
+
+  const allGroupsSimple = adminGroups
+    .map((g) => ({ id: g.id, subject: g.subject }))
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+  const patterns = detectSimilarGroups(allGroupsSimple);
+
+  userStates.set(userId, {
+    step: "ar_menu",
+    similarData: { patterns, allGroups: allGroupsSimple },
+  });
+
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "ar_similar").text("📋 All Groups", "ar_all").row();
+  else kb.text("📋 All Groups", "ar_all").row();
+  kb.text("🏠 Main Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n` +
+    `📱 <b>Admin Groups Found: ${adminGroups.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 <b>Similar Patterns: ${patterns.length}</b>\n` : `⚠️ No similar patterns found.\n`) +
+    `\n📌 Select which groups to monitor:\n\n` +
+    `<i>Bot will auto-accept only invite-link joiners in selected groups.</i>`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("ar_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.similarData) return;
+
+  const { patterns } = state.similarData;
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    const p = patterns[i];
+    kb.text(`🔍 ${p.base} (${p.groups.length})`, `ar_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🔍 <b>Similar Group Patterns</b>\n\n` +
+    `Tap a pattern to select all groups in it:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^ar_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.similarData) return;
+
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.similarData.patterns[idx];
+  if (!pattern) return;
+
+  state.step = "ar_time_select";
+  (state as any).arGroups = pattern.groups;
+
+  const previewGroups = pattern.groups.slice(0, 5).map((g: any) => `• ${esc(g.subject)}`).join("\n");
+  const moreText = pattern.groups.length > 5 ? `\n... +${pattern.groups.length - 5} more` : "";
+
+  const kb = new InlineKeyboard()
+    .text("⏱️ 15 min", "ar_time_15").text("⏱️ 30 min", "ar_time_30").row()
+    .text("⏱️ 1 hour", "ar_time_60").text("⏱️ 2 hours", "ar_time_120").row()
+    .text("🔙 Back", "ar_similar").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n` +
+    `📋 <b>Selected Groups (${pattern.groups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `⏰ <b>How long should it run?</b>`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("ar_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.similarData) return;
+
+  const { allGroups } = state.similarData;
+  state.step = "ar_time_select";
+  (state as any).arGroups = allGroups;
+
+  const previewGroups = allGroups.slice(0, 5).map((g: any) => `• ${esc(g.subject)}`).join("\n");
+  const moreText = allGroups.length > 5 ? `\n... +${allGroups.length - 5} more` : "";
+
+  const kb = new InlineKeyboard()
+    .text("⏱️ 15 min", "ar_time_15").text("⏱️ 30 min", "ar_time_30").row()
+    .text("⏱️ 1 hour", "ar_time_60").text("⏱️ 2 hours", "ar_time_120").row()
+    .text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter</b>\n\n` +
+    `📋 <b>All Admin Groups (${allGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `⏰ <b>How long should it run?</b>`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^ar_time_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  const arGroups: Array<{ id: string; subject: string }> = (state as any)?.arGroups;
+  if (!arGroups || !arGroups.length) { await ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
+
+  const minutes = parseInt(ctx.match![1]);
+  const durationMs = minutes * 60 * 1000;
+  const durationLabel = minutes < 60 ? `${minutes} min` : `${minutes / 60} hour${minutes / 60 > 1 ? "s" : ""}`;
+
+  (state as any).arDurationMs = durationMs;
+  (state as any).arDurationLabel = durationLabel;
+
+  const previewGroups = arGroups.slice(0, 8).map((g) => `• ${esc(g.subject)}`).join("\n");
+  const moreText = arGroups.length > 8 ? `\n... +${arGroups.length - 8} more` : "";
+
+  const kb = new InlineKeyboard()
+    .text("✅ Start Auto Accepter", "ar_confirm").row()
+    .text("❌ Cancel", "main_menu");
+
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter — Review</b>\n\n` +
+    `📋 <b>Groups to Monitor (${arGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `⏱️ <b>Duration:</b> ${durationLabel}\n\n` +
+    `ℹ️ <b>What will happen:</b>\n` +
+    `• Bot polls every 30 seconds\n` +
+    `• Only users who joined via invite link will be accepted\n` +
+    `• Admin-added pending requests will NOT be accepted\n` +
+    `• You will get a notification when time is up\n\n` +
+    `Tap <b>Start</b> to begin or <b>Cancel</b> to go back.`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("ar_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  const arGroups: Array<{ id: string; subject: string }> = (state as any)?.arGroups;
+  const durationMs: number = (state as any)?.arDurationMs;
+  if (!arGroups || !durationMs) { await ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ WhatsApp not connected!", {
+      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+
+  // Check if already running
+  if (autoAccepterJobs.has(userId)) {
+    await ctx.answerCallbackQuery({ text: "A job is already running! Stop it first.", show_alert: true }); return;
+  }
+
+  userStates.delete(userId);
+
+  const groupIds = arGroups.map((g) => g.id);
+  const groupNames = arGroups.map((g) => g.subject);
+  const durationLabel = durationMs < 3600000 ? `${durationMs / 60000} min` : `${durationMs / 3600000} hour${durationMs / 3600000 > 1 ? "s" : ""}`;
+  const endsAt = Date.now() + durationMs;
+  const chatId = ctx.chat!.id;
+
+  await ctx.editMessageText(
+    `🛡️ <b>Auto Request Accepter — Starting...</b>\n\n` +
+    `📋 <b>Groups (${groupNames.length}):</b>\n` +
+    groupNames.slice(0, 5).map((n) => `• ${esc(n)}`).join("\n") +
+    (groupNames.length > 5 ? `\n... +${groupNames.length - 5} more` : "") +
+    `\n\n⏱️ Duration: ${durationLabel}\n\n⌛ Starting first poll...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job") }
+  );
+
+  const statusMsgId = ctx.callbackQuery.message!.message_id;
+
+  const job: AutoAccepterJob = {
+    userId,
+    groupIds,
+    groupNames,
+    durationMs,
+    endsAt,
+    chatId,
+    statusMsgId,
+    totalAccepted: 0,
+    seenJids: new Set(),
+    pollTimer: null as any,
+    endTimer: null as any,
+  };
+
+  autoAccepterJobs.set(userId, job);
+
+  // Start polling every 30 seconds
+  job.pollTimer = setInterval(() => {
+    void runAutoAccepterPoll(job);
+  }, 30_000);
+
+  // End timer
+  job.endTimer = setTimeout(() => {
+    void stopAutoAccepterJob(userId, "done");
+  }, durationMs);
+
+  // Run immediately on start
+  void runAutoAccepterPoll(job);
+});
+
+bot.callbackQuery("ar_stop_job", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Stopping Auto Request Accepter..." });
+  const userId = ctx.from.id;
+  if (!autoAccepterJobs.has(userId)) {
+    try {
+      await ctx.editMessageText(
+        `⚠️ No Auto Request Accepter is currently running.`,
+        { reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+  await stopAutoAccepterJob(userId, "cancelled");
 });
 
 // ─── Leave Group ─────────────────────────────────────────────────────────────
