@@ -1235,6 +1235,34 @@ export async function getGroupPendingRequestsJids(
   }
 }
 
+// Returns JIDs of pending participants who joined via invite link only
+// (i.e., they have an add_request_code — meaning they used an invite link,
+// NOT added directly by an admin). Used by Auto Request Accepter.
+export async function getGroupPendingInviteLinkJoins(
+  userId: string,
+  groupId: string
+): Promise<string[]> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return [];
+  try {
+    const requests = await session.socket.groupRequestParticipantsList(groupId);
+    return requests
+      .filter((r: any) => {
+        // add_request_code is present when user joined via invite link
+        const code: string = r.add_request_code || r.addRequestCode || "";
+        return code.length > 0;
+      })
+      .map((r: any) => {
+        const jid: string = r.jid || "";
+        return jid.replace(/:\d+@/, "@");
+      })
+      .filter(Boolean);
+  } catch (err: any) {
+    console.error(`[WA][${userId}] getGroupPendingInviteLinkJoins error:`, err?.message);
+    return [];
+  }
+}
+
 // Returns pending requests with both raw JID (for approval calls) and resolved phone
 // (for matching against user-supplied numbers). Handles both @s.whatsapp.net and @lid JIDs.
 export async function getGroupPendingRequestsDetailed(
