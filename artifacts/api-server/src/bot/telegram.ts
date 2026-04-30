@@ -5307,14 +5307,22 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
     const groupId = groupIds[i];
     try {
       const jids = await getGroupPendingInviteLinkJoins(userIdStr, groupId);
-      for (const jid of jids) {
-        if (!job.seenJids.has(jid)) {
-          const ok = await approveGroupParticipant(userIdStr, groupId, jid);
-          if (ok) {
-            job.seenJids.add(jid);
-            job.totalAccepted++;
-            newCount++;
-          }
+      // Dedupe within this single poll iteration (same JID should not appear
+      // twice in one pending list, but be defensive).
+      const uniqueJids = Array.from(new Set(jids));
+
+      for (const jid of uniqueJids) {
+        // NOTE: We intentionally do NOT skip JIDs we have approved earlier
+        // in this job. If a user leaves the group and re-joins via the
+        // invite link, WhatsApp puts them back into the pending list with
+        // the same JID — we must approve them again. WhatsApp itself only
+        // surfaces JIDs that are currently pending, so re-approval will
+        // never happen for a user who is still a member.
+        const ok = await approveGroupParticipant(userIdStr, groupId, jid);
+        if (ok) {
+          job.seenJids.add(jid); // kept for stats / debugging only
+          job.totalAccepted++;
+          newCount++;
         }
       }
     } catch (err: any) {

@@ -1235,23 +1235,32 @@ export async function getGroupPendingRequestsJids(
   }
 }
 
-// Returns JIDs of pending participants who joined via the GROUP INVITE LINK only.
+// Returns JIDs of pending participants who should be auto-approved by the
+// Auto Request Accepter — i.e. anyone who joined via the GROUP INVITE LINK.
 //
-// WhatsApp's pending list (groupRequestParticipantsList) actually contains
-// join requests from multiple sources, not just invite-link joiners:
-//   • "invite_link"     — user clicked the group's invite link
-//   • "non_admin_add"   — an existing (non-admin) member tried to add the user
-//   • "linked_group_join" — joined via a linked community/parent group
+// WhatsApp's pending list (groupRequestParticipantsList) is a flat list of
+// XML attrs from the `<membership_approval_request>` node. In Baileys
+// 7.0.0-rc.9 the relevant attribute is `request_method`, typed as:
 //
-// The Auto Request Accepter must ONLY auto-approve invite-link joiners.
-// Members added by other (non-admin) participants must NOT be auto-approved
-// — those should stay pending so the admin can review them manually.
+//   'invite_link' | 'linked_group_join' | 'non_admin_add' | undefined
 //
-// We detect the request method from the raw XML attributes. Different
-// Baileys versions expose it under slightly different keys, so we check a
-// few known names. If the method is missing/unknown, we fall back to the
-// presence of an invite code (add_request_code / code) which is only set
-// for invite-link joins.
+// Behaviour we want:
+//   • request_method === "invite_link"      → ACCEPT (user clicked the link)
+//   • request_method === "non_admin_add"    → REJECT (an existing member
+//                                              tried to add this user — admin
+//                                              must review manually)
+//   • request_method === "linked_group_join"→ REJECT (community / parent
+//                                              group join, not the link)
+//   • request_method missing / undefined    → ACCEPT (the WhatsApp server
+//                                              does not always send this
+//                                              attribute; the overwhelmingly
+//                                              common case for a missing
+//                                              method is an invite-link join,
+//                                              so we default to accept rather
+//                                              than silently dropping valid
+//                                              joiners — which was the
+//                                              "only one user gets accepted"
+//                                              bug)
 export async function getGroupPendingInviteLinkJoins(
   userId: string,
   groupId: string
@@ -1269,21 +1278,14 @@ export async function getGroupPendingInviteLinkJoins(
     }
 
     const inviteLinkRequests = requests.filter((r: any) => {
-      const method: string = (
-        r.request_method ||
-        r.requestMethod ||
-        r.method ||
-        (r.add_request && (r.add_request.method || r.add_request.request_method)) ||
-        ""
-      ).toString().toLowerCase();
+      const rawMethod =
+        r.request_method ??
+        r.requestMethod ??
+        r.method ??
+        (r.add_request && (r.add_request.method || r.add_request.request_method));
+      const method = rawMethod ? String(rawMethod).toLowerCase() : "";
 
-      // Explicitly accept invite-link joins.
-      if (method === "invite_link" || method === "invitelink" || method === "invite") {
-        return true;
-      }
-
-      // Explicitly REJECT joins that were triggered by another (non-admin)
-      // member adding the user — this is the bug we are fixing.
+      // REJECT only the methods we explicitly know are NOT invite-link joins.
       if (
         method === "non_admin_add" ||
         method === "nonadminadd" ||
@@ -1294,20 +1296,14 @@ export async function getGroupPendingInviteLinkJoins(
         return false;
       }
 
-      // Unknown / older Baileys versions: fall back to the presence of an
-      // invite code. Invite-link joiners always carry the invite code; users
-      // added by another member do not.
-      const hasInviteCode = !!(
-        r.add_request_code ||
-        r.invite_code ||
-        r.code ||
-        (r.add_request && (r.add_request.code || r.add_request.invite_code))
-      );
-      return hasInviteCode;
+      // Everything else (invite_link, missing/undefined method, or a value
+      // we have not seen before) is treated as an invite-link join and
+      // approved. Missing method is common and should NOT block approval.
+      return true;
     });
 
     console.log(
-      `[WA][${userId}] getGroupPendingInviteLinkJoins filtered: ${inviteLinkRequests.length}/${requests.length} are invite-link joins`
+      `[WA][${userId}] getGroupPendingInviteLinkJoins filtered: ${inviteLinkRequests.length}/${requests.length} accepted as invite-link joins`
     );
 
     return inviteLinkRequests
