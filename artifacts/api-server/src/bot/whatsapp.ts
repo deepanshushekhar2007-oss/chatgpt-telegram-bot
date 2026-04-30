@@ -1235,9 +1235,9 @@ export async function getGroupPendingRequestsJids(
   }
 }
 
-// Returns JIDs of pending participants who joined via invite link only
-// (i.e., they have an add_request_code — meaning they used an invite link,
-// NOT added directly by an admin). Used by Auto Request Accepter.
+// Returns JIDs of ALL pending participants for a group (used by Auto Request Accepter).
+// In WhatsApp approval mode, all pending requests come from users who joined via
+// invite link — admin-added members do not appear in the pending list.
 export async function getGroupPendingInviteLinkJoins(
   userId: string,
   groupId: string
@@ -1247,11 +1247,6 @@ export async function getGroupPendingInviteLinkJoins(
   try {
     const requests = await session.socket.groupRequestParticipantsList(groupId);
     return requests
-      .filter((r: any) => {
-        // add_request_code is present when user joined via invite link
-        const code: string = r.add_request_code || r.addRequestCode || "";
-        return code.length > 0;
-      })
       .map((r: any) => {
         const jid: string = r.jid || "";
         return jid.replace(/:\d+@/, "@");
