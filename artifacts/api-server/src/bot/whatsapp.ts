@@ -110,6 +110,31 @@ export function markSessionActive(userId: string): void {
   if (s) s.lastActivityAt = Date.now();
 }
 
+// Sessions that are currently running a long-lived background job (e.g. the
+// Auto Request Accepter). While a userId is in this set, sweepIdleSessions
+// will NEVER evict their WhatsApp socket — neither via the 30-minute idle
+// rule nor via memory-pressure LRU. Background jobs that protect a session
+// MUST also unprotect it when they finish so memory eviction can resume.
+const protectedUserIds: Set<string> = new Set();
+
+export function protectSessionFromEviction(userId: string): void {
+  protectedUserIds.add(userId);
+  // Also bump activity so any in-flight sweep this minute won't grab it.
+  const s = sessions.get(userId);
+  if (s) s.lastActivityAt = Date.now();
+  console.log(`[WA][PROTECT] User ${userId} session protected from idle eviction (${protectedUserIds.size} total)`);
+}
+
+export function unprotectSession(userId: string): void {
+  if (protectedUserIds.delete(userId)) {
+    console.log(`[WA][PROTECT] User ${userId} session unprotected (${protectedUserIds.size} remaining)`);
+  }
+}
+
+export function isSessionProtected(userId: string): boolean {
+  return protectedUserIds.has(userId);
+}
+
 // Internal: same as `sessions.get(userId)` but ALSO bumps the session's
 // last-activity timestamp. EVERY exported WhatsApp helper that uses the
 // socket goes through this so that real socket usage (fetching a link,
@@ -160,9 +185,14 @@ export function sweepIdleSessions(): { evicted: number; total: number } {
   const now = Date.now();
   let evicted = 0;
 
-  // 1. Always evict sessions that have been idle past the threshold.
+  // 1. Always evict sessions that have been idle past the threshold,
+  //    EXCEPT sessions that are explicitly protected (e.g. running an
+  //    Auto Request Accepter job). Protected sessions stay alive even
+  //    while the user is not interacting with the bot, so background
+  //    polling can keep working for the entire job duration.
   for (const [userId, session] of [...sessions.entries()]) {
     if (session.connectLock) continue;
+    if (protectedUserIds.has(userId)) continue;
     if (now - session.lastActivityAt > IDLE_EVICTION_MS) {
       evictSessionSocket(userId, session);
       evicted++;
@@ -177,13 +207,19 @@ export function sweepIdleSessions(): { evicted: number; total: number } {
   //    buttons, and killing them would cause the exact "WhatsApp
   //    disconnected mid-use" bug we're trying to prevent. Idle
   //    sessions still get cleaned up; only ACTIVE ones are protected.
+  //    Sessions in `protectedUserIds` are also always excluded.
   const rssMb = process.memoryUsage().rss / 1024 / 1024;
   const overCap = sessions.size > MAX_LIVE_SESSIONS;
   const memoryHigh = rssMb > MEMORY_PRESSURE_RSS_MB;
   if (overCap || memoryHigh) {
     const protectionCutoff = now - ACTIVE_SESSION_PROTECTION_MS;
     const candidates = [...sessions.entries()]
-      .filter(([, s]) => !s.connectLock && s.lastActivityAt < protectionCutoff)
+      .filter(
+        ([userId, s]) =>
+          !s.connectLock &&
+          !protectedUserIds.has(userId) &&
+          s.lastActivityAt < protectionCutoff
+      )
       .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
     while (
       candidates.length > 0 &&

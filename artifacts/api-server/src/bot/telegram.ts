@@ -44,6 +44,9 @@ import {
   waitForWhatsAppConnected,
   sweepIdleSessions,
   getGroupPendingInviteLinkJoins,
+  protectSessionFromEviction,
+  unprotectSession,
+  markSessionActive,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -5303,6 +5306,27 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
   const userIdStr = String(userId);
   let newCount = 0;
 
+  // Always mark the session as active at the top of every poll. This bumps
+  // lastActivityAt even when the WA socket is briefly disconnected, so the
+  // idle-eviction sweep never closes our protected session.
+  markSessionActive(userIdStr);
+
+  // If the WA socket got dropped for any reason (network blip, WhatsApp
+  // server-side reset, etc.), lazy-restore it from MongoDB BEFORE we try
+  // to read the pending list. Without this the polling silently returns
+  // empty for every iteration after a disconnect.
+  if (!isConnected(userIdStr)) {
+    try {
+      console.log(`[AutoAccepter][${userId}] Socket not connected — attempting lazy restore`);
+      const restored = await ensureSessionLoaded(userIdStr);
+      if (!restored) {
+        console.warn(`[AutoAccepter][${userId}] Lazy restore failed — will retry next poll`);
+      }
+    } catch (err: any) {
+      console.error(`[AutoAccepter][${userId}] Lazy restore error:`, err?.message);
+    }
+  }
+
   for (let i = 0; i < groupIds.length; i++) {
     const groupId = groupIds[i];
     try {
@@ -5360,6 +5384,11 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled")
   clearInterval(job.pollTimer);
   clearTimeout(job.endTimer);
   autoAccepterJobs.delete(userId);
+
+  // Release the WhatsApp session back to normal idle-eviction rules now that
+  // the long-lived job is over. If we forget this, memory eviction can never
+  // close this user's socket again.
+  unprotectSession(String(userId));
 
   const isDone = reason === "done";
   const msg = isDone
@@ -5739,6 +5768,12 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
   };
 
   autoAccepterJobs.set(userId, job);
+
+  // Protect this user's WhatsApp session from idle-eviction for the entire
+  // duration of the job. Without this, after 30 minutes of Telegram inactivity
+  // the sweep would close the WA socket and the polling would silently stop
+  // accepting requests even though the job is still scheduled to run.
+  protectSessionFromEviction(String(userId));
 
   // Start polling every 30 seconds
   job.pollTimer = setInterval(() => {
