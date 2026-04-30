@@ -6554,6 +6554,18 @@ bot.callbackQuery("ap_cancel_confirm", async (ctx) => {
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
+// Fetch a group's current total member count after an approval pass.
+// Returns "?" if the metadata fetch fails or returns an empty list, so the
+// result message stays readable instead of dropping the line.
+async function getGroupMemberCountSafe(userId: string, groupId: string): Promise<string> {
+  try {
+    const parts = await getGroupParticipants(userId, groupId);
+    return parts.length > 0 ? String(parts.length) : "?";
+  } catch {
+    return "?";
+  }
+}
+
 async function approveOneByOneBackground(
   userIdNum: number,
   userId: string,
@@ -6588,8 +6600,11 @@ async function approveOneByOneBackground(
     let approved = 0, failed = 0;
     for (let pi = 0; pi < pendingJids.length; pi++) {
       if (approvalCancelRequests.has(userIdNum)) {
-        // Record what we did for this group so far before bailing.
-        lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 🛑 Stopped at ${pi}/${pendingJids.length}`);
+        // Record what we did for this group so far before bailing. Fetch
+        // the live total so the user knows the group's current size after
+        // the partial approval.
+        const total = await getGroupMemberCountSafe(userId, group.id);
+        lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 🛑 Stopped at ${pi}/${pendingJids.length} | 👥 Total: ${total}`);
         cancelled = true;
         break outer;
       }
@@ -6611,7 +6626,10 @@ async function approveOneByOneBackground(
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed}`);
+    // Show the live total member count so the user sees how big the group
+    // is now (post-approval). Stays as "?" if metadata fetch fails.
+    const total = await getGroupMemberCountSafe(userId, group.id);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 👥 Total: ${total}`);
   }
 
   // Cleanup flags so the next run starts clean (and so any racing dialog
@@ -6708,8 +6726,13 @@ async function approveTogetherBackground(
       continue;
     }
 
-    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ All pending members approved!`);
+    // Give the server a moment to update group state, then fetch the live
+    // total. "Approve Together" works by toggling the approval mode off→on,
+    // which triggers the server to auto-approve everyone — so the metadata
+    // we read here reflects the post-approval member count.
     await new Promise((r) => setTimeout(r, 1000));
+    const total = await getGroupMemberCountSafe(userId, group.id);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ All pending members approved! | 👥 Total: ${total}`);
   }
 
   fullResult += lines.join("\n\n");
