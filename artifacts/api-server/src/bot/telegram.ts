@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard, InputFile, webhookCallback } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 import {
   connectWhatsApp,
   connectWhatsAppQr,
@@ -12021,52 +12021,12 @@ export async function startBot() {
     console.error(`[BOT] Error in update ${err.ctx?.update?.update_id}: ${desc || err.message}`);
   });
 
-  // Hydrate per-user language preferences from MongoDB before bot starts,
-  // so the very first outgoing message uses the right language.
-  try {
-    await loadUserLanguages();
-  } catch (err: any) {
-    console.error("[i18n] loadUserLanguages failed:", err?.message);
-  }
-
-  // Initialize the bot (fetches bot info from Telegram API)
-  try {
-    await bot.init();
-  } catch (err: any) {
-    if (err?.error_code === 401) {
-      console.error("[BOT] Invalid TELEGRAM_BOT_TOKEN (401 Unauthorized). Bot disabled.");
-      return;
-    }
-    console.error("[BOT] Failed to initialize bot:", err?.message);
-    return;
-  }
-
-  // ─── Webhook mode (Render production) ──────────────────────────────────────
-  // Agar RENDER_EXTERNAL_URL set hai to webhook mode use karo.
-  // Webhook mode mein Telegram khud updates push karta hai — koi polling nahi.
-  // Iska matlab: button click hote hi response milta hai, koi delay nahi.
-  const renderUrl = process.env["RENDER_EXTERNAL_URL"];
-  if (renderUrl) {
-    const webhookUrl = `${renderUrl}/api/telegram-webhook`;
-    try {
-      await bot.api.setWebhook(webhookUrl, { drop_pending_updates: false });
-      console.log(`[BOT] Webhook registered → ${webhookUrl}`);
-      console.log("[BOT] Bot started (webhook mode — ultra fast response)!");
-    } catch (err: any) {
-      console.error("[BOT] Failed to set webhook:", err?.message);
-    }
-    return;
-  }
-
-  // ─── Fallback: Long polling (local dev only) ────────────────────────────────
-  // Sirf local development ke liye jab RENDER_EXTERNAL_URL nahi hota.
-  console.log("[BOT] RENDER_EXTERNAL_URL not set — falling back to long polling (dev mode).");
   let retryCount = 0;
 
   async function launchBot() {
     try {
       await bot.api.deleteWebhook({ drop_pending_updates: true });
-      console.log("[BOT] Starting polling (local dev mode)...");
+      console.log("[BOT] Webhook cleared, starting polling...");
     } catch (err: any) {
       console.error("[BOT] Failed to delete webhook:", err?.message);
     }
@@ -12074,10 +12034,11 @@ export async function startBot() {
     try {
       await bot.start({
         onStart: () => {
-          console.log("Telegram bot started (polling mode)!");
+          console.log("Telegram bot started successfully!");
           retryCount = 0;
         },
       });
+      // bot.start() resolved (graceful stop) — restart polling
       console.log("[BOT] Polling stopped gracefully, restarting in 5s...");
       retryCount = 0;
       setTimeout(() => launchBot(), 5000);
@@ -12088,8 +12049,8 @@ export async function startBot() {
       }
       retryCount++;
       const delay = err?.error_code === 409
-        ? Math.min(retryCount * 15, 120)
-        : Math.min(retryCount * 5, 60);
+        ? Math.min(retryCount * 15, 120)   // 409: wait 15s, 30s ... max 2 min
+        : Math.min(retryCount * 5, 60);    // other errors: wait 5s, 10s ... max 1 min
       if (err?.error_code === 409) {
         console.log(`[BOT] 409 conflict — another instance running. Retry #${retryCount} in ${delay}s...`);
       } else {
@@ -12111,11 +12072,15 @@ export async function startBot() {
     process.exit(0);
   });
 
+  // Hydrate per-user language preferences from MongoDB before polling starts,
+  // so the very first outgoing message uses the right language.
+  try {
+    await loadUserLanguages();
+  } catch (err: any) {
+    console.error("[i18n] loadUserLanguages failed:", err?.message);
+  }
+
   launchBot();
 }
-
-// Webhook handler — Express middleware that receives Telegram updates.
-// Used by /api/telegram-webhook route when running in webhook mode.
-export const botWebhookHandler = webhookCallback(bot, "express");
 
 export { bot };
