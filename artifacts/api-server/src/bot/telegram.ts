@@ -1245,6 +1245,10 @@ const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
 const removeMembersCancelRequests: Set<number> = new Set();
+// Same cancel pattern, but for the "Approve 1 by 1" flow. The background
+// loop checks this each iteration so the user can stop mid-run after
+// confirming the cancel-dialog (Yes/No).
+const approvalCancelRequests: Set<number> = new Set();
 
 // ── Cancel-dialog protection ────────────────────────────────────────────────
 // When a user taps a "❌ Cancel" button on a long-running flow, the bot shows
@@ -3421,6 +3425,7 @@ function clearUserMemoryState(telegramUserId: number): void {
   getLinkCancelRequests.delete(telegramUserId);
   addMembersCancelRequests.delete(telegramUserId);
   removeMembersCancelRequests.delete(telegramUserId);
+  approvalCancelRequests.delete(telegramUserId);
 
   // 7. New-session flag
   newSessionFlag.delete(telegramUserId);
@@ -3479,11 +3484,13 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
 
   // 6. Cancel-request flag sets
   const cancelCleared = joinCancelRequests.size + getLinkCancelRequests.size +
-    addMembersCancelRequests.size + removeMembersCancelRequests.size;
+    addMembersCancelRequests.size + removeMembersCancelRequests.size +
+    approvalCancelRequests.size;
   joinCancelRequests.clear();
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
   removeMembersCancelRequests.clear();
+  approvalCancelRequests.clear();
 
   // 7. newSessionFlag
   const newSessionCleared = newSessionFlag.size;
@@ -6498,31 +6505,75 @@ bot.callbackQuery("ap_one_by_one", async (ctx) => {
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(`⏳ <b>Approving pending members 1 by 1...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
+  // Clear any leftover cancel state from a previous run.
+  approvalCancelRequests.delete(userId);
+  cancelDialogActiveFor.delete(userId);
 
-  void approveOneByOneBackground(String(userId), selectedGroups, chatId, msgId);
+  await ctx.editMessageText(
+    `⏳ <b>Approving pending members 1 by 1...</b>\n\n⌛ Please wait...`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "ap_cancel_request"),
+    }
+  );
+
+  void approveOneByOneBackground(userId, String(userId), selectedGroups, chatId, msgId);
+});
+
+// Cancel-confirm dialog for the 1-by-1 approval loop. Same protected pattern
+// used by Join / Get Links / Remove Members so the in-flight progress edit
+// can't wipe the Yes/No buttons before the user answers.
+bot.callbackQuery("ap_cancel_request", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  cancelDialogActiveFor.add(ctx.from.id);
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard()
+      .text("✅ Yes, Stop Approving", "ap_cancel_confirm")
+      .text("↩️ Continue", "ap_cancel_no"),
+  });
+});
+
+bot.callbackQuery("ap_cancel_no", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Approval continued" });
+  const userId = ctx.from.id;
+  cancelDialogActiveFor.delete(userId);
+  // If somehow the user already confirmed, don't put the Cancel button back.
+  if (approvalCancelRequests.has(userId)) return;
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard().text("❌ Cancel", "ap_cancel_request"),
+  });
+});
+
+bot.callbackQuery("ap_cancel_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
+  const userId = ctx.from.id;
+  approvalCancelRequests.add(userId);
+  // Keep the dialog flag on; the background loop's cleanup clears both flags
+  // once it actually stops, which prevents a racing progress-edit between
+  // confirm-tap and the loop's next iteration check.
+  await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
 async function approveOneByOneBackground(
+  userIdNum: number,
   userId: string,
   groups: Array<{ id: string; subject: string }>,
   chatId: number,
   msgId: number
 ) {
+  const progressMarkup = new InlineKeyboard().text("❌ Cancel", "ap_cancel_request");
   let fullResult = "✅ <b>Approve 1 by 1 Result</b>\n\n";
   const lines: string[] = [];
+  let cancelled = false;
 
-  for (let gi = 0; gi < groups.length; gi++) {
+  outer: for (let gi = 0; gi < groups.length; gi++) {
+    if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break outer; }
     const group = groups[gi];
 
-    try {
-      if (msgId) {
-        await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching pending members...`,
-          { parse_mode: "HTML" }
-        );
-      }
-    } catch {}
+    await safeBackgroundEdit(userIdNum, chatId, msgId,
+      `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching pending members...`,
+      { parse_mode: "HTML", reply_markup: progressMarkup }
+    );
 
     // Use raw JIDs from the pending list — do NOT reconstruct from phone number.
     // In LID-mode groups the JID may be @lid format; reconstructing as @s.whatsapp.net
@@ -6536,22 +6587,24 @@ async function approveOneByOneBackground(
 
     let approved = 0, failed = 0;
     for (let pi = 0; pi < pendingJids.length; pi++) {
+      if (approvalCancelRequests.has(userIdNum)) {
+        // Record what we did for this group so far before bailing.
+        lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 🛑 Stopped at ${pi}/${pendingJids.length}`);
+        cancelled = true;
+        break outer;
+      }
       const jid = pendingJids[pi];
       const ok = await approveGroupParticipant(userId, group.id, jid);
       if (ok) approved++;
       else failed++;
 
       if (pi % 3 === 0 || pi === pendingJids.length - 1) {
-        try {
-          if (msgId) {
-            await bot.api.editMessageText(chatId, msgId,
-              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
-              `✅ Approving: ${pi + 1}/${pendingJids.length}\n` +
-              `Approved: ${approved} | Failed: ${failed}`,
-              { parse_mode: "HTML" }
-            );
-          }
-        } catch {}
+        await safeBackgroundEdit(userIdNum, chatId, msgId,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+          `✅ Approving: ${pi + 1}/${pendingJids.length}\n` +
+          `Approved: ${approved} | Failed: ${failed}`,
+          { parse_mode: "HTML", reply_markup: progressMarkup }
+        );
       }
 
       // 1s delay between approvals to avoid WhatsApp rate limiting
@@ -6561,8 +6614,18 @@ async function approveOneByOneBackground(
     lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed}`);
   }
 
+  // Cleanup flags so the next run starts clean (and so any racing dialog
+  // confirmation after this point is a no-op).
+  approvalCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  if (cancelled) {
+    fullResult = `🛑 <b>Approve 1 by 1 — Cancelled</b>\n\n`;
+  }
   fullResult += lines.join("\n\n");
-  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
+  fullResult += cancelled
+    ? `\n\n━━━━━━━━━━━━━━━━━━\n🛑 <b>Stopped after ${lines.length} group(s).</b>`
+    : `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
