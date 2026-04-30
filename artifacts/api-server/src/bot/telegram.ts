@@ -8448,6 +8448,13 @@ async function runChatFriendBackground(
   };
   acfSessions.set(userId, session);
 
+  // Protect BOTH WhatsApp sessions (primary + secondary) from idle and
+  // memory-pressure eviction for the entire duration of this Auto Chat
+  // Friend job. If either socket gets closed, the loop silently fails
+  // because sendGroupMessage just returns false.
+  protectSessionFromEviction(primaryUserId);
+  protectSessionFromEviction(autoUserId);
+
   try {
     let i = 0;
     while (!session.cancelled && session.running) {
@@ -8457,6 +8464,10 @@ async function runChatFriendBackground(
 
       const [msg1, msg2] = CHAT_FRIEND_PAIRS[i % CHAT_FRIEND_PAIRS.length];
 
+      // Defensive reconnect for the primary account before sending.
+      if (!isConnected(primaryUserId)) {
+        try { await ensureSessionLoaded(primaryUserId); } catch {}
+      }
       const ok1 = await sendGroupMessage(primaryUserId, autoJid, msg1);
       if (ok1) session.sent++; else session.failed++;
       session.nextDelayMs = getSequentialDelayMs(session.rotationIndex);
@@ -8476,6 +8487,10 @@ async function runChatFriendBackground(
       await waitWithCancel(session, session.nextDelayMs);
       if (!isSessionActive(session)) break;
 
+      // Defensive reconnect for the secondary account before sending.
+      if (!isConnected(autoUserId)) {
+        try { await ensureSessionLoaded(autoUserId); } catch {}
+      }
       const ok2 = await sendGroupMessage(autoUserId, primaryJid, msg2);
       if (ok2) session.sent++; else session.failed++;
       session.nextDelayMs = getSequentialDelayMs(session.rotationIndex);
@@ -8500,6 +8515,10 @@ async function runChatFriendBackground(
   } catch (err: any) {
     console.error(`[ACF][${userId}] Error:`, err?.message);
   }
+
+  // Release both protected sessions back to normal eviction rules.
+  unprotectSession(primaryUserId);
+  unprotectSession(autoUserId);
 
   session.running = false;
   session.nextDelayMs = 0;
@@ -8635,6 +8654,12 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
   autoChatSessions.set(userId, session);
   activeAutoChatCount++;
 
+  // Protect the secondary WhatsApp session from idle / memory-pressure
+  // eviction for the entire duration of this Auto Chat job. Without this,
+  // a memory-pressure LRU pass could close the socket mid-loop and every
+  // subsequent sendGroupMessage call would silently return false.
+  protectSessionFromEviction(autoUserId);
+
   // Throttled progress updater — reduces Telegram API calls dramatically when
   // many users are running simultaneously. Always edits on `force=true`
   // (round changes, completion, errors) and otherwise at most once per
@@ -8667,6 +8692,19 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
       for (const group of cappedGroups) {
         if (session.cancelled) break;
 
+        // Defensive reconnect: if the secondary WA socket got dropped due
+        // to a server-side reset or transient network blip, lazy-restore
+        // it from MongoDB BEFORE attempting the send. Without this, the
+        // send would fail silently and the loop would burn through its
+        // delay budget without delivering anything.
+        if (!isConnected(autoUserId)) {
+          try {
+            await ensureSessionLoaded(autoUserId);
+          } catch (err: any) {
+            console.error(`[AUTO_CHAT][${userId}] Lazy restore error:`, err?.message);
+          }
+        }
+
         let ok = false;
         try {
           ok = await sendGroupMessage(autoUserId, group.id, message);
@@ -8698,6 +8736,9 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
   } finally {
     session.running = false;
     activeAutoChatCount = Math.max(0, activeAutoChatCount - 1);
+
+    // Release the secondary WhatsApp session back to normal eviction rules.
+    unprotectSession(autoUserId);
 
     if (!session.cancelled) {
       try {
