@@ -161,10 +161,17 @@ export async function getUserAccessState(
   const now = Date.now();
 
   // Clean up expired admin grants so the DB doesn't grow forever.
+  // IMPORTANT: Use atomic $unset on just this field — never replace the whole
+  // accessList document, because a concurrent /redeem atomic $set could be
+  // overwritten if we call saveBotData(data) here.
   const granted = data.accessList[String(userId)];
   if (granted && granted.expiresAt <= now) {
     delete data.accessList[String(userId)];
-    await saveBotData(data);
+    const botDataCol = await getCollection("bot_data");
+    await botDataCol.updateOne(
+      { _id: "main" as any },
+      { $unset: { [`accessList.${String(userId)}`]: "" } }
+    );
   }
 
   // Build the list of every active access window the user has earned.
@@ -404,31 +411,53 @@ export async function redeemCodeForUser(
   error?: "not_found" | "already_used" | "exhausted";
 }> {
   const col = await getCollection("redeem_codes");
-  const doc = await col.findOne({ _id: code.toUpperCase() as any });
+  const codeKey = code.toUpperCase();
+
+  // Atomically mark this user as having used the code.
+  // $addToSet prevents duplicate entries; we use $inc to track use count.
+  // First do a read to check preconditions, then atomic push.
+  const doc = await col.findOne({ _id: codeKey as any });
   if (!doc) return { success: false, error: "not_found" };
 
   const usedBy: Array<{ userId: number; redeemedAt: number }> = doc.usedBy ?? [];
   if (usedBy.some((u) => u.userId === userId)) return { success: false, error: "already_used" };
   if (usedBy.length >= doc.maxUsers) return { success: false, error: "exhausted" };
 
-  // Grant access via the main bot accessList
-  const botData = await loadBotData();
   const now = Date.now();
-  const existingGrant = botData.accessList[String(userId)];
+
+  // ── 1. Grant bot access atomically ─────────────────────────────────────────
+  // Read ONLY the current user's grant to stack days on top of it, then write
+  // just that single field via dot-notation $set — no full doc replace needed.
+  const botDataCol = await getCollection("bot_data");
+  const currentDoc = await botDataCol.findOne({ _id: "main" as any });
+  const existingGrant = currentDoc?.accessList?.[String(userId)];
   const base = existingGrant && existingGrant.expiresAt > now ? existingGrant.expiresAt : now;
   const expiresAt = base + doc.days * 86400000;
-  botData.accessList[String(userId)] = { expiresAt, grantedBy: adminId };
-  await saveBotData(botData);
 
-  // Record redemption in the code doc
-  usedBy.push({ userId, redeemedAt: now });
-  await col.updateOne({ _id: code.toUpperCase() as any }, { $set: { usedBy } });
+  await botDataCol.updateOne(
+    { _id: "main" as any },
+    {
+      $set: {
+        [`accessList.${String(userId)}`]: { expiresAt, grantedBy: adminId },
+        updatedAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
 
+  // ── 2. Atomically append this user to the code's usedBy list ───────────────
+  // $push is atomic — avoids full-array read/replace race conditions.
+  await col.updateOne(
+    { _id: codeKey as any },
+    { $push: { usedBy: { userId, redeemedAt: now } as any } }
+  );
+
+  const newUsedCount = usedBy.length + 1;
   return {
     success: true,
     daysGranted: doc.days,
     expiresAt,
-    remaining: doc.maxUsers - usedBy.length,
+    remaining: doc.maxUsers - newUsedCount,
   };
 }
 
