@@ -356,3 +356,111 @@ export async function getReferralStats(userId: number): Promise<{
     totalReferred: ref?.totalReferred ?? 0,
   };
 }
+
+// ── Redeem Code System ────────────────────────────────────────────────────────
+// Admin creates a code with /redeem <CODE> <days> <maxUsers>.
+// Users redeem with /redeem <CODE> — grants them access via the main accessList.
+// Each code tracks who used it and has a fixed user-cap.
+
+export interface RedeemCode {
+  code: string;
+  days: number;
+  maxUsers: number;
+  usedBy: Array<{ userId: number; redeemedAt: number }>;
+  createdAt: number;
+  createdBy: number;
+}
+
+export async function createRedeemCode(
+  code: string,
+  days: number,
+  maxUsers: number,
+  adminId: number
+): Promise<{ success: boolean; error?: "already_exists" }> {
+  const col = await getCollection("redeem_codes");
+  const existing = await col.findOne({ _id: code.toUpperCase() as any });
+  if (existing) return { success: false, error: "already_exists" };
+  await col.insertOne({
+    _id: code.toUpperCase() as any,
+    code: code.toUpperCase(),
+    days,
+    maxUsers,
+    usedBy: [],
+    createdAt: Date.now(),
+    createdBy: adminId,
+  });
+  return { success: true };
+}
+
+export async function redeemCodeForUser(
+  code: string,
+  userId: number,
+  adminId: number
+): Promise<{
+  success: boolean;
+  daysGranted?: number;
+  expiresAt?: number;
+  remaining?: number;
+  error?: "not_found" | "already_used" | "exhausted";
+}> {
+  const col = await getCollection("redeem_codes");
+  const doc = await col.findOne({ _id: code.toUpperCase() as any });
+  if (!doc) return { success: false, error: "not_found" };
+
+  const usedBy: Array<{ userId: number; redeemedAt: number }> = doc.usedBy ?? [];
+  if (usedBy.some((u) => u.userId === userId)) return { success: false, error: "already_used" };
+  if (usedBy.length >= doc.maxUsers) return { success: false, error: "exhausted" };
+
+  // Grant access via the main bot accessList
+  const botData = await loadBotData();
+  const now = Date.now();
+  const existingGrant = botData.accessList[String(userId)];
+  const base = existingGrant && existingGrant.expiresAt > now ? existingGrant.expiresAt : now;
+  const expiresAt = base + doc.days * 86400000;
+  botData.accessList[String(userId)] = { expiresAt, grantedBy: adminId };
+  await saveBotData(botData);
+
+  // Record redemption in the code doc
+  usedBy.push({ userId, redeemedAt: now });
+  await col.updateOne({ _id: code.toUpperCase() as any }, { $set: { usedBy } });
+
+  return {
+    success: true,
+    daysGranted: doc.days,
+    expiresAt,
+    remaining: doc.maxUsers - usedBy.length,
+  };
+}
+
+export async function getRedeemCodeStats(code: string): Promise<RedeemCode | null> {
+  const col = await getCollection("redeem_codes");
+  const doc = await col.findOne({ _id: code.toUpperCase() as any });
+  if (!doc) return null;
+  return {
+    code: doc.code,
+    days: doc.days,
+    maxUsers: doc.maxUsers,
+    usedBy: doc.usedBy ?? [],
+    createdAt: doc.createdAt,
+    createdBy: doc.createdBy,
+  };
+}
+
+export async function listAllRedeemCodes(): Promise<RedeemCode[]> {
+  const col = await getCollection("redeem_codes");
+  const docs = await col.find({}).sort({ createdAt: -1 }).toArray();
+  return docs.map((doc) => ({
+    code: doc.code,
+    days: doc.days,
+    maxUsers: doc.maxUsers,
+    usedBy: doc.usedBy ?? [],
+    createdAt: doc.createdAt,
+    createdBy: doc.createdBy,
+  }));
+}
+
+export async function deleteRedeemCode(code: string): Promise<boolean> {
+  const col = await getCollection("redeem_codes");
+  const result = await col.deleteOne({ _id: code.toUpperCase() as any });
+  return (result.deletedCount ?? 0) > 0;
+}
