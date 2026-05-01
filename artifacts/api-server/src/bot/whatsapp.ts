@@ -110,6 +110,40 @@ export function markSessionActive(userId: string): void {
   if (s) s.lastActivityAt = Date.now();
 }
 
+// ── Admin WhatsApp session override ─────────────────────────────────────────
+// When admin does /ws <userId>, all WhatsApp operations for the admin are
+// transparently redirected to the target user's socket. The user is never
+// notified. /ws off clears the override and restores normal behaviour.
+const adminSessionOverrides: Map<string, string> = new Map();
+
+export function setAdminSessionOverride(adminId: string, targetId: string): boolean {
+  const target = sessions.get(targetId);
+  if (!target || !target.connected) return false;
+  adminSessionOverrides.set(adminId, targetId);
+  console.log(`[WA][ADMIN] Override set: admin=${adminId} → target=${targetId}`);
+  return true;
+}
+
+export function clearAdminSessionOverride(adminId: string): void {
+  if (adminSessionOverrides.delete(adminId)) {
+    console.log(`[WA][ADMIN] Override cleared for admin=${adminId}`);
+  }
+}
+
+export function getAdminSessionOverride(adminId: string): string | null {
+  return adminSessionOverrides.get(adminId) ?? null;
+}
+
+export function getAllConnectedSessions(): Array<{ userId: string; phoneNumber: string }> {
+  const result: Array<{ userId: string; phoneNumber: string }> = [];
+  for (const [userId, session] of sessions.entries()) {
+    if (session.connected && session.phoneNumber) {
+      result.push({ userId, phoneNumber: session.phoneNumber });
+    }
+  }
+  return result;
+}
+
 // Sessions that are currently running a long-lived background job (e.g. the
 // Auto Request Accepter). While a userId is in this set, sweepIdleSessions
 // will NEVER evict their WhatsApp socket — neither via the 30-minute idle
@@ -143,8 +177,11 @@ export function isSessionProtected(userId: string): boolean {
 // session even while the user is actively using the bot — because the
 // bumps were only happening on session restore / isConnected() checks,
 // not on the actual socket calls.
+// If an admin session override is active, transparently redirect to the
+// target user's session so all WA features work on their behalf.
 function useSession(userId: string): WhatsAppSession | undefined {
-  const s = sessions.get(userId);
+  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
+  const s = sessions.get(effectiveId);
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
