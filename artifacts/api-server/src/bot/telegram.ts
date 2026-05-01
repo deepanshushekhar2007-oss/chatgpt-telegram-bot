@@ -372,6 +372,10 @@ bot.use(async (ctx, next) => {
       let hasStored = false;
       try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
       if (hasStored) {
+        // Answer the callback query immediately so Telegram doesn't show
+        // a timeout error on phones while we wait up to 20s for WhatsApp
+        // to reconnect. The loading spinner clears right away.
+        try { await ctx.answerCallbackQuery(); } catch {}
         // Edit text only (no reply_markup specified → original inline
         // keyboard is preserved). The handler that runs after reconnect
         // will overwrite this text with its real UI.
@@ -479,22 +483,36 @@ bot.use(async (ctx, next) => {
   if (isAdmin(userId)) return next();
   if (isReferGateExempt(cbData)) return next();
 
-  const data = await loadBotData();
+  let data: Awaited<ReturnType<typeof loadBotData>>;
+  try {
+    data = await loadBotData();
+  } catch (err: any) {
+    console.error("[REFER_GATE] loadBotData failed, allowing through:", err?.message);
+    return next();
+  }
   if (!data.referMode) return next();
 
-  const state = await getAccessState(userId);
+  let state: Awaited<ReturnType<typeof getAccessState>>;
+  try {
+    state = await getAccessState(userId);
+  } catch (err: any) {
+    console.error("[REFER_GATE] getAccessState failed, allowing through:", err?.message);
+    return next();
+  }
   if (state.kind !== "none") return next();
 
   // Out of access — block the button and surface the refer-required UI.
   try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: false }); } catch {}
-  const { text, keyboard } = await buildReferRequiredMessage(userId);
   try {
-    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
-  } catch {
+    const { text, keyboard } = await buildReferRequiredMessage(userId);
     try {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
-    } catch {}
-  }
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {
+      try {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+      } catch {}
+    }
+  } catch {}
   // Stop here — do NOT call next(), the original handler must not run.
 });
 
@@ -1724,12 +1742,12 @@ function mainMenu(userId?: number): InlineKeyboard {
   }
   kb
     .text("👥 Create Groups", "create_groups").text("🔗 Join Groups", "join_groups").row()
-    .text("🛡️ Auto Accepter", "auto_accepter").text("🔗 Get Link", "get_link").row()
+    .text("🔍 CTC Checker", "ctc_checker").text("🔗 Get Link", "get_link").row()
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
-    .text("🔍 CTC Checker", "ctc_checker").row();
+    .text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
