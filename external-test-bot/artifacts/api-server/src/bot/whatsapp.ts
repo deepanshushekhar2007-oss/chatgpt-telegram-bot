@@ -7,7 +7,6 @@ import makeWASocket, {
 import { Boom } from "@hapi/boom";
 import pino from "pino";
 import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
-export { listStoredWhatsAppSessions };
 
 const logger = pino({ level: "silent" });
 
