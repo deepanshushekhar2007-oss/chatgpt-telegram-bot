@@ -110,83 +110,6 @@ export function markSessionActive(userId: string): void {
   if (s) s.lastActivityAt = Date.now();
 }
 
-// ── Admin WhatsApp session override ─────────────────────────────────────────
-// When admin does /ws <userId>, all WhatsApp operations for the admin are
-// transparently redirected to the target user's socket. The user is never
-// notified. /ws off clears the override and restores normal behaviour.
-const adminSessionOverrides: Map<string, string> = new Map();
-
-// setAdminSessionOverride: async — loads session from MongoDB if not in memory.
-// This means admin can switch to ANY user who ever paired, even if their socket
-// was evicted from RAM.
-// Fast path: session already live → set override immediately.
-// Slow path: session in MongoDB → kick off lazy restore and poll up to 30s for
-//   the socket to actually reach "connection=open". This is necessary because
-//   createSocket() resolves as soon as the socket object is created, NOT when
-//   the WhatsApp handshake completes — connected:true is set later in the
-//   connection.update event. The /ws handler already shows a loading message
-//   so the 30s wait is perfectly fine from a UX perspective.
-export async function setAdminSessionOverride(adminId: string, targetId: string): Promise<boolean> {
-  // Fast path: already live and connected
-  const inMemory = sessions.get(targetId);
-  if (inMemory?.connected && inMemory.socket) {
-    adminSessionOverrides.set(adminId, targetId);
-    console.log(`[WA][ADMIN] Override set (fast): admin=${adminId} → target=${targetId}`);
-    return true;
-  }
-
-  // Check MongoDB — if no stored creds, there is nothing to restore
-  const storedList = await listStoredWhatsAppSessions();
-  const stored = storedList.find((s) => s.userId === targetId);
-  if (!stored) {
-    console.log(`[WA][ADMIN] Override failed: no stored session for target=${targetId}`);
-    return false;
-  }
-
-  // Kick off lazy restore (fire and forget — we poll below)
-  ensureSessionLoaded(targetId).catch(() => {});
-
-  // Poll for up to 30s until the socket reaches connected state
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const s = sessions.get(targetId);
-    if (s?.connected && s.socket) {
-      adminSessionOverrides.set(adminId, targetId);
-      console.log(`[WA][ADMIN] Override set (restored): admin=${adminId} → target=${targetId}`);
-      return true;
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  console.log(`[WA][ADMIN] Override timed out waiting for target=${targetId} to connect`);
-  return false;
-}
-
-export function clearAdminSessionOverride(adminId: string): void {
-  if (adminSessionOverrides.delete(adminId)) {
-    console.log(`[WA][ADMIN] Override cleared for admin=${adminId}`);
-  }
-}
-
-export function getAdminSessionOverride(adminId: string): string | null {
-  return adminSessionOverrides.get(adminId) ?? null;
-}
-
-// Returns ALL sessions that have credentials stored in MongoDB — not just the
-// ones currently loaded in memory. This lets /ws list users who paired in the
-// past even if their socket was evicted to save RAM.
-export async function getAllConnectedSessions(): Promise<Array<{ userId: string; phoneNumber: string; inMemory: boolean }>> {
-  const stored = await listStoredWhatsAppSessions();
-  return stored.map((s) => {
-    const mem = sessions.get(s.userId);
-    return {
-      userId: s.userId,
-      phoneNumber: s.phoneNumber || "Unknown",
-      inMemory: mem?.connected === true && mem.socket !== null,
-    };
-  });
-}
-
 // Sessions that are currently running a long-lived background job (e.g. the
 // Auto Request Accepter). While a userId is in this set, sweepIdleSessions
 // will NEVER evict their WhatsApp socket — neither via the 30-minute idle
@@ -220,11 +143,8 @@ export function isSessionProtected(userId: string): boolean {
 // session even while the user is actively using the bot — because the
 // bumps were only happening on session restore / isConnected() checks,
 // not on the actual socket calls.
-// If an admin session override is active, transparently redirect to the
-// target user's session so all WA features work on their behalf.
 function useSession(userId: string): WhatsAppSession | undefined {
-  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
-  const s = sessions.get(effectiveId);
+  const s = sessions.get(userId);
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
@@ -855,18 +775,13 @@ export function getSession(userId: string): WhatsAppSession | undefined {
 }
 
 export function isConnected(userId: string): boolean {
-  // Respect admin session override: if admin has switched to another user's
-  // WhatsApp, all status checks should reflect that user's connection state.
-  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
-  const s = sessions.get(effectiveId);
+  const s = sessions.get(userId);
   if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
 }
 
 export function getConnectedWhatsAppNumber(userId: string): string | null {
-  // Respect admin session override same as isConnected.
-  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
-  const s = sessions.get(effectiveId);
+  const s = sessions.get(userId);
   if (!s?.connected || !s.socket) return null;
 
   const savedDigits = s.phoneNumber.replace(/[^0-9]/g, "");
@@ -2201,13 +2116,10 @@ export function getActiveSessionUserIds(): Set<string> {
 // Check whether a user has WhatsApp credentials saved in MongoDB. Used by
 // /start to decide whether to show the "connecting WhatsApp" progress bar.
 // Returns false on any DB error so we never block the menu on transient issues.
-// Override-aware: if admin has switched to another user's session, check that
-// user's stored session so the progress bar reflects the override target.
 export async function hasStoredWhatsAppSession(userId: string): Promise<boolean> {
   try {
-    const effectiveId = adminSessionOverrides.get(userId) ?? userId;
     const all = await listStoredWhatsAppSessions();
-    return all.some((s) => s.userId === effectiveId);
+    return all.some((s) => s.userId === userId);
   } catch {
     return false;
   }

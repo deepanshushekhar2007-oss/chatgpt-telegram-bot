@@ -1,13 +1,5 @@
 import { getCollection } from "./mongodb";
 
-// Redeem code entry stored in MongoDB
-export interface RedeemCode {
-  days: number;
-  maxUsers: number;
-  usedBy: number[];
-  createdAt: number;
-}
-
 interface BotData {
   subscriptionMode: boolean;
   accessList: Record<string, { expiresAt: number; grantedBy: number }>;
@@ -38,11 +30,6 @@ interface BotData {
   referredBy: Record<string, number>;
   // referrerUserId -> accumulated referral access window + lifetime count
   referralAccess: Record<string, { expiresAt: number; totalReferred: number }>;
-  // ── Redeem Codes ─────────────────────────────────────────────────────────
-  // Admin creates codes with /redeem CODE DAYS MAXUSERS.
-  // Users redeem with /redeem CODE — they instantly get access just like
-  // /access [id] [days]. Each code can be used by up to maxUsers people.
-  redeemCodes: Record<string, RedeemCode>;
 }
 
 const DEFAULT_DATA: BotData = {
@@ -56,7 +43,6 @@ const DEFAULT_DATA: BotData = {
   freeTrials: {},
   referredBy: {},
   referralAccess: {},
-  redeemCodes: {},
 };
 
 export async function loadBotData(): Promise<BotData> {
@@ -75,7 +61,6 @@ export async function loadBotData(): Promise<BotData> {
         freeTrials: doc.freeTrials ?? {},
         referredBy: doc.referredBy ?? {},
         referralAccess: doc.referralAccess ?? {},
-        redeemCodes: doc.redeemCodes ?? {},
       };
     }
   } catch (err: any) {
@@ -101,7 +86,6 @@ export async function saveBotData(data: BotData): Promise<void> {
           freeTrials: data.freeTrials,
           referredBy: data.referredBy,
           referralAccess: data.referralAccess,
-          redeemCodes: data.redeemCodes,
           updatedAt: new Date(),
         },
       },
@@ -371,75 +355,4 @@ export async function getReferralStats(userId: number): Promise<{
     expiresAt: ref?.expiresAt ?? 0,
     totalReferred: ref?.totalReferred ?? 0,
   };
-}
-
-// ── Redeem Code functions ─────────────────────────────────────────────────────
-
-// Admin creates a redeem code. CODE is case-insensitive (stored uppercase).
-export async function createRedeemCode(
-  code: string,
-  days: number,
-  maxUsers: number
-): Promise<{ success: boolean; reason?: "already_exists" }> {
-  const data = await loadBotData();
-  const key = code.toUpperCase();
-  if (data.redeemCodes[key]) return { success: false, reason: "already_exists" };
-  data.redeemCodes[key] = { days, maxUsers, usedBy: [], createdAt: Date.now() };
-  await saveBotData(data);
-  return { success: true };
-}
-
-// Returns the redeem code entry or null if not found.
-export async function getRedeemCode(code: string): Promise<RedeemCode | null> {
-  const data = await loadBotData();
-  return data.redeemCodes[code.toUpperCase()] ?? null;
-}
-
-// Returns all redeem codes.
-export async function getAllRedeemCodes(): Promise<Record<string, RedeemCode>> {
-  const data = await loadBotData();
-  return data.redeemCodes ?? {};
-}
-
-// Admin deletes a redeem code.
-export async function deleteRedeemCode(
-  code: string
-): Promise<{ success: boolean }> {
-  const data = await loadBotData();
-  const key = code.toUpperCase();
-  if (!data.redeemCodes[key]) return { success: false };
-  delete data.redeemCodes[key];
-  await saveBotData(data);
-  return { success: true };
-}
-
-// User redeems a code. Grants access like /access [id] [days].
-// Returns the number of days granted on success.
-export async function redeemCode(
-  code: string,
-  userId: number,
-  adminUserId: number
-): Promise<{
-  success: boolean;
-  days?: number;
-  expiresAt?: number;
-  reason?: "not_found" | "already_redeemed" | "max_users_reached";
-}> {
-  if (userId === adminUserId) return { success: false, reason: "already_redeemed" };
-  const data = await loadBotData();
-  const key = code.toUpperCase();
-  const entry = data.redeemCodes[key];
-  if (!entry) return { success: false, reason: "not_found" };
-  if (entry.usedBy.includes(userId)) return { success: false, reason: "already_redeemed" };
-  if (entry.usedBy.length >= entry.maxUsers) return { success: false, reason: "max_users_reached" };
-
-  // Grant access — stack on top of any existing access window
-  const now = Date.now();
-  const existing = data.accessList[String(userId)];
-  const base = existing && existing.expiresAt > now ? existing.expiresAt : now;
-  const expiresAt = base + entry.days * 86400000;
-  data.accessList[String(userId)] = { expiresAt, grantedBy: adminUserId };
-  entry.usedBy.push(userId);
-  await saveBotData(data);
-  return { success: true, days: entry.days, expiresAt };
 }
