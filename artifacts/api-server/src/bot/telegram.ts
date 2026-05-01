@@ -1724,12 +1724,12 @@ function mainMenu(userId?: number): InlineKeyboard {
   }
   kb
     .text("👥 Create Groups", "create_groups").text("🔗 Join Groups", "join_groups").row()
-    .text("🔍 CTC Checker", "ctc_checker").text("🔗 Get Link", "get_link").row()
+    .text("🛡️ Auto Accepter", "auto_accepter").text("🔗 Get Link", "get_link").row()
     .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
-    .text("🛡️ Auto Accepter", "auto_accepter").row();
+    .text("🔍 CTC Checker", "ctc_checker").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
