@@ -412,27 +412,31 @@ bot.use(async (ctx, next) => {
           // they know what happened and how to fix it (re-link via the
           // QR / pairing-code flow inside the WhatsApp menu).
           try { await ctx.answerCallbackQuery(); } catch {}
+          const disconnectMsg =
+            `❌ <b>WhatsApp disconnected</b>\n\n` +
+            `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
+            `WhatsApp → Linked Devices kholo, bot wala device check ` +
+            `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
+            `link karna hoga:\n\n` +
+            `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
+            `re-link karo.`;
+          let disconnectShown = false;
           try {
-            await ctx.editMessageText(
-              `❌ <b>WhatsApp disconnected</b>\n\n` +
-              `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
-              `WhatsApp → Linked Devices kholo, bot wala device check ` +
-              `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
-              `link karna hoga:\n\n` +
-              `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
-              `re-link karo.`,
-              { parse_mode: "HTML" }
-            );
-          } catch {
+            await ctx.editMessageText(disconnectMsg, { parse_mode: "HTML" });
+            disconnectShown = true;
+          } catch { /* ignore */ }
+          if (!disconnectShown) {
             try {
-              await ctx.reply(
-                `❌ <b>WhatsApp disconnected</b>\n\n` +
-                `Aapka WhatsApp session disconnect ho gaya hai. Menu se ` +
-                `<b>Connect WhatsApp</b> dabake QR ya Pairing Code se ` +
-                `dobara link karo.`,
-                { parse_mode: "HTML" }
-              );
-            } catch {}
+              await ctx.reply(disconnectMsg, { parse_mode: "HTML" });
+              disconnectShown = true;
+            } catch { /* ignore */ }
+          }
+          if (!disconnectShown) {
+            // Both edit and reply failed — fall through to the actual handler
+            // so it can use its own popup / fallback to show the user something.
+            // Do NOT return; let next() run below so the handler sees
+            // isConnected=false and shows its own "not connected" UI.
+            await next();
           }
           return;
         }
