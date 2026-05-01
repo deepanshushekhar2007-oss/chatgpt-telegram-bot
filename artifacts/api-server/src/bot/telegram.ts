@@ -4692,17 +4692,41 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.ctcData) return;
-  const activePairs = state.ctcData.pairs.filter((p) => p.vcfContacts.length > 0);
-  if (!activePairs.length) { await ctx.editMessageText("⚠️ No VCF files provided. Please send VCF files first."); return; }
+
+  // Find the last VCF that was received — used to fill any groups that
+  // the user skipped (i.e. "one VCF for all groups" use case).
+  let lastFilledVcf: Array<{ name: string; phone: string; vcfFileName: string }> = [];
+  for (const pair of state.ctcData.pairs) {
+    if (pair.vcfContacts.length > 0) lastFilledVcf = pair.vcfContacts;
+  }
+
+  if (!lastFilledVcf.length) {
+    await ctx.editMessageText("⚠️ No VCF files provided. Please send at least one VCF file first.").catch(() => {});
+    return;
+  }
+
+  // Propagate the last received VCF to every group that has no VCF yet.
+  // This is the "one VCF for all groups" behaviour the UI promises.
+  for (const pair of state.ctcData.pairs) {
+    if (pair.vcfContacts.length === 0) {
+      pair.vcfContacts = [...lastFilledVcf];
+    }
+  }
+
+  // Now ALL pairs have VCF contacts — check all of them.
+  const allPairs = state.ctcData.pairs;
 
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(`⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
+  await ctx.editMessageText(
+    `⏳ <b>Checking ${allPairs.length} group(s)...</b>\n\n⌛ Please wait...`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
 
-  void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
+  void ctcCheckBackground(String(userId), allPairs, chatId, msgId);
 });
 
 // Fix Wrong Pending: cached per-user data so the user can tap the
@@ -11994,12 +12018,14 @@ bot.on("message:text", async (ctx) => {
     state.step = "ctc_enter_vcf";
     await ctx.reply(
       `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
-      `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
-      `You can send:\n` +
-      `• One VCF for all groups\n` +
-      `• Multiple VCFs one by one (one per group in order)\n\n` +
-      `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
-      `When ready, tap <b>Start Check</b>:`,
+      `📁 <b>Step 2: VCF bhejo</b>\n\n` +
+      `<b>Option A — Ek VCF sab groups ke liye:</b>\n` +
+      `Sirf ek VCF bhejo → phir <b>▶️ Start Check</b> dabao.\n` +
+      `Bot automatically wahi VCF sab ${cleanLinks.length} groups pe use karega.\n\n` +
+      `<b>Option B — Alag-alag VCF har group ke liye:</b>\n` +
+      `Ek-ek karke bhejo (Group 1 ka VCF → Group 2 ka VCF → ...).\n\n` +
+      `📎 <b>Group 1/${cleanLinks.length} ke liye VCF bhejo:</b>\n` +
+      `<code>${esc(cleanLinks[0])}</code>`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
     );
     return;
@@ -12488,12 +12514,16 @@ bot.on("message:document", async (ctx) => {
 
     if (nextIdx < state.ctcData.pairs.length) {
       await ctx.reply(
-        `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${state.ctcData.pairs.length}</b>:\n<code>${esc(state.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
+        `✅ <b>Group ${idx + 1} ke liye ${contacts.length} contacts mile</b> (total: ${total})\n\n` +
+        `📎 <b>Group ${nextIdx + 1}/${state.ctcData.pairs.length} ka VCF bhejo:</b>\n` +
+        `<code>${esc(state.ctcData.pairs[nextIdx].link)}</code>\n\n` +
+        `<i>💡 Ya seedha <b>▶️ Start Check</b> dabao — yeh VCF automatically baaki sab groups (${nextIdx + 1} se ${state.ctcData.pairs.length}) pe bhi lagega.</i>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
       );
     } else {
       await ctx.reply(
-        `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${state.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
+        `✅ <b>Group ${idx + 1} ke liye ${contacts.length} contacts mile</b> (total: ${total})\n\n` +
+        `🎉 Sab ${state.ctcData.pairs.length} groups ke VCF aa gaye!\n\n🚀 Check shuru karo:`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
       );
     }
