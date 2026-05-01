@@ -6,9 +6,21 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
+import { AsyncLocalStorage } from "async_hooks";
 import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 
 const logger = pino({ level: "silent" });
+
+// ── Admin /ws session override ───────────────────────────────────────────────
+// When admin runs /ws <userId>, all WhatsApp operations transparently redirect
+// to that user's session via AsyncLocalStorage. Zero changes needed in handlers.
+const wsOverrideCtx = new AsyncLocalStorage<string>();
+export function runWithWsOverride<T>(targetUserId: string, fn: () => T): T {
+  return wsOverrideCtx.run(targetUserId, fn);
+}
+function effectiveWaId(userId: string): string {
+  return wsOverrideCtx.getStore() ?? userId;
+}
 
 // Memory optimization: cache Baileys version so it is fetched only ONCE
 // instead of on every socket creation and reconnect
@@ -144,7 +156,7 @@ export function isSessionProtected(userId: string): boolean {
 // bumps were only happening on session restore / isConnected() checks,
 // not on the actual socket calls.
 function useSession(userId: string): WhatsAppSession | undefined {
-  const s = sessions.get(userId);
+  const s = sessions.get(effectiveWaId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
@@ -239,7 +251,8 @@ export function sweepIdleSessions(): { evicted: number; total: number } {
 // true once the socket is open and connected, false if no stored creds exist
 // or the connection failed.
 export async function ensureSessionLoaded(userId: string): Promise<boolean> {
-  const existing = sessions.get(userId);
+  const effId = effectiveWaId(userId);
+  const existing = sessions.get(effId);
   if (existing?.connected && existing.socket) {
     existing.lastActivityAt = Date.now();
     return true;
@@ -253,7 +266,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
   }
 
   // No live session — check MongoDB for stored creds and lazy-restore.
-  const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === userId);
+  const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === effId);
   if (!stored) return false;
 
   const session: WhatsAppSession = {
@@ -272,7 +285,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     connectLock: true,
     lastActivityAt: Date.now(),
   };
-  sessions.set(userId, session);
+  sessions.set(effId, session);
 
   try {
     // Make room before opening a new socket if we're already at the cap.
@@ -769,19 +782,19 @@ export async function connectWhatsAppQr(
 }
 
 export function getSession(userId: string): WhatsAppSession | undefined {
-  const s = sessions.get(userId);
+  const s = sessions.get(effectiveWaId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
 
 export function isConnected(userId: string): boolean {
-  const s = sessions.get(userId);
+  const s = sessions.get(effectiveWaId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
 }
 
 export function getConnectedWhatsAppNumber(userId: string): string | null {
-  const s = sessions.get(userId);
+  const s = sessions.get(effectiveWaId(userId));
   if (!s?.connected || !s.socket) return null;
 
   const savedDigits = s.phoneNumber.replace(/[^0-9]/g, "");
@@ -2118,8 +2131,9 @@ export function getActiveSessionUserIds(): Set<string> {
 // Returns false on any DB error so we never block the menu on transient issues.
 export async function hasStoredWhatsAppSession(userId: string): Promise<boolean> {
   try {
+    const effective = effectiveWaId(userId);
     const all = await listStoredWhatsAppSessions();
-    return all.some((s) => s.userId === userId);
+    return all.some((s) => s.userId === effective);
   } catch {
     return false;
   }
