@@ -67,6 +67,11 @@ import {
   getReferralStats,
   findAndMarkTrialsToWarn,
   AccessState,
+  createRedeemCode,
+  redeemCodeForUser,
+  getRedeemCodeStats,
+  listAllRedeemCodes,
+  deleteRedeemCode,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
@@ -2896,19 +2901,27 @@ bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
     "🛡️ <b>Admin Panel</b>\n\n" +
-    "📋 <b>Commands:</b>\n\n" +
+    "📋 <b>Access Control:</b>\n" +
     "🟢 <code>/access on</code> — Enable subscription mode\n" +
     "🔴 <code>/access off</code> — Disable subscription mode\n" +
     "✅ <code>/access [id] [days]</code> — Give user access\n" +
     "❌ <code>/revoke [id]</code> — Revoke user access\n" +
     "🚫 <code>/ban [id]</code> — Ban a user\n" +
-    "✅ <code>/unban [id]</code> — Unban a user\n" +
+    "✅ <code>/unban [id]</code> — Unban a user\n\n" +
+    "🎫 <b>Redeem Codes:</b>\n" +
+    "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create redeem code\n" +
+    "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining)\n" +
+    "📋 <code>/redeem list</code> — List all codes (live status)\n" +
+    "🗑️ <code>/redeem delete CODE</code> — Delete a code\n\n" +
+    "📢 <b>Broadcast & Stats:</b>\n" +
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
-    "📊 <code>/status</code> — View bot statistics\n" +
+    "📊 <code>/status</code> — View bot statistics\n\n" +
+    "📱 <b>WhatsApp Sessions:</b>\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🔀 <code>/ws</code> — All WA sessions (userId + phone number)\n" +
-    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp\n" +
-    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n" +
+    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp (auto-reconnects)\n" +
+    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n\n" +
+    "🧠 <b>Server:</b>\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
@@ -3090,6 +3103,163 @@ bot.command("revoke", async (ctx) => {
   const data = await loadBotData();
   if (data.accessList[String(id)]) { delete data.accessList[String(id)]; await saveBotData(data); await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" }); }
   else await ctx.reply("⚠️ User does not have access.");
+});
+
+// ─── /redeem ─────────────────────────────────────────────────────────────────
+// Admin:  /redeem <CODE> <days> <maxUsers>  → create a redeem code
+// Admin:  /redeem <CODE>                    → view stats for that code
+// Admin:  /redeem list                      → list all codes
+// Admin:  /redeem delete <CODE>             → delete a code
+// User:   /redeem <CODE>                    → redeem the code for bot access
+// ─────────────────────────────────────────────────────────────────────────────
+bot.command("redeem", async (ctx) => {
+  const userId = ctx.from!.id;
+  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
+  const admin = isAdmin(userId);
+
+  // ── Admin: create code (/redeem CODE DAYS MAXUSERS) ─────────────────────
+  if (admin && args.length === 3 && !isNaN(Number(args[1])) && !isNaN(Number(args[2]))) {
+    const code = args[0].toUpperCase();
+    const days = parseInt(args[1], 10);
+    const maxUsers = parseInt(args[2], 10);
+    if (days <= 0 || maxUsers <= 0) {
+      await ctx.reply("❌ Days and max users must be positive numbers.\n\n<b>Usage:</b> <code>/redeem CODE DAYS MAXUSERS</code>\n<b>Example:</b> <code>/redeem SPIDY 50 5</code>", { parse_mode: "HTML" });
+      return;
+    }
+    const result = await createRedeemCode(code, days, maxUsers, userId);
+    if (!result.success) {
+      await ctx.reply(`❌ <b>Code already exists!</b>\n\nCode <code>${code}</code> already exists. Use a different name or delete the existing one first with:\n<code>/redeem delete ${code}</code>`, { parse_mode: "HTML" });
+      return;
+    }
+    await ctx.reply(
+      `✅ <b>Redeem Code Created!</b>\n\n` +
+      `🎫 <b>Code:</b> <code>${code}</code>\n` +
+      `📅 <b>Access:</b> ${days} day${days === 1 ? "" : "s"}\n` +
+      `👥 <b>Max Users:</b> ${maxUsers}\n` +
+      `🔢 <b>Remaining Uses:</b> ${maxUsers}\n\n` +
+      `Share this code with users. They can redeem it with:\n<code>/redeem ${code}</code>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // ── Admin: delete code (/redeem delete CODE) ──────────────────────────────
+  if (admin && args.length === 2 && args[0].toLowerCase() === "delete") {
+    const code = args[1].toUpperCase();
+    const deleted = await deleteRedeemCode(code);
+    if (deleted) {
+      await ctx.reply(`🗑️ <b>Code Deleted!</b>\n\nCode <code>${code}</code> has been permanently deleted.`, { parse_mode: "HTML" });
+    } else {
+      await ctx.reply(`❌ Code <code>${code}</code> not found.`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── Admin: list all codes (/redeem list) ─────────────────────────────────
+  if (admin && args.length === 1 && args[0].toLowerCase() === "list") {
+    const codes = await listAllRedeemCodes();
+    if (codes.length === 0) {
+      await ctx.reply("📭 <b>No redeem codes found.</b>\n\nCreate one with:\n<code>/redeem CODE DAYS MAXUSERS</code>", { parse_mode: "HTML" });
+      return;
+    }
+    let msg = `🎫 <b>All Redeem Codes (${codes.length})</b>\n\n`;
+    for (const c of codes) {
+      const used = c.usedBy.length;
+      const remaining = c.maxUsers - used;
+      const statusIcon = remaining === 0 ? "🔴" : remaining <= 2 ? "🟡" : "🟢";
+      msg += `${statusIcon} <code>${c.code}</code> — <b>${c.days}d</b> | Used: ${used}/${c.maxUsers} | Left: ${remaining}\n`;
+    }
+    msg += `\n<i>Use <code>/redeem &lt;CODE&gt;</code> to see full stats for a code.</i>`;
+    await ctx.reply(msg, { parse_mode: "HTML" });
+    return;
+  }
+
+  // ── Admin: view code stats (/redeem CODE) ────────────────────────────────
+  if (admin && args.length === 1) {
+    const code = args[0].toUpperCase();
+    const stats = await getRedeemCodeStats(code);
+    if (!stats) {
+      await ctx.reply(`❌ Code <code>${code}</code> not found.\n\nUse <code>/redeem list</code> to see all codes, or create it with <code>/redeem ${code} DAYS MAXUSERS</code>.`, { parse_mode: "HTML" });
+      return;
+    }
+    const used = stats.usedBy.length;
+    const remaining = stats.maxUsers - used;
+    const createdDate = new Date(stats.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    let msg =
+      `🎫 <b>Redeem Code: <code>${stats.code}</code></b>\n\n` +
+      `📅 <b>Access Duration:</b> ${stats.days} day${stats.days === 1 ? "" : "s"}\n` +
+      `👥 <b>Max Users:</b> ${stats.maxUsers}\n` +
+      `✅ <b>Redeemed:</b> ${used} user${used === 1 ? "" : "s"}\n` +
+      `🔢 <b>Remaining Uses:</b> ${remaining}\n` +
+      `📆 <b>Created:</b> ${createdDate}\n\n`;
+    if (used > 0) {
+      msg += `<b>👤 Users who redeemed:</b>\n`;
+      for (const u of stats.usedBy) {
+        const dateStr = new Date(u.redeemedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+        msg += `• <code>${u.userId}</code> — ${dateStr}\n`;
+      }
+    } else {
+      msg += `<i>No one has redeemed this code yet.</i>`;
+    }
+    await ctx.reply(msg, { parse_mode: "HTML" });
+    return;
+  }
+
+  // ── No args ───────────────────────────────────────────────────────────────
+  if (args.length === 0) {
+    if (admin) {
+      await ctx.reply(
+        "🎫 <b>Redeem Code System</b>\n\n" +
+        "<b>Admin Commands:</b>\n" +
+        "<code>/redeem CODE DAYS MAXUSERS</code> — Create a new code\n" +
+        "<code>/redeem CODE</code> — View code stats\n" +
+        "<code>/redeem list</code> — List all codes\n" +
+        "<code>/redeem delete CODE</code> — Delete a code\n\n" +
+        "<b>Example:</b> <code>/redeem SPIDY 50 5</code>\n" +
+        "<i>Creates code SPIDY giving 50 days access to 5 users.</i>",
+        { parse_mode: "HTML" }
+      );
+    } else {
+      await ctx.reply("❓ <b>Usage:</b> <code>/redeem CODE</code>\n\nEnter the redeem code you received from admin.", { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── User (or admin fallback): redeem a code ───────────────────────────────
+  const code = args[0].toUpperCase();
+  const result = await redeemCodeForUser(code, userId, ADMIN_USER_ID);
+
+  if (result.error === "not_found") {
+    await ctx.reply(
+      `❌ <b>Invalid Code</b>\n\nCode <code>${code}</code> does not exist. Please check and try again.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  if (result.error === "already_used") {
+    await ctx.reply(
+      `⚠️ <b>Already Redeemed</b>\n\nYou have already used code <code>${code}</code>. Each code can only be used once per user.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  if (result.error === "exhausted") {
+    await ctx.reply(
+      `🔴 <b>Code Limit Reached</b>\n\nCode <code>${code}</code> has been fully redeemed — no uses remaining. Please contact the admin for a new code.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const expDate = new Date(result.expiresAt!).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  await ctx.reply(
+    `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
+    `🎫 <b>Code:</b> <code>${code}</code>\n` +
+    `📅 <b>Access Added:</b> ${result.daysGranted} day${result.daysGranted === 1 ? "" : "s"}\n` +
+    `⏰ <b>Your Access Expires:</b> ${expDate}\n\n` +
+    `You now have full access to the bot. Enjoy! 🚀`,
+    { parse_mode: "HTML" }
+  );
 });
 
 bot.command("ban", async (ctx) => {
