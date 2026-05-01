@@ -4667,6 +4667,18 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
+  // Check session is still alive before starting (user might disconnect between
+  // clicking the button and actually starting the check)
+  if (!isConnected(userId)) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        "❌ <b>WhatsApp Disconnected!</b>\n\nYour WhatsApp got disconnected. Please reconnect and try again.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Reconnect", "connect_wa").text("🏠 Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
   const pendingPhoneToGroups = new Map<string, string[]>();
@@ -12217,14 +12229,33 @@ bot.on("message:document", async (ctx) => {
     return;
   }
 
-  if (state.step !== "ctc_enter_vcf" || !state.ctcData) return;
+  if (state.step !== "ctc_enter_vcf" || !state.ctcData) {
+    // User sent a VCF but is not in the correct step — give a helpful nudge
+    await ctx.reply(
+      "❓ <b>VCF file mila!</b>\n\nLekin CTC Checker abhi active nahi hai.\n\n" +
+      "CTC Checker use karne ke liye: <b>Menu → CTC Checker</b> tap karo aur phir group links + VCF bhejo.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔍 CTC Checker", "ctc_checker").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
 
   try {
     const file = await ctx.api.getFile(doc.file_id);
     if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
     const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
     const rawContacts = parseVCF(content);
-    if (!rawContacts.length) { await ctx.reply("❌ No contacts found in VCF file."); return; }
+    if (!rawContacts.length) {
+      await ctx.reply(
+        "❌ <b>No contacts found in VCF file!</b>\n\n" +
+        "Possible reasons:\n" +
+        "• File format alag hai (app-exported VCF chahiye)\n" +
+        "• File empty hai\n" +
+        "• Phone numbers missing hain VCF mein\n\n" +
+        "WhatsApp contacts export karke try karo.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
 
     const vcfFileName = doc.file_name || "unknown.vcf";
     const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
