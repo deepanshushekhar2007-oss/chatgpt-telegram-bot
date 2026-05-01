@@ -4621,31 +4621,66 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  await ctx.answerCallbackQuery().catch(() => {});
+  // Answer immediately so Telegram never shows a timeout error on any phone.
+  // We use show_alert=false so it is silent — the real UI update below
+  // replaces the message.  If the bot later cannot edit/reply we fall back
+  // to a show_alert popup so the user always sees *something*.
+  try { await ctx.answerCallbackQuery(); } catch { /* ignore */ }
+
   const userId = ctx.from.id;
-  if (!(await checkAccessMiddleware(ctx))) return;
-  if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
-    }).catch(() =>
-      ctx.reply("❌ <b>WhatsApp not connected!</b>", {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
-      }).catch(() => {})
-    );
+
+  // ── Access check ──────────────────────────────────────────────────────────
+  let allowed = false;
+  try {
+    allowed = await checkAccessMiddleware(ctx);
+  } catch (err: any) {
+    console.error("[CTC][ACCESS] checkAccessMiddleware threw:", err?.message);
+    // Last-resort: show an alert popup so user sees something, not silence.
+    try {
+      await ctx.answerCallbackQuery({ text: "⚠️ Server error. Please try again.", show_alert: true });
+    } catch { /* ignore */ }
+    try {
+      await ctx.reply("⚠️ <b>Server error.</b> Please press CTC Checker again.", { parse_mode: "HTML" });
+    } catch { /* ignore */ }
     return;
   }
+  if (!allowed) return;
+
+  // ── WhatsApp connection check ─────────────────────────────────────────────
+  if (!isConnected(String(userId))) {
+    const kb = new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu");
+    const notConnectedMsg = "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first.";
+    let sent = false;
+    try { await ctx.editMessageText(notConnectedMsg, { parse_mode: "HTML", reply_markup: kb }); sent = true; } catch { /* ignore */ }
+    if (!sent) {
+      try { await ctx.reply(notConnectedMsg, { parse_mode: "HTML", reply_markup: kb }); sent = true; } catch { /* ignore */ }
+    }
+    if (!sent) {
+      try { await ctx.answerCallbackQuery({ text: "❌ WhatsApp not connected! Please connect first.", show_alert: true }); } catch { /* ignore */ }
+    }
+    return;
+  }
+
+  // ── Main CTC Checker flow ─────────────────────────────────────────────────
   userStates.set(userId, { step: "ctc_enter_links", ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 } });
-  await ctx.editMessageText(
-    "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
-  ).catch(() =>
-    ctx.reply(
-      "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
-    ).catch(() => {})
-  );
+
+  const ctcMsg =
+    "🔍 <b>CTC Checker</b>\n\n" +
+    "Step 1: Send all WhatsApp group links, one per line:\n\n" +
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
+  const ctcKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
+
+  let sent = false;
+  try { await ctx.editMessageText(ctcMsg, { parse_mode: "HTML", reply_markup: ctcKb }); sent = true; } catch { /* ignore */ }
+  if (!sent) {
+    try { await ctx.reply(ctcMsg, { parse_mode: "HTML", reply_markup: ctcKb }); sent = true; } catch { /* ignore */ }
+  }
+  if (!sent) {
+    // Absolute last resort: popup alert so user knows the feature is active.
+    try {
+      await ctx.answerCallbackQuery({ text: "🔍 CTC Checker: Send group links in chat!", show_alert: true });
+    } catch { /* ignore */ }
+  }
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
