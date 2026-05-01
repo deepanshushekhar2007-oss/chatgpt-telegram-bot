@@ -67,11 +67,6 @@ import {
   getReferralStats,
   findAndMarkTrialsToWarn,
   AccessState,
-  createRedeemCode,
-  redeemCodeForUser,
-  getRedeemCodeStats,
-  listAllRedeemCodes,
-  deleteRedeemCode,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
@@ -372,10 +367,6 @@ bot.use(async (ctx, next) => {
       let hasStored = false;
       try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
       if (hasStored) {
-        // Answer the callback query immediately so Telegram doesn't show
-        // a timeout error on phones while we wait up to 20s for WhatsApp
-        // to reconnect. The loading spinner clears right away.
-        try { await ctx.answerCallbackQuery(); } catch {}
         // Edit text only (no reply_markup specified → original inline
         // keyboard is preserved). The handler that runs after reconnect
         // will overwrite this text with its real UI.
@@ -412,31 +403,27 @@ bot.use(async (ctx, next) => {
           // they know what happened and how to fix it (re-link via the
           // QR / pairing-code flow inside the WhatsApp menu).
           try { await ctx.answerCallbackQuery(); } catch {}
-          const disconnectMsg =
-            `❌ <b>WhatsApp disconnected</b>\n\n` +
-            `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
-            `WhatsApp → Linked Devices kholo, bot wala device check ` +
-            `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
-            `link karna hoga:\n\n` +
-            `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
-            `re-link karo.`;
-          let disconnectShown = false;
           try {
-            await ctx.editMessageText(disconnectMsg, { parse_mode: "HTML" });
-            disconnectShown = true;
-          } catch { /* ignore */ }
-          if (!disconnectShown) {
+            await ctx.editMessageText(
+              `❌ <b>WhatsApp disconnected</b>\n\n` +
+              `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
+              `WhatsApp → Linked Devices kholo, bot wala device check ` +
+              `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
+              `link karna hoga:\n\n` +
+              `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
+              `re-link karo.`,
+              { parse_mode: "HTML" }
+            );
+          } catch {
             try {
-              await ctx.reply(disconnectMsg, { parse_mode: "HTML" });
-              disconnectShown = true;
-            } catch { /* ignore */ }
-          }
-          if (!disconnectShown) {
-            // Both edit and reply failed — fall through to the actual handler
-            // so it can use its own popup / fallback to show the user something.
-            // Do NOT return; let next() run below so the handler sees
-            // isConnected=false and shows its own "not connected" UI.
-            await next();
+              await ctx.reply(
+                `❌ <b>WhatsApp disconnected</b>\n\n` +
+                `Aapka WhatsApp session disconnect ho gaya hai. Menu se ` +
+                `<b>Connect WhatsApp</b> dabake QR ya Pairing Code se ` +
+                `dobara link karo.`,
+                { parse_mode: "HTML" }
+              );
+            } catch {}
           }
           return;
         }
@@ -487,36 +474,22 @@ bot.use(async (ctx, next) => {
   if (isAdmin(userId)) return next();
   if (isReferGateExempt(cbData)) return next();
 
-  let data: Awaited<ReturnType<typeof loadBotData>>;
-  try {
-    data = await loadBotData();
-  } catch (err: any) {
-    console.error("[REFER_GATE] loadBotData failed, allowing through:", err?.message);
-    return next();
-  }
+  const data = await loadBotData();
   if (!data.referMode) return next();
 
-  let state: Awaited<ReturnType<typeof getAccessState>>;
-  try {
-    state = await getAccessState(userId);
-  } catch (err: any) {
-    console.error("[REFER_GATE] getAccessState failed, allowing through:", err?.message);
-    return next();
-  }
+  const state = await getAccessState(userId);
   if (state.kind !== "none") return next();
 
   // Out of access — block the button and surface the refer-required UI.
   try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: false }); } catch {}
+  const { text, keyboard } = await buildReferRequiredMessage(userId);
   try {
-    const { text, keyboard } = await buildReferRequiredMessage(userId);
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch {
     try {
-      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
-    } catch {
-      try {
-        await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
-      } catch {}
-    }
-  } catch {}
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {}
+  }
   // Stop here — do NOT call next(), the original handler must not run.
 });
 
@@ -2923,27 +2896,19 @@ bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
     "🛡️ <b>Admin Panel</b>\n\n" +
-    "📋 <b>Access Control:</b>\n" +
+    "📋 <b>Commands:</b>\n\n" +
     "🟢 <code>/access on</code> — Enable subscription mode\n" +
     "🔴 <code>/access off</code> — Disable subscription mode\n" +
     "✅ <code>/access [id] [days]</code> — Give user access\n" +
     "❌ <code>/revoke [id]</code> — Revoke user access\n" +
     "🚫 <code>/ban [id]</code> — Ban a user\n" +
-    "✅ <code>/unban [id]</code> — Unban a user\n\n" +
-    "🎫 <b>Redeem Codes:</b>\n" +
-    "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create redeem code\n" +
-    "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining)\n" +
-    "📋 <code>/redeem list</code> — List all codes (live status)\n" +
-    "🗑️ <code>/redeem delete CODE</code> — Delete a code\n\n" +
-    "📢 <b>Broadcast & Stats:</b>\n" +
+    "✅ <code>/unban [id]</code> — Unban a user\n" +
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
-    "📊 <code>/status</code> — View bot statistics\n\n" +
-    "📱 <b>WhatsApp Sessions:</b>\n" +
+    "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🔀 <code>/ws</code> — All WA sessions (userId + phone number)\n" +
-    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp (auto-reconnects)\n" +
-    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n\n" +
-    "🧠 <b>Server:</b>\n" +
+    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp\n" +
+    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
@@ -3125,163 +3090,6 @@ bot.command("revoke", async (ctx) => {
   const data = await loadBotData();
   if (data.accessList[String(id)]) { delete data.accessList[String(id)]; await saveBotData(data); await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" }); }
   else await ctx.reply("⚠️ User does not have access.");
-});
-
-// ─── /redeem ─────────────────────────────────────────────────────────────────
-// Admin:  /redeem <CODE> <days> <maxUsers>  → create a redeem code
-// Admin:  /redeem <CODE>                    → view stats for that code
-// Admin:  /redeem list                      → list all codes
-// Admin:  /redeem delete <CODE>             → delete a code
-// User:   /redeem <CODE>                    → redeem the code for bot access
-// ─────────────────────────────────────────────────────────────────────────────
-bot.command("redeem", async (ctx) => {
-  const userId = ctx.from!.id;
-  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
-  const admin = isAdmin(userId);
-
-  // ── Admin: create code (/redeem CODE DAYS MAXUSERS) ─────────────────────
-  if (admin && args.length === 3 && !isNaN(Number(args[1])) && !isNaN(Number(args[2]))) {
-    const code = args[0].toUpperCase();
-    const days = parseInt(args[1], 10);
-    const maxUsers = parseInt(args[2], 10);
-    if (days <= 0 || maxUsers <= 0) {
-      await ctx.reply("❌ Days and max users must be positive numbers.\n\n<b>Usage:</b> <code>/redeem CODE DAYS MAXUSERS</code>\n<b>Example:</b> <code>/redeem SPIDY 50 5</code>", { parse_mode: "HTML" });
-      return;
-    }
-    const result = await createRedeemCode(code, days, maxUsers, userId);
-    if (!result.success) {
-      await ctx.reply(`❌ <b>Code already exists!</b>\n\nCode <code>${code}</code> already exists. Use a different name or delete the existing one first with:\n<code>/redeem delete ${code}</code>`, { parse_mode: "HTML" });
-      return;
-    }
-    await ctx.reply(
-      `✅ <b>Redeem Code Created!</b>\n\n` +
-      `🎫 <b>Code:</b> <code>${code}</code>\n` +
-      `📅 <b>Access:</b> ${days} day${days === 1 ? "" : "s"}\n` +
-      `👥 <b>Max Users:</b> ${maxUsers}\n` +
-      `🔢 <b>Remaining Uses:</b> ${maxUsers}\n\n` +
-      `Share this code with users. They can redeem it with:\n<code>/redeem ${code}</code>`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  // ── Admin: delete code (/redeem delete CODE) ──────────────────────────────
-  if (admin && args.length === 2 && args[0].toLowerCase() === "delete") {
-    const code = args[1].toUpperCase();
-    const deleted = await deleteRedeemCode(code);
-    if (deleted) {
-      await ctx.reply(`🗑️ <b>Code Deleted!</b>\n\nCode <code>${code}</code> has been permanently deleted.`, { parse_mode: "HTML" });
-    } else {
-      await ctx.reply(`❌ Code <code>${code}</code> not found.`, { parse_mode: "HTML" });
-    }
-    return;
-  }
-
-  // ── Admin: list all codes (/redeem list) ─────────────────────────────────
-  if (admin && args.length === 1 && args[0].toLowerCase() === "list") {
-    const codes = await listAllRedeemCodes();
-    if (codes.length === 0) {
-      await ctx.reply("📭 <b>No redeem codes found.</b>\n\nCreate one with:\n<code>/redeem CODE DAYS MAXUSERS</code>", { parse_mode: "HTML" });
-      return;
-    }
-    let msg = `🎫 <b>All Redeem Codes (${codes.length})</b>\n\n`;
-    for (const c of codes) {
-      const used = c.usedBy.length;
-      const remaining = c.maxUsers - used;
-      const statusIcon = remaining === 0 ? "🔴" : remaining <= 2 ? "🟡" : "🟢";
-      msg += `${statusIcon} <code>${c.code}</code> — <b>${c.days}d</b> | Used: ${used}/${c.maxUsers} | Left: ${remaining}\n`;
-    }
-    msg += `\n<i>Use <code>/redeem &lt;CODE&gt;</code> to see full stats for a code.</i>`;
-    await ctx.reply(msg, { parse_mode: "HTML" });
-    return;
-  }
-
-  // ── Admin: view code stats (/redeem CODE) ────────────────────────────────
-  if (admin && args.length === 1) {
-    const code = args[0].toUpperCase();
-    const stats = await getRedeemCodeStats(code);
-    if (!stats) {
-      await ctx.reply(`❌ Code <code>${code}</code> not found.\n\nUse <code>/redeem list</code> to see all codes, or create it with <code>/redeem ${code} DAYS MAXUSERS</code>.`, { parse_mode: "HTML" });
-      return;
-    }
-    const used = stats.usedBy.length;
-    const remaining = stats.maxUsers - used;
-    const createdDate = new Date(stats.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-    let msg =
-      `🎫 <b>Redeem Code: <code>${stats.code}</code></b>\n\n` +
-      `📅 <b>Access Duration:</b> ${stats.days} day${stats.days === 1 ? "" : "s"}\n` +
-      `👥 <b>Max Users:</b> ${stats.maxUsers}\n` +
-      `✅ <b>Redeemed:</b> ${used} user${used === 1 ? "" : "s"}\n` +
-      `🔢 <b>Remaining Uses:</b> ${remaining}\n` +
-      `📆 <b>Created:</b> ${createdDate}\n\n`;
-    if (used > 0) {
-      msg += `<b>👤 Users who redeemed:</b>\n`;
-      for (const u of stats.usedBy) {
-        const dateStr = new Date(u.redeemedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-        msg += `• <code>${u.userId}</code> — ${dateStr}\n`;
-      }
-    } else {
-      msg += `<i>No one has redeemed this code yet.</i>`;
-    }
-    await ctx.reply(msg, { parse_mode: "HTML" });
-    return;
-  }
-
-  // ── No args ───────────────────────────────────────────────────────────────
-  if (args.length === 0) {
-    if (admin) {
-      await ctx.reply(
-        "🎫 <b>Redeem Code System</b>\n\n" +
-        "<b>Admin Commands:</b>\n" +
-        "<code>/redeem CODE DAYS MAXUSERS</code> — Create a new code\n" +
-        "<code>/redeem CODE</code> — View code stats\n" +
-        "<code>/redeem list</code> — List all codes\n" +
-        "<code>/redeem delete CODE</code> — Delete a code\n\n" +
-        "<b>Example:</b> <code>/redeem SPIDY 50 5</code>\n" +
-        "<i>Creates code SPIDY giving 50 days access to 5 users.</i>",
-        { parse_mode: "HTML" }
-      );
-    } else {
-      await ctx.reply("❓ <b>Usage:</b> <code>/redeem CODE</code>\n\nEnter the redeem code you received from admin.", { parse_mode: "HTML" });
-    }
-    return;
-  }
-
-  // ── User (or admin fallback): redeem a code ───────────────────────────────
-  const code = args[0].toUpperCase();
-  const result = await redeemCodeForUser(code, userId, ADMIN_USER_ID);
-
-  if (result.error === "not_found") {
-    await ctx.reply(
-      `❌ <b>Invalid Code</b>\n\nCode <code>${code}</code> does not exist. Please check and try again.`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-  if (result.error === "already_used") {
-    await ctx.reply(
-      `⚠️ <b>Already Redeemed</b>\n\nYou have already used code <code>${code}</code>. Each code can only be used once per user.`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-  if (result.error === "exhausted") {
-    await ctx.reply(
-      `🔴 <b>Code Limit Reached</b>\n\nCode <code>${code}</code> has been fully redeemed — no uses remaining. Please contact the admin for a new code.`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  const expDate = new Date(result.expiresAt!).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-  await ctx.reply(
-    `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
-    `🎫 <b>Code:</b> <code>${code}</code>\n` +
-    `📅 <b>Access Added:</b> ${result.daysGranted} day${result.daysGranted === 1 ? "" : "s"}\n` +
-    `⏰ <b>Your Access Expires:</b> ${expDate}\n\n` +
-    `You now have full access to the bot. Enjoy! 🚀`,
-    { parse_mode: "HTML" }
-  );
 });
 
 bot.command("ban", async (ctx) => {
@@ -4625,66 +4433,20 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  // Answer immediately so Telegram never shows a timeout error on any phone.
-  // We use show_alert=false so it is silent — the real UI update below
-  // replaces the message.  If the bot later cannot edit/reply we fall back
-  // to a show_alert popup so the user always sees *something*.
-  try { await ctx.answerCallbackQuery(); } catch { /* ignore */ }
-
+  await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
-
-  // ── Access check ──────────────────────────────────────────────────────────
-  let allowed = false;
-  try {
-    allowed = await checkAccessMiddleware(ctx);
-  } catch (err: any) {
-    console.error("[CTC][ACCESS] checkAccessMiddleware threw:", err?.message);
-    // Last-resort: show an alert popup so user sees something, not silence.
-    try {
-      await ctx.answerCallbackQuery({ text: "⚠️ Server error. Please try again.", show_alert: true });
-    } catch { /* ignore */ }
-    try {
-      await ctx.reply("⚠️ <b>Server error.</b> Please press CTC Checker again.", { parse_mode: "HTML" });
-    } catch { /* ignore */ }
-    return;
-  }
-  if (!allowed) return;
-
-  // ── WhatsApp connection check ─────────────────────────────────────────────
+  if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    const kb = new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu");
-    const notConnectedMsg = "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first.";
-    let sent = false;
-    try { await ctx.editMessageText(notConnectedMsg, { parse_mode: "HTML", reply_markup: kb }); sent = true; } catch { /* ignore */ }
-    if (!sent) {
-      try { await ctx.reply(notConnectedMsg, { parse_mode: "HTML", reply_markup: kb }); sent = true; } catch { /* ignore */ }
-    }
-    if (!sent) {
-      try { await ctx.answerCallbackQuery({ text: "❌ WhatsApp not connected! Please connect first.", show_alert: true }); } catch { /* ignore */ }
-    }
-    return;
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+    }); return;
   }
-
-  // ── Main CTC Checker flow ─────────────────────────────────────────────────
   userStates.set(userId, { step: "ctc_enter_links", ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 } });
-
-  const ctcMsg =
-    "🔍 <b>CTC Checker</b>\n\n" +
-    "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
-  const ctcKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
-
-  let sent = false;
-  try { await ctx.editMessageText(ctcMsg, { parse_mode: "HTML", reply_markup: ctcKb }); sent = true; } catch { /* ignore */ }
-  if (!sent) {
-    try { await ctx.reply(ctcMsg, { parse_mode: "HTML", reply_markup: ctcKb }); sent = true; } catch { /* ignore */ }
-  }
-  if (!sent) {
-    // Absolute last resort: popup alert so user knows the feature is active.
-    try {
-      await ctx.answerCallbackQuery({ text: "🔍 CTC Checker: Send group links in chat!", show_alert: true });
-    } catch { /* ignore */ }
-  }
+  await ctx.editMessageText(
+    "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
@@ -4692,41 +4454,17 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.ctcData) return;
-
-  // Find the last VCF that was received — used to fill any groups that
-  // the user skipped (i.e. "one VCF for all groups" use case).
-  let lastFilledVcf: Array<{ name: string; phone: string; vcfFileName: string }> = [];
-  for (const pair of state.ctcData.pairs) {
-    if (pair.vcfContacts.length > 0) lastFilledVcf = pair.vcfContacts;
-  }
-
-  if (!lastFilledVcf.length) {
-    await ctx.editMessageText("⚠️ No VCF files provided. Please send at least one VCF file first.").catch(() => {});
-    return;
-  }
-
-  // Propagate the last received VCF to every group that has no VCF yet.
-  // This is the "one VCF for all groups" behaviour the UI promises.
-  for (const pair of state.ctcData.pairs) {
-    if (pair.vcfContacts.length === 0) {
-      pair.vcfContacts = [...lastFilledVcf];
-    }
-  }
-
-  // Now ALL pairs have VCF contacts — check all of them.
-  const allPairs = state.ctcData.pairs;
+  const activePairs = state.ctcData.pairs.filter((p) => p.vcfContacts.length > 0);
+  if (!activePairs.length) { await ctx.editMessageText("⚠️ No VCF files provided. Please send VCF files first."); return; }
 
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(
-    `⏳ <b>Checking ${allPairs.length} group(s)...</b>\n\n⌛ Please wait...`,
-    { parse_mode: "HTML" }
-  ).catch(() => {});
+  await ctx.editMessageText(`⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
 
-  void ctcCheckBackground(String(userId), allPairs, chatId, msgId);
+  void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
 });
 
 // Fix Wrong Pending: cached per-user data so the user can tap the
@@ -4759,18 +4497,6 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
-  // Check session is still alive before starting (user might disconnect between
-  // clicking the button and actually starting the check)
-  if (!isConnected(userId)) {
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        "❌ <b>WhatsApp Disconnected!</b>\n\nYour WhatsApp got disconnected. Please reconnect and try again.",
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Reconnect", "connect_wa").text("🏠 Menu", "main_menu") }
-      );
-    } catch {}
-    return;
-  }
-
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
   const pendingPhoneToGroups = new Map<string, string[]>();
@@ -8616,59 +8342,6 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
   void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups);
 });
 
-bot.callbackQuery("acig_confirm_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.chatInGroupData || state.step !== "acig_confirm" || !state.chatInGroupData.message) {
-    await ctx.answerCallbackQuery("❌ State error. Phir se try karo.");
-    return;
-  }
-  const data = state.chatInGroupData;
-  const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
-  if (!selectedGroups.length) {
-    await ctx.editMessageText("❌ Koi group select nahi tha.", {
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
-    return;
-  }
-  const autoUserId = getAutoUserId(String(userId));
-  const statusMsg = await ctx.editMessageText(
-    `⏳ <b>Dono WhatsApp se message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} groups done...`,
-    { parse_mode: "HTML" }
-  );
-  const msgId = (statusMsg as any).message_id;
-  const chatId = ctx.chat!.id;
-  userStates.delete(userId);
-  void runGroupChatDualCustomBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, data.message, data.delaySeconds);
-});
-
-bot.callbackQuery("auto_chat_confirm_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.chatInGroupData || state.step !== "auto_chat_confirm" || !state.chatInGroupData.message) {
-    await ctx.answerCallbackQuery("❌ State error. Phir se try karo.");
-    return;
-  }
-  const data = state.chatInGroupData;
-  const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
-  if (!selectedGroups.length) {
-    await ctx.editMessageText("❌ Koi group select nahi tha.", {
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
-    return;
-  }
-  const statusMsg = await ctx.editMessageText(
-    `⏳ <b>Message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} groups done...`,
-    { parse_mode: "HTML" }
-  );
-  const msgId = (statusMsg as any).message_id;
-  const chatId = ctx.chat!.id;
-  userStates.delete(userId);
-  void cigSendBackground(userId, String(userId), chatId, msgId, selectedGroups, data.message, data.delaySeconds);
-});
-
 function cigProgressText(session: CigSession): string {
   const currentGroup = session.groups[session.currentGroupIndex]?.subject || session.groups[0]?.subject || "group";
   return (
@@ -8763,91 +8436,6 @@ async function runGroupChatDualBackground(
     }
   } catch (err: any) {
     console.error(`[ACIG][${userId}] Error:`, err?.message);
-  }
-
-  session.running = false;
-  session.nextDelayMs = 0;
-  if (!session.cancelled) {
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `✅ <b>Chat In Group Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📋 Groups: ${groups.length}`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-      );
-    } catch {}
-  }
-}
-
-async function runGroupChatDualCustomBackground(
-  userId: number,
-  primaryUserId: string,
-  autoUserId: string,
-  chatId: number,
-  msgId: number,
-  groups: Array<{ id: string; subject: string }>,
-  message: string,
-  delaySeconds: number
-): Promise<void> {
-  const session: CigSession = {
-    running: true,
-    cancelled: false,
-    chatId,
-    msgId,
-    groups,
-    message,
-    sent: 0,
-    failed: 0,
-    sentByAccount1: 0,
-    sentByAccount2: 0,
-    botMode: "both",
-    currentGroupIndex: 0,
-    cycle: 1,
-    nextDelayMs: 0,
-    rotationIndex: 0,
-  };
-  cigSessions.set(userId, session);
-
-  try {
-    let groupIndex = 0;
-    let senderIndex = 0;
-
-    while (!session.cancelled && session.running) {
-      if (!groups.length) break;
-      const group = groups[groupIndex];
-      session.currentGroupIndex = groupIndex;
-      session.cycle = Math.floor(session.sent / groups.length) + 1;
-      if (session.cancelled) break;
-
-      const isAccount1 = senderIndex % 2 === 0;
-      const senderUserId = isAccount1 ? primaryUserId : autoUserId;
-      const ok = await sendGroupMessage(senderUserId, group.id, message);
-      if (ok) {
-        session.sent++;
-        if (isAccount1) session.sentByAccount1!++; else session.sentByAccount2!++;
-      } else session.failed++;
-
-      senderIndex++;
-      session.nextDelayMs = delaySeconds > 0 ? delaySeconds * 1000 : getSequentialDelayMs(session.rotationIndex);
-      session.rotationIndex++;
-
-      try {
-        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Refresh", "cig_refresh")
-            .text("⏹️ Stop", "cig_stop_btn").row()
-            .text("🏠 Main Menu", "main_menu"),
-        });
-      } catch {}
-
-      if (!isSessionActive(session)) break;
-      await waitWithCancel(session, session.nextDelayMs);
-      if (!isSessionActive(session)) break;
-
-      groupIndex = (groupIndex + 1) % groups.length;
-      session.currentGroupIndex = groupIndex;
-    }
-  } catch (err: any) {
-    console.error(`[ACIG_CUSTOM][${userId}] Error:`, err?.message);
   }
 
   session.running = false;
@@ -12018,14 +11606,12 @@ bot.on("message:text", async (ctx) => {
     state.step = "ctc_enter_vcf";
     await ctx.reply(
       `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
-      `📁 <b>Step 2: VCF bhejo</b>\n\n` +
-      `<b>Option A — Ek VCF sab groups ke liye:</b>\n` +
-      `Sirf ek VCF bhejo → phir <b>▶️ Start Check</b> dabao.\n` +
-      `Bot automatically wahi VCF sab ${cleanLinks.length} groups pe use karega.\n\n` +
-      `<b>Option B — Alag-alag VCF har group ke liye:</b>\n` +
-      `Ek-ek karke bhejo (Group 1 ka VCF → Group 2 ka VCF → ...).\n\n` +
-      `📎 <b>Group 1/${cleanLinks.length} ke liye VCF bhejo:</b>\n` +
-      `<code>${esc(cleanLinks[0])}</code>`,
+      `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
+      `You can send:\n` +
+      `• One VCF for all groups\n` +
+      `• Multiple VCFs one by one (one per group in order)\n\n` +
+      `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
+      `When ready, tap <b>Start Check</b>:`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
     );
     return;
@@ -12461,33 +12047,14 @@ bot.on("message:document", async (ctx) => {
     return;
   }
 
-  if (state.step !== "ctc_enter_vcf" || !state.ctcData) {
-    // User sent a VCF but is not in the correct step — give a helpful nudge
-    await ctx.reply(
-      "❓ <b>VCF file mila!</b>\n\nLekin CTC Checker abhi active nahi hai.\n\n" +
-      "CTC Checker use karne ke liye: <b>Menu → CTC Checker</b> tap karo aur phir group links + VCF bhejo.",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔍 CTC Checker", "ctc_checker").text("🏠 Menu", "main_menu") }
-    );
-    return;
-  }
+  if (state.step !== "ctc_enter_vcf" || !state.ctcData) return;
 
   try {
     const file = await ctx.api.getFile(doc.file_id);
     if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
     const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
     const rawContacts = parseVCF(content);
-    if (!rawContacts.length) {
-      await ctx.reply(
-        "❌ <b>No contacts found in VCF file!</b>\n\n" +
-        "Possible reasons:\n" +
-        "• File format alag hai (app-exported VCF chahiye)\n" +
-        "• File empty hai\n" +
-        "• Phone numbers missing hain VCF mein\n\n" +
-        "WhatsApp contacts export karke try karo.",
-        { parse_mode: "HTML" }
-      );
-      return;
-    }
+    if (!rawContacts.length) { await ctx.reply("❌ No contacts found in VCF file."); return; }
 
     const vcfFileName = doc.file_name || "unknown.vcf";
     const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
@@ -12514,16 +12081,12 @@ bot.on("message:document", async (ctx) => {
 
     if (nextIdx < state.ctcData.pairs.length) {
       await ctx.reply(
-        `✅ <b>Group ${idx + 1} ke liye ${contacts.length} contacts mile</b> (total: ${total})\n\n` +
-        `📎 <b>Group ${nextIdx + 1}/${state.ctcData.pairs.length} ka VCF bhejo:</b>\n` +
-        `<code>${esc(state.ctcData.pairs[nextIdx].link)}</code>\n\n` +
-        `<i>💡 Ya seedha <b>▶️ Start Check</b> dabao — yeh VCF automatically baaki sab groups (${nextIdx + 1} se ${state.ctcData.pairs.length}) pe bhi lagega.</i>`,
+        `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${state.ctcData.pairs.length}</b>:\n<code>${esc(state.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
       );
     } else {
       await ctx.reply(
-        `✅ <b>Group ${idx + 1} ke liye ${contacts.length} contacts mile</b> (total: ${total})\n\n` +
-        `🎉 Sab ${state.ctcData.pairs.length} groups ke VCF aa gaye!\n\n🚀 Check shuru karo:`,
+        `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${state.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
       );
     }

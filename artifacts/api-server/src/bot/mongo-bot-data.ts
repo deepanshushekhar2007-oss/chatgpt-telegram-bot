@@ -161,17 +161,10 @@ export async function getUserAccessState(
   const now = Date.now();
 
   // Clean up expired admin grants so the DB doesn't grow forever.
-  // IMPORTANT: Use atomic $unset on just this field — never replace the whole
-  // accessList document, because a concurrent /redeem atomic $set could be
-  // overwritten if we call saveBotData(data) here.
   const granted = data.accessList[String(userId)];
   if (granted && granted.expiresAt <= now) {
     delete data.accessList[String(userId)];
-    const botDataCol = await getCollection("bot_data");
-    await botDataCol.updateOne(
-      { _id: "main" as any },
-      { $unset: { [`accessList.${String(userId)}`]: "" } }
-    );
+    await saveBotData(data);
   }
 
   // Build the list of every active access window the user has earned.
@@ -362,134 +355,4 @@ export async function getReferralStats(userId: number): Promise<{
     expiresAt: ref?.expiresAt ?? 0,
     totalReferred: ref?.totalReferred ?? 0,
   };
-}
-
-// ── Redeem Code System ────────────────────────────────────────────────────────
-// Admin creates a code with /redeem <CODE> <days> <maxUsers>.
-// Users redeem with /redeem <CODE> — grants them access via the main accessList.
-// Each code tracks who used it and has a fixed user-cap.
-
-export interface RedeemCode {
-  code: string;
-  days: number;
-  maxUsers: number;
-  usedBy: Array<{ userId: number; redeemedAt: number }>;
-  createdAt: number;
-  createdBy: number;
-}
-
-export async function createRedeemCode(
-  code: string,
-  days: number,
-  maxUsers: number,
-  adminId: number
-): Promise<{ success: boolean; error?: "already_exists" }> {
-  const col = await getCollection("redeem_codes");
-  const existing = await col.findOne({ _id: code.toUpperCase() as any });
-  if (existing) return { success: false, error: "already_exists" };
-  await col.insertOne({
-    _id: code.toUpperCase() as any,
-    code: code.toUpperCase(),
-    days,
-    maxUsers,
-    usedBy: [],
-    createdAt: Date.now(),
-    createdBy: adminId,
-  });
-  return { success: true };
-}
-
-export async function redeemCodeForUser(
-  code: string,
-  userId: number,
-  adminId: number
-): Promise<{
-  success: boolean;
-  daysGranted?: number;
-  expiresAt?: number;
-  remaining?: number;
-  error?: "not_found" | "already_used" | "exhausted";
-}> {
-  const col = await getCollection("redeem_codes");
-  const codeKey = code.toUpperCase();
-
-  // Atomically mark this user as having used the code.
-  // $addToSet prevents duplicate entries; we use $inc to track use count.
-  // First do a read to check preconditions, then atomic push.
-  const doc = await col.findOne({ _id: codeKey as any });
-  if (!doc) return { success: false, error: "not_found" };
-
-  const usedBy: Array<{ userId: number; redeemedAt: number }> = doc.usedBy ?? [];
-  if (usedBy.some((u) => u.userId === userId)) return { success: false, error: "already_used" };
-  if (usedBy.length >= doc.maxUsers) return { success: false, error: "exhausted" };
-
-  const now = Date.now();
-
-  // ── 1. Grant bot access atomically ─────────────────────────────────────────
-  // Read ONLY the current user's grant to stack days on top of it, then write
-  // just that single field via dot-notation $set — no full doc replace needed.
-  const botDataCol = await getCollection("bot_data");
-  const currentDoc = await botDataCol.findOne({ _id: "main" as any });
-  const existingGrant = currentDoc?.accessList?.[String(userId)];
-  const base = existingGrant && existingGrant.expiresAt > now ? existingGrant.expiresAt : now;
-  const expiresAt = base + doc.days * 86400000;
-
-  await botDataCol.updateOne(
-    { _id: "main" as any },
-    {
-      $set: {
-        [`accessList.${String(userId)}`]: { expiresAt, grantedBy: adminId },
-        updatedAt: new Date(),
-      },
-    },
-    { upsert: true }
-  );
-
-  // ── 2. Atomically append this user to the code's usedBy list ───────────────
-  // $push is atomic — avoids full-array read/replace race conditions.
-  await col.updateOne(
-    { _id: codeKey as any },
-    { $push: { usedBy: { userId, redeemedAt: now } as any } }
-  );
-
-  const newUsedCount = usedBy.length + 1;
-  return {
-    success: true,
-    daysGranted: doc.days,
-    expiresAt,
-    remaining: doc.maxUsers - newUsedCount,
-  };
-}
-
-export async function getRedeemCodeStats(code: string): Promise<RedeemCode | null> {
-  const col = await getCollection("redeem_codes");
-  const doc = await col.findOne({ _id: code.toUpperCase() as any });
-  if (!doc) return null;
-  return {
-    code: doc.code,
-    days: doc.days,
-    maxUsers: doc.maxUsers,
-    usedBy: doc.usedBy ?? [],
-    createdAt: doc.createdAt,
-    createdBy: doc.createdBy,
-  };
-}
-
-export async function listAllRedeemCodes(): Promise<RedeemCode[]> {
-  const col = await getCollection("redeem_codes");
-  const docs = await col.find({}).sort({ createdAt: -1 }).toArray();
-  return docs.map((doc) => ({
-    code: doc.code,
-    days: doc.days,
-    maxUsers: doc.maxUsers,
-    usedBy: doc.usedBy ?? [],
-    createdAt: doc.createdAt,
-    createdBy: doc.createdBy,
-  }));
-}
-
-export async function deleteRedeemCode(code: string): Promise<boolean> {
-  const col = await getCollection("redeem_codes");
-  const result = await col.deleteOne({ _id: code.toUpperCase() as any });
-  return (result.deletedCount ?? 0) > 0;
 }
