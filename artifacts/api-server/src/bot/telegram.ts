@@ -8524,6 +8524,59 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
   void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups);
 });
 
+bot.callbackQuery("acig_confirm_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.chatInGroupData || state.step !== "acig_confirm" || !state.chatInGroupData.message) {
+    await ctx.answerCallbackQuery("❌ State error. Phir se try karo.");
+    return;
+  }
+  const data = state.chatInGroupData;
+  const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
+  if (!selectedGroups.length) {
+    await ctx.editMessageText("❌ Koi group select nahi tha.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  const autoUserId = getAutoUserId(String(userId));
+  const statusMsg = await ctx.editMessageText(
+    `⏳ <b>Dono WhatsApp se message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} groups done...`,
+    { parse_mode: "HTML" }
+  );
+  const msgId = (statusMsg as any).message_id;
+  const chatId = ctx.chat!.id;
+  userStates.delete(userId);
+  void runGroupChatDualCustomBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, data.message, data.delaySeconds);
+});
+
+bot.callbackQuery("auto_chat_confirm_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.chatInGroupData || state.step !== "auto_chat_confirm" || !state.chatInGroupData.message) {
+    await ctx.answerCallbackQuery("❌ State error. Phir se try karo.");
+    return;
+  }
+  const data = state.chatInGroupData;
+  const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
+  if (!selectedGroups.length) {
+    await ctx.editMessageText("❌ Koi group select nahi tha.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  const statusMsg = await ctx.editMessageText(
+    `⏳ <b>Message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} groups done...`,
+    { parse_mode: "HTML" }
+  );
+  const msgId = (statusMsg as any).message_id;
+  const chatId = ctx.chat!.id;
+  userStates.delete(userId);
+  void cigSendBackground(userId, String(userId), chatId, msgId, selectedGroups, data.message, data.delaySeconds);
+});
+
 function cigProgressText(session: CigSession): string {
   const currentGroup = session.groups[session.currentGroupIndex]?.subject || session.groups[0]?.subject || "group";
   return (
@@ -8618,6 +8671,91 @@ async function runGroupChatDualBackground(
     }
   } catch (err: any) {
     console.error(`[ACIG][${userId}] Error:`, err?.message);
+  }
+
+  session.running = false;
+  session.nextDelayMs = 0;
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat In Group Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📋 Groups: ${groups.length}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
+async function runGroupChatDualCustomBackground(
+  userId: number,
+  primaryUserId: string,
+  autoUserId: string,
+  chatId: number,
+  msgId: number,
+  groups: Array<{ id: string; subject: string }>,
+  message: string,
+  delaySeconds: number
+): Promise<void> {
+  const session: CigSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    groups,
+    message,
+    sent: 0,
+    failed: 0,
+    sentByAccount1: 0,
+    sentByAccount2: 0,
+    botMode: "both",
+    currentGroupIndex: 0,
+    cycle: 1,
+    nextDelayMs: 0,
+    rotationIndex: 0,
+  };
+  cigSessions.set(userId, session);
+
+  try {
+    let groupIndex = 0;
+    let senderIndex = 0;
+
+    while (!session.cancelled && session.running) {
+      if (!groups.length) break;
+      const group = groups[groupIndex];
+      session.currentGroupIndex = groupIndex;
+      session.cycle = Math.floor(session.sent / groups.length) + 1;
+      if (session.cancelled) break;
+
+      const isAccount1 = senderIndex % 2 === 0;
+      const senderUserId = isAccount1 ? primaryUserId : autoUserId;
+      const ok = await sendGroupMessage(senderUserId, group.id, message);
+      if (ok) {
+        session.sent++;
+        if (isAccount1) session.sentByAccount1!++; else session.sentByAccount2!++;
+      } else session.failed++;
+
+      senderIndex++;
+      session.nextDelayMs = delaySeconds > 0 ? delaySeconds * 1000 : getSequentialDelayMs(session.rotationIndex);
+      session.rotationIndex++;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Refresh", "cig_refresh")
+            .text("⏹️ Stop", "cig_stop_btn").row()
+            .text("🏠 Main Menu", "main_menu"),
+        });
+      } catch {}
+
+      if (!isSessionActive(session)) break;
+      await waitWithCancel(session, session.nextDelayMs);
+      if (!isSessionActive(session)) break;
+
+      groupIndex = (groupIndex + 1) % groups.length;
+      session.currentGroupIndex = groupIndex;
+    }
+  } catch (err: any) {
+    console.error(`[ACIG_CUSTOM][${userId}] Error:`, err?.message);
   }
 
   session.running = false;
