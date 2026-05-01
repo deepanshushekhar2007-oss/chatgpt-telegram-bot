@@ -2511,8 +2511,11 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   // Lazy-restore WhatsApp session if user has stored creds but the live
   // socket was evicted (idle/memory pressure). No-op (<1ms) if already loaded.
   // ~5s on cold restore but only happens once per eviction cycle.
+  // If admin has a /ws override active, restore the TARGET user's session
+  // (not admin's own) so all WhatsApp features keep working on button presses.
   try {
-    await ensureSessionLoaded(String(userId));
+    const wsOverride = getAdminSessionOverride(String(userId));
+    await ensureSessionLoaded(wsOverride ?? String(userId));
   } catch (err: any) {
     console.warn(`[WA][LAZY-RESTORE][${userId}] failed:`, err?.message);
   }
