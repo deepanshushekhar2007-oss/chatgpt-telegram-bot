@@ -1,5 +1,14 @@
 import { getCollection } from "./mongodb";
 
+export interface RedeemCode {
+  code: string;
+  days: number;
+  maxUsers: number;
+  usedBy: number[];
+  createdAt: number;
+  createdBy: number;
+}
+
 interface BotData {
   subscriptionMode: boolean;
   accessList: Record<string, { expiresAt: number; grantedBy: number }>;
@@ -30,6 +39,10 @@ interface BotData {
   referredBy: Record<string, number>;
   // referrerUserId -> accumulated referral access window + lifetime count
   referralAccess: Record<string, { expiresAt: number; totalReferred: number }>;
+  // ── Redeem Codes ─────────────────────────────────────────────────────────
+  // Admin creates codes with /redeem CODE DAYS MAXUSERS.
+  // Users redeem with /redeem CODE to get instant access.
+  redeemCodes: Record<string, RedeemCode>;
 }
 
 const DEFAULT_DATA: BotData = {
@@ -43,6 +56,7 @@ const DEFAULT_DATA: BotData = {
   freeTrials: {},
   referredBy: {},
   referralAccess: {},
+  redeemCodes: {},
 };
 
 export async function loadBotData(): Promise<BotData> {
@@ -61,6 +75,7 @@ export async function loadBotData(): Promise<BotData> {
         freeTrials: doc.freeTrials ?? {},
         referredBy: doc.referredBy ?? {},
         referralAccess: doc.referralAccess ?? {},
+        redeemCodes: doc.redeemCodes ?? {},
       };
     }
   } catch (err: any) {
@@ -86,6 +101,7 @@ export async function saveBotData(data: BotData): Promise<void> {
           freeTrials: data.freeTrials,
           referredBy: data.referredBy,
           referralAccess: data.referralAccess,
+          redeemCodes: data.redeemCodes,
           updatedAt: new Date(),
         },
       },
@@ -113,6 +129,7 @@ export async function trackUser(userId: number): Promise<void> {
           freeTrials: {},
           referredBy: {},
           referralAccess: {},
+          redeemCodes: {},
         },
       },
       { upsert: true }
@@ -145,6 +162,7 @@ export type AccessKind =
   | "admin_grant"         // entry in accessList still valid
   | "trial"               // 24h free trial active (refermode only)
   | "referral"            // referral-earned days active (refermode only)
+  | "redeem"              // access granted via redeem code
   | "none";
 
 export interface AccessState {
@@ -355,4 +373,83 @@ export async function getReferralStats(userId: number): Promise<{
     expiresAt: ref?.expiresAt ?? 0,
     totalReferred: ref?.totalReferred ?? 0,
   };
+}
+
+// ── Redeem Code Functions ────────────────────────────────────────────────────
+
+export async function createRedeemCode(
+  code: string,
+  days: number,
+  maxUsers: number,
+  adminId: number
+): Promise<{ success: boolean; reason?: "already_exists" }> {
+  const data = await loadBotData();
+  const upperCode = code.toUpperCase();
+  if (data.redeemCodes[upperCode]) {
+    return { success: false, reason: "already_exists" };
+  }
+  data.redeemCodes[upperCode] = {
+    code: upperCode,
+    days,
+    maxUsers,
+    usedBy: [],
+    createdAt: Date.now(),
+    createdBy: adminId,
+  };
+  await saveBotData(data);
+  return { success: true };
+}
+
+export async function redeemUserCode(
+  userId: number,
+  code: string
+): Promise<{
+  success: boolean;
+  reason?: "not_found" | "already_redeemed" | "max_reached";
+  days?: number;
+  expiresAt?: number;
+}> {
+  const data = await loadBotData();
+  const upperCode = code.toUpperCase();
+  const entry = data.redeemCodes[upperCode];
+
+  if (!entry) return { success: false, reason: "not_found" };
+  if (entry.usedBy.includes(userId)) return { success: false, reason: "already_redeemed" };
+  if (entry.usedBy.length >= entry.maxUsers) return { success: false, reason: "max_reached" };
+
+  // Grant access — stacks on top of existing access like /access command
+  const now = Date.now();
+  const existing = data.accessList[String(userId)];
+  const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+  const expiresAt = baseFrom + entry.days * 86400000;
+
+  data.accessList[String(userId)] = { expiresAt, grantedBy: entry.createdBy };
+  entry.usedBy.push(userId);
+  data.redeemCodes[upperCode] = entry;
+  await saveBotData(data);
+
+  return { success: true, days: entry.days, expiresAt };
+}
+
+export async function getRedeemCodeInfo(
+  code: string
+): Promise<RedeemCode | null> {
+  const data = await loadBotData();
+  return data.redeemCodes[code.toUpperCase()] ?? null;
+}
+
+export async function listAllRedeemCodes(): Promise<RedeemCode[]> {
+  const data = await loadBotData();
+  return Object.values(data.redeemCodes);
+}
+
+export async function deleteRedeemCode(
+  code: string
+): Promise<{ success: boolean }> {
+  const data = await loadBotData();
+  const upperCode = code.toUpperCase();
+  if (!data.redeemCodes[upperCode]) return { success: false };
+  delete data.redeemCodes[upperCode];
+  await saveBotData(data);
+  return { success: true };
 }

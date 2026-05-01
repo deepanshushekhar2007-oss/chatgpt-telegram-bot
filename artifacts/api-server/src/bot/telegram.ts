@@ -65,6 +65,11 @@ import {
   setReferMode,
   getReferralStats,
   findAndMarkTrialsToWarn,
+  createRedeemCode,
+  redeemUserCode,
+  getRedeemCodeInfo,
+  listAllRedeemCodes,
+  deleteRedeemCode,
   AccessState,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
@@ -2749,7 +2754,7 @@ bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
     "🛡️ <b>Admin Panel</b>\n\n" +
-    "📋 <b>Commands:</b>\n\n" +
+    "📋 <b>Access Commands:</b>\n" +
     "🟢 <code>/access on</code> — Enable subscription mode\n" +
     "🔴 <code>/access off</code> — Disable subscription mode\n" +
     "✅ <code>/access [id] [days]</code> — Give user access\n" +
@@ -2766,10 +2771,15 @@ bot.command("admin", async (ctx) => {
     "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
     "🔴 <code>/refermode off</code> — Disable refer mode (back to normal)\n\n" +
     "🤖 <b>Auto Chat Controls:</b>\n" +
-    "🟢 <code>/autochat on</code> — Auto Chat sabhi users ke liye ON\n" +
-    "🔴 <code>/autochat off</code> — Auto Chat sabhi users ke liye OFF\n" +
-    "✅ <code>/accessautochat [id]</code> — Specific user ke liye Auto Chat ON\n" +
-    "❌ <code>/revokeautochat [id]</code> — Specific user ka Auto Chat OFF",
+    "🟢 <code>/autochat on</code> — Auto Chat for all users ON\n" +
+    "🔴 <code>/autochat off</code> — Auto Chat for all users OFF\n" +
+    "✅ <code>/accessautochat [id]</code> — Auto Chat ON for specific user\n" +
+    "❌ <code>/revokeautochat [id]</code> — Auto Chat OFF for specific user\n\n" +
+    "🎫 <b>Redeem Codes:</b>\n" +
+    "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
+    "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
+    "📋 <code>/redeem list</code> — List all codes with live status\n" +
+    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
 
     { parse_mode: "HTML" }
   );
@@ -2940,6 +2950,146 @@ bot.command("revoke", async (ctx) => {
   const data = await loadBotData();
   if (data.accessList[String(id)]) { delete data.accessList[String(id)]; await saveBotData(data); await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" }); }
   else await ctx.reply("⚠️ User does not have access.");
+});
+
+// ─── /redeem ─────────────────────────────────────────────────────────────────
+// Admin:
+//   /redeem CODE DAYS MAXUSERS  → Create a new redeem code
+//   /redeem CODE                → View stats for a code
+//   /redeem list                → List all codes
+//   /redeem delete CODE         → Delete a code
+// User:
+//   /redeem CODE                → Redeem a code for instant access
+// ─────────────────────────────────────────────────────────────────────────────
+bot.command("redeem", async (ctx) => {
+  const userId = ctx.from!.id;
+  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
+
+  // ── Admin flow ──────────────────────────────────────────────────────────
+  if (isAdmin(userId)) {
+    // /redeem list
+    if (args[0]?.toLowerCase() === "list") {
+      const codes = await listAllRedeemCodes();
+      if (!codes.length) {
+        await ctx.reply("📋 <b>No redeem codes found.</b>\n\nCreate one with:\n<code>/redeem CODE DAYS MAXUSERS</code>", { parse_mode: "HTML" });
+        return;
+      }
+      const lines = codes.map((c) => {
+        const remaining = c.maxUsers - c.usedBy.length;
+        const status = remaining <= 0 ? "🔴 Exhausted" : "🟢 Active";
+        return (
+          `${status} <code>${c.code}</code>\n` +
+          `   📅 ${c.days} day${c.days === 1 ? "" : "s"} | 👥 ${c.usedBy.length}/${c.maxUsers} used | ${remaining} remaining`
+        );
+      });
+      await ctx.reply(
+        `📋 <b>All Redeem Codes (${codes.length})</b>\n\n${lines.join("\n\n")}`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // /redeem delete CODE
+    if (args[0]?.toLowerCase() === "delete" && args[1]) {
+      const result = await deleteRedeemCode(args[1]);
+      if (result.success) {
+        await ctx.reply(`🗑️ <b>Code Deleted!</b>\n\n<code>${args[1].toUpperCase()}</code> has been removed.`, { parse_mode: "HTML" });
+      } else {
+        await ctx.reply(`⚠️ Code <code>${args[1].toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
+      }
+      return;
+    }
+
+    // /redeem CODE DAYS MAXUSERS  → Create
+    if (args.length === 3 && !isNaN(parseInt(args[1])) && !isNaN(parseInt(args[2]))) {
+      const code = args[0].toUpperCase();
+      const days = parseInt(args[1]);
+      const maxUsers = parseInt(args[2]);
+      if (days <= 0 || maxUsers <= 0) {
+        await ctx.reply("❓ Days and max users must be greater than 0.", { parse_mode: "HTML" });
+        return;
+      }
+      const result = await createRedeemCode(code, days, maxUsers, userId);
+      if (result.success) {
+        await ctx.reply(
+          `✅ <b>Redeem Code Created!</b>\n\n` +
+          `🎫 <b>Code:</b> <code>${code}</code>\n` +
+          `📅 <b>Access:</b> ${days} day${days === 1 ? "" : "s"}\n` +
+          `👥 <b>Max Users:</b> ${maxUsers}\n\n` +
+          `Users can redeem it with:\n<code>/redeem ${code}</code>`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(`⚠️ Code <code>${code}</code> already exists. Delete it first with <code>/redeem delete ${code}</code>.`, { parse_mode: "HTML" });
+      }
+      return;
+    }
+
+    // /redeem CODE  → View stats (admin)
+    if (args.length === 1) {
+      const info = await getRedeemCodeInfo(args[0]);
+      if (!info) {
+        await ctx.reply(`⚠️ Code <code>${args[0].toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
+        return;
+      }
+      const remaining = info.maxUsers - info.usedBy.length;
+      const status = remaining <= 0 ? "🔴 Exhausted" : "🟢 Active";
+      const redeemerList = info.usedBy.length
+        ? info.usedBy.map((id) => `• <code>${id}</code>`).join("\n")
+        : "None yet";
+      await ctx.reply(
+        `📊 <b>Redeem Code Stats</b>\n\n` +
+        `🎫 <b>Code:</b> <code>${info.code}</code>\n` +
+        `${status}\n` +
+        `📅 <b>Access per use:</b> ${info.days} day${info.days === 1 ? "" : "s"}\n` +
+        `👥 <b>Used:</b> ${info.usedBy.length}/${info.maxUsers}\n` +
+        `🔢 <b>Remaining:</b> ${remaining}\n\n` +
+        `👤 <b>Redeemed by:</b>\n${redeemerList}`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // No valid admin usage matched
+    await ctx.reply(
+      "❓ <b>Admin Redeem Usage:</b>\n\n" +
+      "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a code\n" +
+      "📊 <code>/redeem CODE</code> — View code stats\n" +
+      "📋 <code>/redeem list</code> — List all codes\n" +
+      "🗑️ <code>/redeem delete CODE</code> — Delete a code",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // ── User flow ───────────────────────────────────────────────────────────
+  if (!args.length) {
+    await ctx.reply("🎫 <b>How to redeem a code:</b>\n\n<code>/redeem YOUR_CODE</code>", { parse_mode: "HTML" });
+    return;
+  }
+
+  const result = await redeemUserCode(userId, args[0]);
+
+  if (result.success) {
+    const exp = new Date(result.expiresAt!).toUTCString();
+    // Grant access notification
+    await ctx.reply(
+      `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
+      `✅ <b>${result.days} day${result.days === 1 ? "" : "s"}</b> of premium access has been added to your account.\n` +
+      `⏰ <b>Expires (UTC):</b> ${exp}\n\n` +
+      `Send /start to open the menu and start using the bot!`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (result.reason === "not_found") {
+    await ctx.reply("❌ <b>Invalid code.</b> Please check and try again.", { parse_mode: "HTML" });
+  } else if (result.reason === "already_redeemed") {
+    await ctx.reply("⚠️ <b>Already Redeemed.</b> You have already used this code.", { parse_mode: "HTML" });
+  } else if (result.reason === "max_reached") {
+    await ctx.reply("🔴 <b>Code Expired.</b> This code has reached its maximum number of uses.", { parse_mode: "HTML" });
+  }
 });
 
 bot.command("ban", async (ctx) => {
