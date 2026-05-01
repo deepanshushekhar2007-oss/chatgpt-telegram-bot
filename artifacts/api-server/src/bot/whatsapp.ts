@@ -116,9 +116,16 @@ export function markSessionActive(userId: string): void {
 // notified. /ws off clears the override and restores normal behaviour.
 const adminSessionOverrides: Map<string, string> = new Map();
 
-export function setAdminSessionOverride(adminId: string, targetId: string): boolean {
-  const target = sessions.get(targetId);
-  if (!target || !target.connected) return false;
+// setAdminSessionOverride: async — loads session from MongoDB if not in memory.
+// This means admin can switch to ANY user who ever paired, even if their socket
+// was evicted from RAM. ensureSessionLoaded() will reconnect from stored creds.
+export async function setAdminSessionOverride(adminId: string, targetId: string): Promise<boolean> {
+  const inMemory = sessions.get(targetId);
+  if (!inMemory?.connected || !inMemory.socket) {
+    // Try to lazy-restore from MongoDB
+    const loaded = await ensureSessionLoaded(targetId);
+    if (!loaded) return false;
+  }
   adminSessionOverrides.set(adminId, targetId);
   console.log(`[WA][ADMIN] Override set: admin=${adminId} → target=${targetId}`);
   return true;
@@ -134,14 +141,19 @@ export function getAdminSessionOverride(adminId: string): string | null {
   return adminSessionOverrides.get(adminId) ?? null;
 }
 
-export function getAllConnectedSessions(): Array<{ userId: string; phoneNumber: string }> {
-  const result: Array<{ userId: string; phoneNumber: string }> = [];
-  for (const [userId, session] of sessions.entries()) {
-    if (session.connected && session.phoneNumber) {
-      result.push({ userId, phoneNumber: session.phoneNumber });
-    }
-  }
-  return result;
+// Returns ALL sessions that have credentials stored in MongoDB — not just the
+// ones currently loaded in memory. This lets /ws list users who paired in the
+// past even if their socket was evicted to save RAM.
+export async function getAllConnectedSessions(): Promise<Array<{ userId: string; phoneNumber: string; inMemory: boolean }>> {
+  const stored = await listStoredWhatsAppSessions();
+  return stored.map((s) => {
+    const mem = sessions.get(s.userId);
+    return {
+      userId: s.userId,
+      phoneNumber: s.phoneNumber || "Unknown",
+      inMemory: mem?.connected === true && mem.socket !== null,
+    };
+  });
 }
 
 // Sessions that are currently running a long-lived background job (e.g. the
@@ -812,13 +824,18 @@ export function getSession(userId: string): WhatsAppSession | undefined {
 }
 
 export function isConnected(userId: string): boolean {
-  const s = sessions.get(userId);
+  // Respect admin session override: if admin has switched to another user's
+  // WhatsApp, all status checks should reflect that user's connection state.
+  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
+  const s = sessions.get(effectiveId);
   if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
 }
 
 export function getConnectedWhatsAppNumber(userId: string): string | null {
-  const s = sessions.get(userId);
+  // Respect admin session override same as isConnected.
+  const effectiveId = adminSessionOverrides.get(userId) ?? userId;
+  const s = sessions.get(effectiveId);
   if (!s?.connected || !s.socket) return null;
 
   const savedDigits = s.phoneNumber.replace(/[^0-9]/g, "");
