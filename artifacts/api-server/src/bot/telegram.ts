@@ -4496,10 +4496,51 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+// Build a Unicode progress bar: e.g. buildProgressBar(3, 8, 12) → "████░░░░░░░░ 37%"
+function buildProgressBar(done: number, total: number, width = 12): string {
+  const pct = total === 0 ? 100 : Math.round((done / total) * 100);
+  const filled = total === 0 ? width : Math.round((done / total) * width);
+  const bar = "█".repeat(filled) + "░".repeat(width - filled);
+  return `${bar} ${pct}%`;
+}
+
+// Truncate a string to maxLen chars, appending "…" if trimmed.
+function truncate(s: string, maxLen: number): string {
+  return s.length <= maxLen ? s : s.slice(0, maxLen - 1) + "…";
+}
+
 async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
   const pendingPhoneToGroups = new Map<string, string[]>();
+
+  // Running totals shown in the live progress message
+  let runningCorrect = 0;
+  let runningWrong = 0;
+  let runningFailed = 0;
+
+  // Helper: build the live progress message shown while checking groups.
+  // Shows a progress bar, current group info, and a running tally.
+  const buildProgressMsg = (
+    i: number,               // 0-based index of group currently being processed
+    phase: string,           // short status string, e.g. "Resolving link…"
+    groupLabel: string,      // group name or fallback label
+    vcfCount: number,        // number of VCF contacts for this group
+  ): string => {
+    const total = activePairs.length;
+    const bar = buildProgressBar(i, total);
+    const lines: string[] = [];
+    lines.push(`🔍 <b>CTC Check in progress…</b>`);
+    lines.push(`<code>${bar}</code>`);
+    lines.push(`📋 Group <b>${i + 1}/${total}</b>${total > 1 ? ` — ${esc(truncate(groupLabel, 28))}` : ""}`);
+    lines.push(`📁 <b>${vcfCount}</b> contact${vcfCount === 1 ? "" : "s"} in VCF`);
+    lines.push(`⚙️ <i>${esc(phase)}</i>`);
+    if (i > 0) {
+      lines.push(`━━━━━━━━━━━━━━━━━━`);
+      lines.push(`✅ Correct so far: <b>${runningCorrect}</b>   ⚠️ Wrong: <b>${runningWrong}</b>${runningFailed ? `   ❌ Failed: <b>${runningFailed}</b>` : ""}`);
+    }
+    return lines.join("\n");
+  };
 
   // First pass: collect results per group
   const groupResults: Array<{
@@ -4519,19 +4560,23 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
   for (let i = 0; i < activePairs.length; i++) {
     const pair = activePairs[i];
     const cleanLink = buildCleanLink(pair.link);
+    const vcfCount = pair.vcfContacts.length;
+    const groupLabel = `Group ${i + 1}`;
 
+    // ── Phase 1: resolving the group link ──────────────────────────────
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Checking group ${i + 1}/${activePairs.length}...</b>`,
+        buildProgressMsg(i, "Resolving group link…", groupLabel, vcfCount),
         { parse_mode: "HTML" }
       );
     } catch {}
 
     const groupInfo = await getGroupIdFromLink(userId, cleanLink);
     if (!groupInfo) {
+      runningFailed++;
       groupResults.push({
         groupId: "",
-        groupName: `Group ${i + 1}`,
+        groupName: groupLabel,
         link: cleanLink,
         vcfContacts: pair.vcfContacts,
         inMembers: [],
@@ -4545,6 +4590,14 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
       continue;
     }
 
+    // ── Phase 2: fetching members + pending ────────────────────────────
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        buildProgressMsg(i, "Fetching members & pending list…", groupInfo.subject, vcfCount),
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+
     const phones = pair.vcfContacts.map((c) => c.phone);
     const checkResult = await checkContactsInGroup(userId, groupInfo.id, phones);
     const { inMembers, inPending, notFound: notFoundPhones, pendingAvailable, allMemberPhones, allPendingPhones } = checkResult;
@@ -4554,6 +4607,17 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
       if (!pendingPhoneToGroups.has(phone)) pendingPhoneToGroups.set(phone, []);
       pendingPhoneToGroups.get(phone)!.push(groupInfo.subject);
     }
+
+    // Update running totals so the next group's progress bar shows them
+    const inPendingSet = new Set(inPending.map(p => p.replace(/[^0-9]/g, "")));
+    const vcfLast10Set = new Set(pair.vcfContacts.map(c => c.phone.replace(/[^0-9]/g, "").slice(-10)));
+    const correctPending = pair.vcfContacts.filter(c => inPendingSet.has(c.phone.replace(/[^0-9]/g, ""))).length;
+    let wrongPending = 0;
+    for (const p of allPendingPhones) {
+      if (!vcfLast10Set.has(p.slice(-10))) wrongPending++;
+    }
+    runningCorrect += correctPending;
+    runningWrong += wrongPending;
 
     groupResults.push({
       groupId: groupInfo.id,
@@ -4569,6 +4633,15 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
       couldNotAccess: false,
     });
   }
+
+  // Show "finalising…" bar at 100% while we build the result message
+  try {
+    const total = activePairs.length;
+    await bot.api.editMessageText(chatId, msgId,
+      `🔍 <b>CTC Check in progress…</b>\n<code>${buildProgressBar(total, total)}</code>\n⚙️ <i>Finalising results…</i>`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
 
   // ── Compact, scannable result format ────────────────────────────────────
   // Top: one-line totals so the user sees the headline numbers without
