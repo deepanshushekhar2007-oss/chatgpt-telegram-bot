@@ -2486,8 +2486,6 @@ bot.callbackQuery(/^help_pg_(\d+)$/, async (ctx) => {
 async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   const userId = ctx.from?.id;
   if (!userId) return false;
-  // Admin always bypasses all access checks.
-  if (isAdmin(userId)) return true;
   if (await isBanned(userId)) {
     try { await ctx.answerCallbackQuery({ text: "🚫 You are banned from this bot.", show_alert: true }); } catch {
       await ctx.reply("🚫 You are banned from using this bot.");
@@ -2753,15 +2751,7 @@ bot.callbackQuery("pl_all", async (ctx) => {
 // ─── Admin Commands ──────────────────────────────────────────────────────────
 
 bot.command("admin", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) {
-    await ctx.reply(
-      `🚫 <b>You are not an admin.</b>\n\n` +
-      `Your Telegram ID: <code>${ctx.from!.id}</code>\n` +
-      `Set <b>ADMIN_USER_ID=${ctx.from!.id}</b> in your Render environment variables.`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
     "🛡️ <b>Admin Panel</b>\n\n" +
     "📋 <b>Access Commands:</b>\n" +
@@ -12283,14 +12273,6 @@ export async function startBot() {
   if (!token) {
     console.log("[BOT] TELEGRAM_BOT_TOKEN not set — bot disabled. Set it to enable the Telegram bot.");
     return;
-  }
-
-  if (!ADMIN_USER_ID) {
-    console.warn("[BOT] ⚠️  WARNING: ADMIN_USER_ID is not set! Admin commands and admin button bypass will NOT work.");
-    console.warn("[BOT] ⚠️  Set ADMIN_USER_ID=<your_telegram_id> in Render environment variables.");
-    console.warn("[BOT] ⚠️  To find your Telegram ID: send /admin to the bot and it will show your ID.");
-  } else {
-    console.log(`[BOT] Admin user configured: ${ADMIN_USER_ID}`);
   }
 
   // Register a global disconnect notifier so users get a Telegram alert in English
