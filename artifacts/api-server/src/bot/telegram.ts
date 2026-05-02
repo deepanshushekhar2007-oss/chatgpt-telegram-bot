@@ -11941,7 +11941,7 @@ bot.on("message:document", async (ctx) => {
 
   if (state.step === "approval_admin_input" && state.approvalData) {
     try {
-      const file = await ctx.api.getFile(doc.file_id);
+      const file = await retryGetFile(ctx.api, doc.file_id);
       if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
       const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       const rawContacts = parseVCF(content);
@@ -11958,7 +11958,8 @@ bot.on("message:document", async (ctx) => {
       state.approvalData.targetPhones = phoneNumbers;
       await showAdminApprovalChoice(ctx, userId);
     } catch (err: any) {
-      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+      const msg = err?.message || err?.description || String(err) || "Unknown error";
+      await ctx.reply(`❌ Error downloading VCF: ${esc(msg)}`, { parse_mode: "HTML" });
     }
     return;
   }
@@ -11973,7 +11974,7 @@ bot.on("message:document", async (ctx) => {
         await ctx.reply("✅ All required VCF files already received.");
         return;
       }
-      const file = await ctx.api.getFile(doc.file_id);
+      const file = await retryGetFile(ctx.api, doc.file_id);
       if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
       const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       const rawContacts = parseVCF(content);
@@ -11989,14 +11990,15 @@ bot.on("message:document", async (ctx) => {
       data.vcfFiles.push({ fileName: doc.file_name || "(unnamed.vcf)", phones });
       await cgnAutoAfterVcfUploaded(ctx);
     } catch (err: any) {
-      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+      const msg = err?.message || err?.description || String(err) || "Unknown error";
+      await ctx.reply(`❌ Error downloading VCF: ${esc(msg)}`, { parse_mode: "HTML" });
     }
     return;
   }
 
   if (["add_members_admin_vcf", "add_members_navy_vcf", "add_members_member_vcf"].includes(state.step) && state.addMembersData) {
     try {
-      const file = await ctx.api.getFile(doc.file_id);
+      const file = await retryGetFile(ctx.api, doc.file_id);
       if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
       const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       const rawContacts = parseVCF(content);
@@ -12042,57 +12044,72 @@ bot.on("message:document", async (ctx) => {
         );
       }
     } catch (err: any) {
-      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+      const msg = err?.message || err?.description || String(err) || "Unknown error";
+      await ctx.reply(`❌ Error downloading VCF: ${esc(msg)}`, { parse_mode: "HTML" });
     }
     return;
   }
 
   if (state.step !== "ctc_enter_vcf" || !state.ctcData) return;
 
-  try {
-    const file = await ctx.api.getFile(doc.file_id);
-    if (!file.file_path) { await ctx.reply("❌ Could not download file."); return; }
-    const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-    const rawContacts = parseVCF(content);
-    if (!rawContacts.length) { await ctx.reply("❌ No contacts found in VCF file."); return; }
+  // Capture doc/ctx values before queuing — the ctx reference is safe to
+  // close over but we extract the primitives for clarity.
+  const docFileId = doc.file_id;
+  const docFileName = doc.file_name || "unknown.vcf";
+  const ctcApi = ctx.api;
 
-    const vcfFileName = doc.file_name || "unknown.vcf";
-    const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
+  void enqueueVcfProcessing(userId, async () => {
+    // Re-fetch state inside the queue task — it may have been updated by the
+    // time a previous task in the queue finishes.
+    const s = userStates.get(userId);
+    if (!s || s.step !== "ctc_enter_vcf" || !s.ctcData) return;
 
-    const idx = state.ctcData.currentPairIndex;
+    try {
+      const file = await retryGetFile(ctcApi, docFileId);
+      if (!file.file_path) { await ctx.reply("❌ Could not download file. Please resend it."); return; }
+      const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      const rawContacts = parseVCF(content);
+      if (!rawContacts.length) { await ctx.reply(`❌ No contacts found in <b>${esc(docFileName)}</b>.`, { parse_mode: "HTML" }); return; }
 
-    if (idx >= state.ctcData.pairs.length) {
-      // All pairs filled, just append to last group
-      const lastIdx = state.ctcData.pairs.length - 1;
-      state.ctcData.pairs[lastIdx].vcfContacts.push(...contacts);
-      const total = state.ctcData.pairs[lastIdx].vcfContacts.length;
-      await ctx.reply(
-        `✅ <b>${contacts.length} contacts added to Group ${lastIdx + 1}</b> (total: ${total})\n\n🚀 Ready to check!`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
-      );
-      return;
+      const vcfFileName = docFileName;
+      const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
+
+      const idx = s.ctcData.currentPairIndex;
+
+      if (idx >= s.ctcData.pairs.length) {
+        // All pairs filled, just append to last group
+        const lastIdx = s.ctcData.pairs.length - 1;
+        s.ctcData.pairs[lastIdx].vcfContacts.push(...contacts);
+        const total = s.ctcData.pairs[lastIdx].vcfContacts.length;
+        await ctx.reply(
+          `✅ <b>${contacts.length} contacts added to Group ${lastIdx + 1}</b> (total: ${total})\n\n🚀 Ready to check!`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
+        );
+        return;
+      }
+
+      // Add contacts to current pair
+      s.ctcData.pairs[idx].vcfContacts.push(...contacts);
+      const total = s.ctcData.pairs[idx].vcfContacts.length;
+      s.ctcData.currentPairIndex++;
+      const nextIdx = s.ctcData.currentPairIndex;
+
+      if (nextIdx < s.ctcData.pairs.length) {
+        await ctx.reply(
+          `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n<code>${esc(s.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
+        );
+      } else {
+        await ctx.reply(
+          `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
+        );
+      }
+    } catch (err: any) {
+      const msg = err?.message || err?.description || String(err) || "Unknown error";
+      await ctx.reply(`❌ Error processing <b>${esc(docFileName)}</b>: ${esc(msg)}\n\nPlease resend this file.`, { parse_mode: "HTML" });
     }
-
-    // Add contacts to current pair
-    state.ctcData.pairs[idx].vcfContacts.push(...contacts);
-    const total = state.ctcData.pairs[idx].vcfContacts.length;
-    state.ctcData.currentPairIndex++;
-    const nextIdx = state.ctcData.currentPairIndex;
-
-    if (nextIdx < state.ctcData.pairs.length) {
-      await ctx.reply(
-        `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${state.ctcData.pairs.length}</b>:\n<code>${esc(state.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
-      );
-    } else {
-      await ctx.reply(
-        `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${state.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
-      );
-    }
-  } catch (err: any) {
-    await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
-  }
+  });
 });
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -12100,7 +12117,18 @@ bot.on("message:document", async (ctx) => {
 function downloadText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
-    client.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(d)); res.on("error", reject); }).on("error", reject);
+    client.get(url, (res) => {
+      let d = "";
+      res.on("data", (c) => (d += c));
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode} downloading file`));
+        } else {
+          resolve(d);
+        }
+      });
+      res.on("error", reject);
+    }).on("error", reject);
   });
 }
 
@@ -12108,12 +12136,53 @@ function downloadBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
     client.get(url, (res) => {
+      if (res.statusCode && res.statusCode >= 400) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} downloading file`));
+        return;
+      }
       const chunks: Buffer[] = [];
       res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
       res.on("end", () => resolve(Buffer.concat(chunks)));
       res.on("error", reject);
     }).on("error", reject);
   });
+}
+
+// Retry wrapper for ctx.api.getFile — network hiccups (especially when
+// multiple VCFs are uploaded at once) can cause transient failures.
+// Retries up to 3 times with exponential back-off before giving up.
+async function retryGetFile(api: any, fileId: string, maxRetries = 3): Promise<any> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await api.getFile(fileId);
+    } catch (err: any) {
+      lastErr = err;
+      const delay = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+// Per-user VCF processing queue — prevents concurrent uploads from racing.
+// When the user sends multiple VCF files at once (media group), Telegram
+// delivers them as separate webhook hits nearly simultaneously. Without
+// serialisation, two handlers can read the same `currentPairIndex` and
+// advance it to the same next value, causing contacts to land in the wrong
+// group and silently dropping one file.  The queue ensures they are
+// processed one-at-a-time, in arrival order.
+const vcfProcessingQueue: Map<number, Promise<void>> = new Map();
+function enqueueVcfProcessing(userId: number, task: () => Promise<void>): Promise<void> {
+  const prev = vcfProcessingQueue.get(userId) ?? Promise.resolve();
+  const next = prev.then(() => task()).catch(() => {});
+  vcfProcessingQueue.set(userId, next);
+  // Clean up map entry after the chain settles so it can't grow unbounded.
+  next.finally(() => {
+    if (vcfProcessingQueue.get(userId) === next) vcfProcessingQueue.delete(userId);
+  });
+  return next;
 }
 
 function splitMessage(msg: string, maxLen: number): string[] {
