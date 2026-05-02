@@ -456,14 +456,19 @@ bot.use(async (ctx, next) => {
   if (isAdmin(userId)) return next();
   if (isReferGateExempt(cbData)) return next();
 
-  const data = await loadBotData();
+  // Fail-open: if MongoDB is unavailable, let the handler run rather than
+  // silently dropping the update (which causes "nothing happens" for the user).
+  let data: Awaited<ReturnType<typeof loadBotData>>;
+  try { data = await loadBotData(); } catch { return next(); }
   if (!data.referMode) return next();
 
-  const state = await getAccessState(userId);
+  let state: Awaited<ReturnType<typeof getAccessState>>;
+  try { state = await getAccessState(userId); } catch { return next(); }
   if (state.kind !== "none") return next();
 
   // Out of access — block the button and surface the refer-required UI.
-  try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: false }); } catch {}
+  // show_alert: true makes the popup clearly visible (not a brief invisible toast).
+  try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: true }); } catch {}
   try {
     const { text, keyboard } = await buildReferRequiredMessage(userId);
     try {
