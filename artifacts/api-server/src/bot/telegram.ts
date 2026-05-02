@@ -363,7 +363,10 @@ bot.use(async (ctx, next) => {
       || cbData.startsWith("logout_")
       || cbData.startsWith("lang_")
       || cbData.startsWith("force_sub_");
-    if (cbData && !skipReconnect && !isConnected(String(userId))) {
+    // Admin bypasses the auto-reconnect wait — the 20s wait exceeds
+    // Telegram's 10s callback timeout, causing silent drops for admin.
+    // Each feature handler already checks isConnected() itself.
+    if (cbData && !skipReconnect && !isAdmin(userId) && !isConnected(String(userId))) {
       let hasStored = false;
       try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
       if (hasStored) {
