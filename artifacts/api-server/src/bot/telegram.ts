@@ -4432,16 +4432,36 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
-    }); return;
+    try {
+      await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+      });
+    } catch {
+      await ctx.reply("❌ <b>WhatsApp not connected!</b> Please connect first.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa"),
+      });
+    }
+    return;
   }
   userStates.set(userId, { step: "ctc_enter_links", ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 } });
-  await ctx.editMessageText(
-    "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
-  );
+  const ctcPrompt =
+    "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n" +
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
+  try {
+    await ctx.editMessageText(ctcPrompt, {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
+    });
+  } catch {
+    // editMessageText can fail on old/deleted messages — fall back to a fresh reply
+    // so the user always sees the prompt regardless.
+    await ctx.reply(ctcPrompt, {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
+    });
+  }
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
@@ -4505,6 +4525,27 @@ function truncate(s: string, maxLen: number): string {
 }
 
 async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
+  try {
+    await _ctcCheckBackgroundImpl(userId, activePairs, chatId, msgId);
+  } catch (err: any) {
+    console.error("[CTC] Unexpected crash in ctcCheckBackground:", err?.message ?? err);
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `❌ <b>CTC Check failed</b>\n\n<i>${esc(err?.message || "Unknown error")}</i>\n\nPlease try again.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {
+      try {
+        await bot.api.sendMessage(chatId,
+          "❌ CTC Check failed due to an unexpected error. Please try again.",
+          { reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+        );
+      } catch {}
+    }
+  }
+}
+
+async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
   const pendingPhoneToGroups = new Map<string, string[]>();
