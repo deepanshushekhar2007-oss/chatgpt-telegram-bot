@@ -363,17 +363,15 @@ bot.use(async (ctx, next) => {
       || cbData.startsWith("logout_")
       || cbData.startsWith("lang_")
       || cbData.startsWith("force_sub_");
-    // Admin bypasses the auto-reconnect wait — the 20s wait exceeds
-    // Telegram's 10s callback timeout, causing silent drops for admin.
-    // Each feature handler already checks isConnected() itself.
-    if (cbData && !skipReconnect && !isAdmin(userId) && !isConnected(String(userId))) {
+    if (cbData && !skipReconnect && !isConnected(String(userId))) {
       let hasStored = false;
       try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
       if (hasStored) {
-        // Edit text only (no reply_markup specified → original inline
-        // keyboard is preserved). The handler that runs after reconnect
-        // will overwrite this text with its real UI.
-        let statusEdited = false;
+        // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
+        // does not fire and cause a silent "nothing happens" drop.
+        // The spinner stops here; the reconnect message below gives feedback.
+        try { await ctx.answerCallbackQuery(); } catch {}
+
         try {
           await ctx.editMessageText(
             `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
@@ -381,19 +379,10 @@ bot.use(async (ctx, next) => {
             `5-15 second mein apne aap button kaam karega.</i>`,
             { parse_mode: "HTML" }
           );
-          statusEdited = true;
         } catch {}
 
         let connected = false;
         try {
-          // 20s timeout per user request. WhatsApp Baileys cold reconnect
-          // on Render free tier normally takes 5-15 sec when the session
-          // credentials are still valid. If 20 sec pass without the
-          // socket reaching `open` state, the user's WhatsApp device is
-          // almost certainly truly disconnected (logged out from phone,
-          // device unlinked, or session creds invalidated by WhatsApp)
-          // — not a slow-network case. So we tell the user clearly
-          // instead of silently spinning.
           connected = await waitForWhatsAppConnected(String(userId), {
             timeoutMs: 20_000,
             pollMs: 500,
@@ -401,11 +390,6 @@ bot.use(async (ctx, next) => {
         } catch {}
 
         if (!connected) {
-          // 20 sec elapsed without socket open → treat as a real
-          // disconnection. Show the user a clear, actionable message so
-          // they know what happened and how to fix it (re-link via the
-          // QR / pairing-code flow inside the WhatsApp menu).
-          try { await ctx.answerCallbackQuery(); } catch {}
           try {
             await ctx.editMessageText(
               `❌ <b>WhatsApp disconnected</b>\n\n` +
@@ -430,9 +414,10 @@ bot.use(async (ctx, next) => {
           }
           return;
         }
-        // Connected — fall through to the normal handler dispatch below.
-        // The handler will edit this same message with its real UI and
-        // call answerCallbackQuery itself.
+        // Connected — fall through. Since we already answered the callback
+        // query above, patch answerCallbackQuery to a silent no-op so the
+        // downstream handler does not double-answer and throw an error.
+        (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
       }
     }
 
@@ -479,14 +464,16 @@ bot.use(async (ctx, next) => {
 
   // Out of access — block the button and surface the refer-required UI.
   try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: false }); } catch {}
-  const { text, keyboard } = await buildReferRequiredMessage(userId);
   try {
-    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
-  } catch {
+    const { text, keyboard } = await buildReferRequiredMessage(userId);
     try {
-      await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
-    } catch {}
-  }
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {
+      try {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+      } catch {}
+    }
+  } catch {}
   // Stop here — do NOT call next(), the original handler must not run.
 });
 
