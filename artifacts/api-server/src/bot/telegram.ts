@@ -2759,6 +2759,9 @@ bot.command("admin", async (ctx) => {
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
     "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
+  "🔀 <code>/ws</code> — All WA sessions and admin switch help\n" +
+  "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp\n" +
+  "🔀 <code>/ws off</code> — Switch back to your own WhatsApp\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
@@ -2776,6 +2779,99 @@ bot.command("admin", async (ctx) => {
     "📋 <code>/redeem list</code> — List all codes with live status\n" +
     "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
 
+    { parse_mode: "HTML" }
+  );
+});
+
+bot.command("ws", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) {
+    await ctx.reply("🚫 You are not an admin.");
+    return;
+  }
+
+  const adminId = ctx.from!.id;
+  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
+  const stateKey = `admin_ws_original_${adminId}`;
+
+  if (!args.length) {
+    const activeIds = [...getActiveSessionUserIds()];
+    if (!activeIds.length) {
+      await ctx.reply(
+        "🔀 <b>WhatsApp Sessions</b>\n\nNo active sessions found.\n\n" +
+          "Usage:\n" +
+          "<code>/ws [userId]</code> — switch to a user's WhatsApp\n" +
+          "<code>/ws off</code> — switch back to your own WhatsApp",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const lines = await Promise.all(activeIds.map(async (uid) => {
+      const phone = getConnectedWhatsAppNumber(uid) || "(unknown)";
+      return `• <code>${uid}</code> — <code>${esc(phone)}</code>`;
+    }));
+
+    await ctx.reply(
+      "🔀 <b>WhatsApp Sessions</b>\n\n" +
+        lines.join("\n") +
+        "\n\n" +
+        "Usage:\n" +
+        "<code>/ws [userId]</code> — switch to that user's WhatsApp\n" +
+        "<code>/ws off</code> — switch back to your own WhatsApp",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const target = args[0].toLowerCase();
+
+  if (target === "off") {
+    const original = (globalThis as any)[stateKey] as string | undefined;
+    if (!original) {
+      await ctx.reply("⚠️ No switched WhatsApp session to turn off.");
+      return;
+    }
+
+    (globalThis as any)[stateKey] = undefined;
+    const restored = await ensureSessionLoaded(original);
+    await ctx.reply(
+      restored
+        ? `✅ Switched back to your own WhatsApp session.\n\nUser: <code>${original}</code>`
+        : `⚠️ Could not restore your original WhatsApp session.\n\nUser: <code>${original}</code>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const targetId = target;
+  if (!/^\d+$/.test(targetId)) {
+    await ctx.reply("❓ Usage:\n<code>/ws [userId]</code>\n<code>/ws off</code>", { parse_mode: "HTML" });
+    return;
+  }
+
+  if (targetId === String(adminId)) {
+    await ctx.reply("⚠️ You are already using your own WhatsApp session.");
+    return;
+  }
+
+  const targetPhone = getConnectedWhatsAppNumber(targetId);
+  if (!targetPhone && !(await ensureSessionLoaded(targetId))) {
+    await ctx.reply(`⚠️ No saved WhatsApp session found for <code>${targetId}</code>.`, { parse_mode: "HTML" });
+    return;
+  }
+
+  (globalThis as any)[stateKey] = String(adminId);
+  protectSessionFromEviction(targetId);
+  protectSessionFromEviction(String(adminId));
+  const switched = await ensureSessionLoaded(targetId);
+
+  await ctx.reply(
+    switched
+      ? "✅ <b>Switched WhatsApp session</b>\n\n" +
+        `👤 <b>User:</b> <code>${targetId}</code>\n` +
+        `📱 <b>Phone:</b> <code>${esc(getConnectedWhatsAppNumber(targetId) || targetPhone || "(unknown)")}</code>\n\n` +
+        "Use <code>/ws off</code> to return to your own session."
+      : `⚠️ Could not switch to <code>${targetId}</code>.`,
     { parse_mode: "HTML" }
   );
 });
