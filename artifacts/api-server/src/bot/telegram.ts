@@ -4563,24 +4563,6 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
 }
 
-bot.callbackQuery("ctc_start_check", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.ctcData) return;
-  const activePairs = state.ctcData.pairs.filter((p) => p.vcfContacts.length > 0);
-  if (!activePairs.length) { await ctx.editMessageText("⚠️ No VCF files provided. Please send VCF files first."); return; }
-
-  const chatId = ctx.callbackQuery.message?.chat.id;
-  const msgId = ctx.callbackQuery.message?.message_id;
-  if (!chatId || !msgId) return;
-
-  userStates.delete(userId);
-  await ctx.editMessageText(`⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
-
-  void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
-});
-
 // Fix Wrong Pending: cached per-user data so the user can tap the
 // "🛠 Fix Wrong Pending" button after a CTC check completes. We store
 // only what's needed to re-fetch the live pending list and reject the
