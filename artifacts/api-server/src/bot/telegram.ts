@@ -4561,7 +4561,7 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   }
 
   void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
-}
+});
 
 // Fix Wrong Pending: cached per-user data so the user can tap the
 // "🛠 Fix Wrong Pending" button after a CTC check completes. We store
