@@ -453,3 +453,47 @@ export async function deleteRedeemCode(
   await saveBotData(data);
   return { success: true };
 }
+
+// ─── Autochat Session Persistence ──────────────────────────────────────────
+
+export interface PersistedAutoChatSession {
+  userId: number;
+  autoUserId: string;
+  groupIds: string[];
+  message: string;
+  delaySeconds: number;
+  repeatCount: number;
+  startedAt: number;
+}
+
+export async function saveAutoChatSession(session: PersistedAutoChatSession): Promise<void> {
+  try {
+    const col = await getCollection("autochat_sessions");
+    await col.replaceOne({ userId: session.userId }, session, { upsert: true });
+  } catch {}
+}
+
+export async function deleteAutoChatSession(userId: number): Promise<void> {
+  try {
+    const col = await getCollection("autochat_sessions");
+    await col.deleteOne({ userId });
+  } catch {}
+}
+
+export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSession[]> {
+  try {
+    const col = await getCollection("autochat_sessions");
+    const docs = await col.find({}).toArray();
+    return docs.map((d) => ({
+      userId: d["userId"] as number,
+      autoUserId: d["autoUserId"] as string,
+      groupIds: (d["groupIds"] || []) as string[],
+      message: d["message"] as string,
+      delaySeconds: d["delaySeconds"] as number,
+      repeatCount: d["repeatCount"] as number,
+      startedAt: d["startedAt"] as number,
+    }));
+  } catch {
+    return [];
+  }
+}
