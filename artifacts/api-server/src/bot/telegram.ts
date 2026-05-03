@@ -1216,15 +1216,11 @@ const MENU_BUTTON_DEFS: Array<{ id: string; defaultLabel: string }> = [
 ];
 
 // Color class -> emoji indicator mapping
+// Only 3 real visible Telegram button styles + default (reset)
 const BUTTON_COLOR_EMOJI: Record<string, string> = {
-  primary:   "🔵",
-  success:   "🟢",
-  danger:    "🔴",
-  warning:   "🟡",
-  secondary: "⚫",
-  purple:    "🟣",
-  orange:    "🟠",
-  white:     "⚪",
+  primary: "🔵",
+  success: "🟢",
+  danger:  "🔴",
 };
 
 // Returns the button label with a colored circle prefix if a color is set.
@@ -3027,35 +3023,20 @@ bot.callbackQuery(/^bcm_pick:(.+)$/, async (ctx) => {
 
   adminButtonColorPending.set(ctx.from.id, buttonId);
   const currentColor = cachedButtonColors[buttonId] ?? "default";
-  const colorOptions = [
-    ["🔵 Primary",   "primary"],
-    ["🟢 Success",   "success"],
-    ["🔴 Danger",    "danger"],
-    ["🟡 Warning",   "warning"],
-    ["⚫ Secondary", "secondary"],
-    ["🟣 Purple",    "purple"],
-    ["🟠 Orange",    "orange"],
-    ["⚪ White",     "white"],
-    ["✖️ Reset/Default", "default"],
-  ];
+  // Only the 3 colour classes Telegram actually renders differently + default reset
   const kb = new InlineKeyboard();
-  for (let i = 0; i < colorOptions.length; i += 2) {
-    const [label1, val1] = colorOptions[i];
-    const tick1 = currentColor === val1 ? " ✅" : "";
-    if (colorOptions[i + 1]) {
-      const [label2, val2] = colorOptions[i + 1];
-      const tick2 = currentColor === val2 ? " ✅" : "";
-      kb.text(`${label1}${tick1}`, `bcm_set:${buttonId}:${val1}`)
-        .text(`${label2}${tick2}`, `bcm_set:${buttonId}:${val2}`).row();
-    } else {
-      kb.text(`${label1}${tick1}`, `bcm_set:${buttonId}:${val1}`).row();
-    }
-  }
-  kb.text("« Back", "bcm_back");
+  const tick = (v: string) => currentColor === v ? " ✅" : "";
+  kb.text(`🔵 Primary${tick("primary")}`,  `bcm_set:${buttonId}:primary`)
+    .text(`🟢 Success${tick("success")}`,  `bcm_set:${buttonId}:success`).row()
+    .text(`🔴 Danger${tick("danger")}`,    `bcm_set:${buttonId}:danger`)
+    .text(`✖️ Default${tick("default")}`,  `bcm_set:${buttonId}:default`).row()
+    .text("« Back", "bcm_back");
 
   try {
     await ctx.editMessageText(
-      `🎨 <b>${def.defaultLabel}</b> ka colour choose karo:\n\n(Current: <b>${currentColor}</b>)`,
+      `🎨 <b>${def.defaultLabel}</b> ka colour choose karo:\n\n` +
+      `Current: <b>${currentColor}</b>\n\n` +
+      `• 🔵 Primary — blue\n• 🟢 Success — green\n• 🔴 Danger — red\n• ✖️ Default — reset`,
       { parse_mode: "HTML", reply_markup: kb }
     );
   } catch {}
