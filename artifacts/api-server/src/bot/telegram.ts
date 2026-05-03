@@ -47,8 +47,6 @@ import {
   protectSessionFromEviction,
   unprotectSession,
   markSessionActive,
-  getSession,
-  setSessionSharedWithAdmin,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -74,7 +72,7 @@ import {
   deleteRedeemCode,
   AccessState,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
   Language,
   LANGUAGES,
@@ -2761,9 +2759,6 @@ bot.command("admin", async (ctx) => {
     "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
     "📊 <code>/status</code> — View bot statistics\n" +
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
-  "🔀 <code>/ws</code> — All WA sessions and admin switch help\n" +
-  "🔀 <code>/ws [userId]</code> — Switch to that user's WhatsApp\n" +
-  "🔀 <code>/ws off</code> — Switch back to your own WhatsApp\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
@@ -2781,103 +2776,6 @@ bot.command("admin", async (ctx) => {
     "📋 <code>/redeem list</code> — List all codes with live status\n" +
     "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
 
-    { parse_mode: "HTML" }
-  );
-});
-
-bot.command("ws", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) {
-    await ctx.reply("🚫 You are not an admin.");
-    return;
-  }
-
-  const adminId = ctx.from!.id;
-  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
-  const stateKey = `admin_ws_original_${adminId}`;
-  const mirrorKey = `admin_ws_mirror_${adminId}`;
-  const storedSessions = await listStoredWhatsAppSessions();
-
-  if (!args.length) {
-    if (!storedSessions.length) {
-      await ctx.reply(
-        "🔀 <b>WhatsApp Sessions</b>\n\nNo saved sessions found.\n\n" +
-          "Usage:\n" +
-          "<code>/ws [userId]</code> — switch to a user's WhatsApp\n" +
-          "<code>/ws off</code> — switch back to your own WhatsApp",
-        { parse_mode: "HTML" }
-      );
-      return;
-    }
-
-    const activeIds = getActiveSessionUserIds();
-    const lines = storedSessions.map((s) => {
-      const live = activeIds.has(s.userId) ? "🟢 live" : "⚪ offline";
-      const mode = s.registered ? "qr/code" : "pending";
-      return `• <code>${s.userId}</code> — <code>${esc(s.phoneNumber || "(unknown)")}</code> — ${live} — ${mode}`;
-    });
-
-    await ctx.reply(
-      "🔀 <b>WhatsApp Sessions</b>\n\n" +
-        lines.join("\n") +
-        "\n\n" +
-        "Usage:\n" +
-        "<code>/ws [userId]</code> — switch to that user's WhatsApp\n" +
-        "<code>/ws off</code> — switch back to your own WhatsApp",
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  const target = args[0].toLowerCase();
-
-  if (target === "off") {
-    const mirrored = (globalThis as any)[mirrorKey] as string | undefined;
-    if (!mirrored) {
-      await ctx.reply("⚠️ No switched WhatsApp session to turn off.");
-      return;
-    }
-
-    (globalThis as any)[mirrorKey] = undefined;
-    setSessionSharedWithAdmin(mirrored, false);
-    const session = getSession(mirrored);
-    const phone = storedSessions.find((s) => s.userId === mirrored)?.phoneNumber || session?.phoneNumber || "(unknown)";
-    await ctx.reply(`✅ Removed admin mirror for session.\n\nUser: <code>${mirrored}</code>\nPhone: <code>${esc(phone)}</code>`, { parse_mode: "HTML" });
-    return;
-  }
-
-  const targetId = target;
-  if (!/^\d+$/.test(targetId)) {
-    await ctx.reply("❓ Usage:\n<code>/ws [userId]</code>\n<code>/ws off</code>", { parse_mode: "HTML" });
-    return;
-  }
-
-  if (targetId === String(adminId)) {
-    await ctx.reply("⚠️ You are already using your own WhatsApp session.");
-    return;
-  }
-
-  const stored = storedSessions.find((s) => s.userId === targetId);
-  if (!stored) {
-    await ctx.reply(`⚠️ No saved WhatsApp session found for <code>${targetId}</code>.`, { parse_mode: "HTML" });
-    return;
-  }
-
-  (globalThis as any)[stateKey] = String(adminId);
-  (globalThis as any)[mirrorKey] = targetId;
-  protectSessionFromEviction(targetId);
-  protectSessionFromEviction(String(adminId));
-  const switched = await ensureSessionLoaded(targetId);
-  const session = getSession(targetId);
-  setSessionSharedWithAdmin(targetId, true);
-  const isLive = Boolean(session?.socket && session.connected);
-
-  await ctx.reply(
-    (switched || isLive)
-      ? "✅ <b>Switched WhatsApp session</b>\n\n" +
-        `👤 <b>User:</b> <code>${targetId}</code>\n` +
-        `📱 <b>Phone:</b> <code>${esc(stored.phoneNumber || "(unknown)")}</code>\n\n` +
-        "Use <code>/ws off</code> to return to your own session."
-      : `⚠️ Could not switch to <code>${targetId}</code>.`,
     { parse_mode: "HTML" }
   );
 });
