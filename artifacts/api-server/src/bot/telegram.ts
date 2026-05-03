@@ -1014,6 +1014,7 @@ interface UserState {
     delaySeconds: number;
     cancelled: boolean;
     botMode?: "single" | "both";
+    autoChatDurationMs?: number;
   };
   autoConnectStep?: string;
   // ── Change Group Name feature ────────────────────────────────────────────
@@ -1084,6 +1085,7 @@ interface CigSession {
   cycle: number;
   nextDelayMs: number;
   rotationIndex: number;
+  autoChatExpiresAt?: number;
 }
 
 interface AcfSession {
@@ -1100,6 +1102,7 @@ interface AcfSession {
   cycle: number;
   nextDelayMs: number;
   rotationIndex: number;
+  autoChatExpiresAt?: number;
 }
 
 const CHAT_FRIEND_PAIRS: [string, string][] = [
@@ -1148,10 +1151,36 @@ const CHAT_DELAY_ROTATION_MS = [
   5 * 60 * 1000,
 ];
 
+// Fixed delays for Chat In Group dual-account rotation:
+//   1 min between account1 and account2 sending in the SAME group
+//   2 min before rotating to the NEXT group
+const CIG_WITHIN_GROUP_DELAY_MS = 1 * 60 * 1000;
+const CIG_BETWEEN_GROUP_DELAY_MS = 2 * 60 * 1000;
+
 const AUTO_GROUP_MESSAGES = CHAT_FRIEND_PAIRS.flat();
 
 function getSequentialDelayMs(rotationIndex: number): number {
   return CHAT_DELAY_ROTATION_MS[rotationIndex % CHAT_DELAY_ROTATION_MS.length];
+}
+
+// Auto chat duration options (in ms). 0 = unlimited (admin only).
+const AUTO_CHAT_DURATION_OPTIONS: Array<{ label: string; ms: number; cb: string }> = [
+  { label: "1 Day", ms: 1 * 24 * 60 * 60 * 1000, cb: "achat_dur_1d" },
+  { label: "4 Days", ms: 4 * 24 * 60 * 60 * 1000, cb: "achat_dur_4d" },
+  { label: "8 Days", ms: 8 * 24 * 60 * 60 * 1000, cb: "achat_dur_8d" },
+  { label: "10 Days", ms: 10 * 24 * 60 * 60 * 1000, cb: "achat_dur_10d" },
+];
+
+function buildDurationKeyboard(userId: number, confirmCb: string): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const opt of AUTO_CHAT_DURATION_OPTIONS) {
+    kb.text(`⏱️ ${opt.label}`, `${confirmCb}:${opt.ms}`).row();
+  }
+  if (isAdmin(userId)) {
+    kb.text("♾️ No Limit (Admin)", `${confirmCb}:0`).row();
+  }
+  kb.text("❌ Cancel", "auto_chat_menu");
+  return kb;
 }
 
 function formatDelay(ms: number): string {
@@ -2873,7 +2902,59 @@ bot.command("revokeautochat", async (ctx) => {
   data.autoChatAccessList = data.autoChatAccessList.filter((u) => u !== id);
   await saveBotData(data);
   autoChatAccessSet.delete(id);
-  await ctx.reply(`❌ <b>Auto Chat Access Revoked!</b>\n\n👤 User: <code>${id}</code>\n🚫 Is user ko ab Auto Chat button nahi dikhega.`, { parse_mode: "HTML" });
+
+  // Stop any running CIG session for this user immediately
+  const cigSession = cigSessions.get(id);
+  if (cigSession?.running) {
+    cigSession.running = false;
+    cigSession.cancelled = true;
+    try {
+      await bot.api.editMessageText(cigSession.chatId, cigSession.msgId,
+        "🚫 <b>Auto Chat Stopped by Admin!</b>\n\n" +
+        "Your Auto Chat access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${cigSession.sent}</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    try {
+      await bot.api.sendMessage(id,
+        "🚫 <b>Auto Chat Access Revoked!</b>\n\n" +
+        "The admin has revoked your Auto Chat access.\n" +
+        "Your running Chat In Group session has been stopped immediately.",
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+
+  // Stop any running ACF session for this user immediately
+  const acfSession = acfSessions.get(id);
+  if (acfSession?.running) {
+    acfSession.running = false;
+    acfSession.cancelled = true;
+    try {
+      await bot.api.editMessageText(acfSession.chatId, acfSession.msgId,
+        "🚫 <b>Chat Friend Stopped by Admin!</b>\n\n" +
+        "Your Auto Chat access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${acfSession.sent}</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    try {
+      await bot.api.sendMessage(id,
+        "🚫 <b>Auto Chat Access Revoked!</b>\n\n" +
+        "The admin has revoked your Auto Chat access.\n" +
+        "Your running Chat Friend session has been stopped immediately.",
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+
+  const stopped = (cigSession?.running === false && cigSession?.cancelled) || (acfSession?.running === false && acfSession?.cancelled)
+    ? "\n⏹️ Running session was stopped immediately." : "";
+  await ctx.reply(
+    `❌ <b>Auto Chat Access Revoked!</b>\n\n👤 User: <code>${id}</code>\n🚫 This user will no longer see the Auto Chat button.${stopped}`,
+    { parse_mode: "HTML" }
+  );
 });
 
 bot.command("access", async (ctx) => {
@@ -2946,8 +3027,53 @@ bot.command("revoke", async (ctx) => {
   const id = parseInt((ctx.message?.text || "").split(/\s+/)[1]);
   if (isNaN(id)) { await ctx.reply("❓ Usage: /revoke [user_id]"); return; }
   const data = await loadBotData();
-  if (data.accessList[String(id)]) { delete data.accessList[String(id)]; await saveBotData(data); await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" }); }
-  else await ctx.reply("⚠️ User does not have access.");
+  if (!data.accessList[String(id)]) { await ctx.reply("⚠️ User does not have access."); return; }
+  delete data.accessList[String(id)];
+  await saveBotData(data);
+
+  // Stop any running CIG session for this user immediately
+  const cigSession = cigSessions.get(id);
+  if (cigSession?.running) {
+    cigSession.running = false;
+    cigSession.cancelled = true;
+    try {
+      await bot.api.editMessageText(cigSession.chatId, cigSession.msgId,
+        "🚫 <b>Auto Chat Stopped!</b>\n\nYour bot access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${cigSession.sent}</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    try {
+      await bot.api.sendMessage(id,
+        "🚫 <b>Bot Access Revoked!</b>\n\n" +
+        "The admin has revoked your access. All running Auto Chat sessions have been stopped.",
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+
+  // Stop any running ACF session for this user immediately
+  const acfSession = acfSessions.get(id);
+  if (acfSession?.running) {
+    acfSession.running = false;
+    acfSession.cancelled = true;
+    try {
+      await bot.api.editMessageText(acfSession.chatId, acfSession.msgId,
+        "🚫 <b>Chat Friend Stopped!</b>\n\nYour bot access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${acfSession.sent}</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    try {
+      await bot.api.sendMessage(id,
+        "🚫 <b>Bot Access Revoked!</b>\n\n" +
+        "The admin has revoked your access. All running Auto Chat sessions have been stopped.",
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+
+  await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
 // ─── /redeem ─────────────────────────────────────────────────────────────────
@@ -8559,33 +8685,63 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
+  state.step = "acig_select_duration";
+  await ctx.editMessageText(
+    "⏱️ <b>Select Auto Chat Duration</b>\n\n" +
+    "How long should Auto Chat run in groups?\n\n" +
+    "After the selected time, Auto Chat will stop automatically and you will be notified.",
+    {
+      parse_mode: "HTML",
+      reply_markup: buildDurationKeyboard(userId, "acig_dur"),
+    }
+  );
+});
+
+bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
+  const durationMs = parseInt(ctx.match[1]);
   const data = state.chatInGroupData;
+  data.autoChatDurationMs = durationMs;
   const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
   const autoUserId = getAutoUserId(String(userId));
+  const durationLabel = durationMs === 0
+    ? "No Limit"
+    : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
 
   const statusMsg = await ctx.editMessageText(
     "👥 <b>Chat In Group Started!</b>\n\n" +
-    "Funny/study messages will rotate across all selected groups until you press Stop.",
+    `⏱️ Duration: <b>${durationLabel}</b>\n` +
+    "Funny/study messages will rotate across all selected groups.\n\n" +
+    "Use Stop to end it early.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
+  const autoChatExpiresAt = durationMs === 0 ? undefined : Date.now() + durationMs;
   userStates.delete(userId);
-  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups);
+  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, autoChatExpiresAt);
 });
 
 function cigProgressText(session: CigSession): string {
   const currentGroup = session.groups[session.currentGroupIndex]?.subject || session.groups[0]?.subject || "group";
+  const expiryText = session.autoChatExpiresAt
+    ? `\n⏳ Time Remaining: <b>${formatRemaining(session.autoChatExpiresAt)}</b>`
+    : "";
   return (
     "🤖 <b>Auto Chat Running</b>\n\n" +
     `📍 Mode: <b>Chat in Group</b>\n` +
-    `🎯 Target: <b>Group: ${esc(currentGroup)}</b>\n\n` +
+    `🎯 Current Group: <b>${esc(currentGroup)}</b>\n\n` +
     `📊 <b>Messages Sent:</b>\n` +
     `📱 Account 1: <b>${session.sentByAccount1} messages</b>\n` +
     `📱 Account 2: <b>${session.sentByAccount2} messages</b>\n` +
-    `📩 Total: <b>${session.sent} messages</b>\n\n` +
-    (session.nextDelayMs > 0 ? `⏰ Sending every ~${formatDelay(session.nextDelayMs)}...\n` : "") +
-    "Press <b>Stop</b> to stop the chat."
+    `📩 Total: <b>${session.sent} messages</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n\n` +
+    (session.nextDelayMs > 0 ? `⏰ Next send in ~${formatDelay(session.nextDelayMs)}\n` : "") +
+    expiryText +
+    "\nPress <b>Stop</b> to stop the chat."
   );
 }
 
@@ -8595,7 +8751,8 @@ async function runGroupChatDualBackground(
   autoUserId: string,
   chatId: number,
   msgId: number,
-  groups: Array<{ id: string; subject: string }>
+  groups: Array<{ id: string; subject: string }>,
+  autoChatExpiresAt?: number
 ): Promise<void> {
   const session: CigSession = {
     running: true,
@@ -8613,62 +8770,143 @@ async function runGroupChatDualBackground(
     cycle: 1,
     nextDelayMs: 0,
     rotationIndex: 0,
+    autoChatExpiresAt,
   };
   cigSessions.set(userId, session);
 
+  // Protect BOTH WhatsApp sessions (primary + secondary) from idle and
+  // memory-pressure eviction for the entire duration of this Chat In Group job.
+  protectSessionFromEviction(primaryUserId);
+  protectSessionFromEviction(autoUserId);
+
+  const cigKb = new InlineKeyboard()
+    .text("🔄 Refresh", "cig_refresh")
+    .text("⏹️ Stop", "cig_stop_btn").row()
+    .text("🏠 Main Menu", "main_menu");
+
+  let messageIndex = 0;
+  let accessCheckCounter = 0;
+  const ACCESS_CHECK_EVERY = 10; // check access every 10 messages
+
   try {
     let groupIndex = 0;
-    let messageIndex = 0;
-    let senderIndex = 0;
 
     while (!session.cancelled && session.running) {
       if (!groups.length) break;
+
+      // Check if auto chat duration has expired
+      if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) {
+        session.running = false;
+        session.cancelled = true;
+        try {
+          await bot.api.sendMessage(
+            userId,
+            "⏰ <b>Auto Chat Time Expired!</b>\n\n" +
+            "Your selected Auto Chat duration has ended.\n" +
+            `📤 Total sent: <b>${session.sent}</b>\n` +
+            `❌ Failed: <b>${session.failed}</b>\n\n` +
+            "Auto Chat has been stopped automatically.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+          );
+        } catch {}
+        break;
+      }
+
+      // Periodically check if user still has bot access
+      accessCheckCounter++;
+      if (accessCheckCounter % ACCESS_CHECK_EVERY === 0) {
+        try {
+          const stillHasAccess = await hasAccess(userId);
+          const stillHasAutoChatAccess = canUserSeeAutoChat(userId);
+          if (!stillHasAccess || !stillHasAutoChatAccess) {
+            session.running = false;
+            session.cancelled = true;
+            try {
+              await bot.api.sendMessage(
+                userId,
+                "🚫 <b>Auto Chat Stopped!</b>\n\n" +
+                "Your bot access or Auto Chat access has been revoked by the admin.\n" +
+                `📤 Total sent: <b>${session.sent}</b>\n\n` +
+                "Auto Chat has been stopped automatically.",
+                { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+              );
+            } catch {}
+            break;
+          }
+        } catch {}
+      }
+
       const group = groups[groupIndex];
       session.currentGroupIndex = groupIndex;
       session.cycle = Math.floor(messageIndex / (groups.length * 2)) + 1;
-      if (session.cancelled) break;
 
-      // Send 2 messages per group before rotating to next group
-      for (let msgInGroup = 0; msgInGroup < 2; msgInGroup++) {
-        if (!isSessionActive(session)) break;
-
-        const isAccount1 = senderIndex % 2 === 0;
-        const senderUserId = isAccount1 ? primaryUserId : autoUserId;
-        const message = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
-        const ok = await sendGroupMessage(senderUserId, group.id, message);
-        if (ok) {
-          session.sent++;
-          if (isAccount1) session.sentByAccount1++; else session.sentByAccount2++;
-        } else session.failed++;
-
-        messageIndex++;
-        senderIndex++;
-        session.nextDelayMs = getSequentialDelayMs(session.rotationIndex);
-        session.rotationIndex++;
-
-        try {
-          await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("🔄 Refresh", "cig_refresh")
-              .text("⏹️ Stop", "cig_stop_btn").row()
-              .text("🏠 Main Menu", "main_menu"),
-          });
-        } catch {}
-
-        if (!isSessionActive(session)) break;
-        await waitWithCancel(session, session.nextDelayMs);
-        if (!isSessionActive(session)) break;
+      // ── Step 1: Account 1 sends to current group ────────────────────────
+      if (!isSessionActive(session)) break;
+      if (!isConnected(primaryUserId)) {
+        try { await ensureSessionLoaded(primaryUserId); } catch {}
       }
+      const msg1 = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
+      const ok1 = await sendGroupMessage(primaryUserId, group.id, msg1);
+      if (ok1) { session.sent++; session.sentByAccount1++; } else session.failed++;
+      messageIndex++;
+      session.nextDelayMs = CIG_WITHIN_GROUP_DELAY_MS;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+          parse_mode: "HTML", reply_markup: cigKb,
+        });
+      } catch {}
 
       if (!isSessionActive(session)) break;
+      await waitWithCancel(session, CIG_WITHIN_GROUP_DELAY_MS);
+      if (!isSessionActive(session)) break;
 
+      // Check expiry again before second send
+      if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) {
+        session.running = false; session.cancelled = true;
+        try {
+          await bot.api.sendMessage(userId,
+            "⏰ <b>Auto Chat Time Expired!</b>\n\nYour Auto Chat duration ended. Auto Chat stopped automatically.\n" +
+            `📤 Sent: <b>${session.sent}</b>`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+          );
+        } catch {}
+        break;
+      }
+
+      // ── Step 2: Account 2 sends to same group ──────────────────────────
+      if (!isSessionActive(session)) break;
+      if (!isConnected(autoUserId)) {
+        try { await ensureSessionLoaded(autoUserId); } catch {}
+      }
+      const msg2 = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
+      const ok2 = await sendGroupMessage(autoUserId, group.id, msg2);
+      if (ok2) { session.sent++; session.sentByAccount2++; } else session.failed++;
+      messageIndex++;
+      session.nextDelayMs = CIG_BETWEEN_GROUP_DELAY_MS;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
+          parse_mode: "HTML", reply_markup: cigKb,
+        });
+      } catch {}
+
+      if (!isSessionActive(session)) break;
+      // Wait 2 min before moving to next group
+      await waitWithCancel(session, CIG_BETWEEN_GROUP_DELAY_MS);
+      if (!isSessionActive(session)) break;
+
+      // ── Rotate to next group ───────────────────────────────────────────
       groupIndex = (groupIndex + 1) % groups.length;
       session.currentGroupIndex = groupIndex;
     }
   } catch (err: any) {
     console.error(`[ACIG][${userId}] Error:`, err?.message);
   }
+
+  // Release both protected sessions back to normal eviction rules.
+  unprotectSession(primaryUserId);
+  unprotectSession(autoUserId);
 
   session.running = false;
   session.nextDelayMs = 0;
@@ -8774,31 +9012,78 @@ bot.callbackQuery("acf_start", async (ctx) => {
     return;
   }
 
+  // Show duration selection before starting
+  userStates.set(userId, {
+    step: "acf_select_duration",
+    chatInGroupData: {
+      allGroups: [],
+      selectedIndices: new Set(),
+      page: 0,
+      message: `${primaryNumber}|${autoNumber}`,
+      delaySeconds: 0,
+      cancelled: false,
+    },
+  });
+
+  await ctx.editMessageText(
+    "⏱️ <b>Select Chat Friend Duration</b>\n\n" +
+    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
+    `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
+    "How long should Chat Friend run?\n\n" +
+    "After the selected time, it will stop automatically and you will be notified.",
+    {
+      parse_mode: "HTML",
+      reply_markup: buildDurationKeyboard(userId, "acf_dur"),
+    }
+  );
+});
+
+bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.chatInGroupData) return;
+  const durationMs = parseInt(ctx.match[1]);
+  const numbers = (state.chatInGroupData.message || "").split("|");
+  const primaryNumber = numbers[0] || "";
+  const autoNumber = numbers[1] || "";
+  if (!primaryNumber || !autoNumber) return;
+
   const primaryJid = primaryNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
   const autoJid = autoNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
   const totalPairs = CHAT_FRIEND_PAIRS.length;
+  const autoChatExpiresAt = durationMs === 0 ? undefined : Date.now() + durationMs;
+  const durationLabel = durationMs === 0
+    ? "No Limit"
+    : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
 
   const statusMsg = await ctx.editMessageText(
     "👫 <b>Chat Friend Started!</b>\n\n" +
     `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
-    `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
-    "⏳ Auto funny/study messages will continue until you press Stop.",
+    `🤖 Auto: <code>${esc(autoNumber)}</code>\n` +
+    `⏱️ Duration: <b>${durationLabel}</b>\n\n` +
+    "Auto funny/study messages will continue until time is up or you press Stop.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
+  userStates.delete(userId);
 
-  void runChatFriendBackground(userId, String(userId), getAutoUserId(String(userId)), chatId, msgId, primaryJid, autoJid, totalPairs);
+  void runChatFriendBackground(userId, String(userId), getAutoUserId(String(userId)), chatId, msgId, primaryJid, autoJid, totalPairs, autoChatExpiresAt);
 });
 
 function acfProgressText(session: AcfSession): string {
+  const expiryText = session.autoChatExpiresAt
+    ? `\n⏳ Time Remaining: <b>${formatRemaining(session.autoChatExpiresAt)}</b>`
+    : "";
   return (
     "👫 <b>Chat Friend Running...</b>\n\n" +
     `🔁 Cycle: <b>${session.cycle}</b>\n` +
     `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
     `📤 Sent: <b>${session.sent}</b>\n` +
     `❌ Failed: <b>${session.failed}</b>\n` +
-    (session.nextDelayMs > 0 ? `⏱️ Next Delay: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
+    (session.nextDelayMs > 0 ? `⏱️ Next send in: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
+    expiryText +
     "\nPress Stop to end it."
   );
 }
@@ -8811,7 +9096,8 @@ async function runChatFriendBackground(
   msgId: number,
   primaryJid: string,
   autoJid: string,
-  totalPairs: number
+  totalPairs: number,
+  autoChatExpiresAt?: number
 ): Promise<void> {
   const session: AcfSession = {
     running: true,
@@ -8827,6 +9113,7 @@ async function runChatFriendBackground(
     cycle: 1,
     nextDelayMs: 0,
     rotationIndex: 0,
+    autoChatExpiresAt,
   };
   acfSessions.set(userId, session);
 
@@ -8837,10 +9124,61 @@ async function runChatFriendBackground(
   protectSessionFromEviction(primaryUserId);
   protectSessionFromEviction(autoUserId);
 
+  const acfKb = new InlineKeyboard()
+    .text("🔄 Refresh", "acf_refresh")
+    .text("⏹️ Stop", "acf_stop_btn").row()
+    .text("🏠 Main Menu", "main_menu");
+
+  let accessCheckCounter = 0;
+  const ACCESS_CHECK_EVERY = 10;
+
   try {
     let i = 0;
     while (!session.cancelled && session.running) {
       if (session.cancelled) break;
+
+      // Check if auto chat duration has expired
+      if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) {
+        session.running = false;
+        session.cancelled = true;
+        try {
+          await bot.api.sendMessage(
+            userId,
+            "⏰ <b>Chat Friend Time Expired!</b>\n\n" +
+            "Your selected Chat Friend duration has ended.\n" +
+            `📤 Total sent: <b>${session.sent}</b>\n` +
+            `❌ Failed: <b>${session.failed}</b>\n\n` +
+            "Chat Friend has been stopped automatically.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+          );
+        } catch {}
+        break;
+      }
+
+      // Periodically check if user still has bot access
+      accessCheckCounter++;
+      if (accessCheckCounter % ACCESS_CHECK_EVERY === 0) {
+        try {
+          const stillHasAccess = await hasAccess(userId);
+          const stillHasAutoChatAccess = canUserSeeAutoChat(userId);
+          if (!stillHasAccess || !stillHasAutoChatAccess) {
+            session.running = false;
+            session.cancelled = true;
+            try {
+              await bot.api.sendMessage(
+                userId,
+                "🚫 <b>Chat Friend Stopped!</b>\n\n" +
+                "Your bot access or Auto Chat access has been revoked by the admin.\n" +
+                `📤 Total sent: <b>${session.sent}</b>\n\n` +
+                "Chat Friend has been stopped automatically.",
+                { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+              );
+            } catch {}
+            break;
+          }
+        } catch {}
+      }
+
       session.currentPair = (i % CHAT_FRIEND_PAIRS.length) + 1;
       session.cycle = Math.floor(i / CHAT_FRIEND_PAIRS.length) + 1;
 
@@ -8857,11 +9195,7 @@ async function runChatFriendBackground(
 
       try {
         await bot.api.editMessageText(chatId, msgId, acfProgressText(session), {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Refresh", "acf_refresh")
-            .text("⏹️ Stop", "acf_stop_btn").row()
-            .text("🏠 Main Menu", "main_menu"),
+          parse_mode: "HTML", reply_markup: acfKb,
         });
       } catch {}
 
@@ -8880,11 +9214,7 @@ async function runChatFriendBackground(
 
       try {
         await bot.api.editMessageText(chatId, msgId, acfProgressText(session), {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Refresh", "acf_refresh")
-            .text("⏹️ Stop", "acf_stop_btn").row()
-            .text("🏠 Main Menu", "main_menu"),
+          parse_mode: "HTML", reply_markup: acfKb,
         });
       } catch {}
 
