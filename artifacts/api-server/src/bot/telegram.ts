@@ -1215,23 +1215,15 @@ const MENU_BUTTON_DEFS: Array<{ id: string; defaultLabel: string }> = [
   { id: "disconnect_wa",     defaultLabel: "🔌 Disconnect" },
 ];
 
-// Color class -> emoji indicator mapping
-// Only 3 real visible Telegram button styles + default (reset)
-const BUTTON_COLOR_EMOJI: Record<string, string> = {
-  primary: "🔵",
-  success: "🟢",
-  danger:  "🔴",
-};
-
-// Returns the button label with a colored circle prefix if a color is set.
-function applyButtonColor(defaultLabel: string, buttonId: string): string {
-  const colorClass = cachedButtonColors[buttonId];
-  if (!colorClass || colorClass === "default") return defaultLabel;
-  const emoji = BUTTON_COLOR_EMOJI[colorClass];
-  if (!emoji) return defaultLabel;
-  // Strip the original leading emoji so we don't double up
-  const stripped = defaultLabel.replace(/^\S+\s+/, "");
-  return `${emoji} ${stripped}`;
+// Builds a raw Telegram InlineKeyboardButton with the native `color` field.
+// Telegram supports "primary" (blue), "success" (green), "danger" (red),
+// and "default" (standard grey). No emoji prefix is added — only the actual
+// button background colour changes for clients that support it.
+function menuBtn(text: string, cbData: string): Record<string, any> {
+  const colorClass = cachedButtonColors[cbData];
+  const btn: Record<string, any> = { text, callback_data: cbData };
+  if (colorClass && colorClass !== "default") btn.color = colorClass;
+  return btn;
 }
 
 // ── Admin pending button-color selection ─────────────────────────────────────
@@ -1805,36 +1797,37 @@ async function startQrPairing(ctx: any, userId: number): Promise<void> {
   );
 }
 
-function mainMenu(userId?: number): InlineKeyboard {
+// Returns the main menu as a raw inline keyboard so that the native Telegram
+// `color` field can be included on each button. Grammy passes unknown fields
+// through to the Bot API as-is, so Telegram clients that support coloured
+// buttons will render them with the correct background colour.
+function mainMenu(userId?: number): { inline_keyboard: any[][] } {
   const connected = userId !== undefined && isConnected(String(userId));
-  const kb = new InlineKeyboard();
+  const rows: any[][] = [];
+
   if (!connected) {
-    kb.text("📱 Connect WhatsApp", "connect_wa").row();
+    rows.push([{ text: "📱 Connect WhatsApp", callback_data: "connect_wa" }]);
   }
-  kb
-    .text(applyButtonColor("👥 Create Groups", "create_groups"), "create_groups")
-    .text(applyButtonColor("🔗 Join Groups", "join_groups"), "join_groups").row()
-    .text(applyButtonColor("🔍 CTC Checker", "ctc_checker"), "ctc_checker")
-    .text(applyButtonColor("🔗 Get Link", "get_link"), "get_link").row()
-    .text(applyButtonColor("🚪 Leave Group", "leave_group"), "leave_group")
-    .text(applyButtonColor("🗑️ Remove Members", "remove_members"), "remove_members").row()
-    .text(applyButtonColor("👑 Make Admin", "make_admin"), "make_admin")
-    .text(applyButtonColor("✅ Approval", "approval"), "approval").row()
-    .text(applyButtonColor("📋 Get Pending List", "pending_list"), "pending_list")
-    .text(applyButtonColor("➕ Add Members", "add_members"), "add_members").row()
-    .text(applyButtonColor("⚙️ Edit Settings", "edit_settings"), "edit_settings")
-    .text(applyButtonColor("🏷️ Change Name", "change_group_name"), "change_group_name").row()
-    .text(applyButtonColor("🛡️ Auto Accepter", "auto_accepter"), "auto_accepter").row();
+
+  rows.push([menuBtn("👥 Create Groups", "create_groups"), menuBtn("🔗 Join Groups", "join_groups")]);
+  rows.push([menuBtn("🔍 CTC Checker", "ctc_checker"),    menuBtn("🔗 Get Link", "get_link")]);
+  rows.push([menuBtn("🚪 Leave Group", "leave_group"),     menuBtn("🗑️ Remove Members", "remove_members")]);
+  rows.push([menuBtn("👑 Make Admin", "make_admin"),       menuBtn("✅ Approval", "approval")]);
+  rows.push([menuBtn("📋 Get Pending List", "pending_list"), menuBtn("➕ Add Members", "add_members")]);
+  rows.push([menuBtn("⚙️ Edit Settings", "edit_settings"), menuBtn("🏷️ Change Name", "change_group_name")]);
+  rows.push([menuBtn("🛡️ Auto Accepter", "auto_accepter")]);
+
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
-    kb.text(applyButtonColor("🤖 Auto Chat", "auto_chat_menu"), "auto_chat_menu").row();
+    rows.push([menuBtn("🤖 Auto Chat", "auto_chat_menu")]);
   }
+
   if (connected) {
-    kb.text(applyButtonColor("🔄 Session Refresh", "session_refresh"), "session_refresh")
-      .text(applyButtonColor("🔌 Disconnect", "disconnect_wa"), "disconnect_wa");
+    rows.push([menuBtn("🔄 Session Refresh", "session_refresh"), menuBtn("🔌 Disconnect", "disconnect_wa")]);
   } else {
-    kb.text(applyButtonColor("🔌 Disconnect", "disconnect_wa"), "disconnect_wa");
+    rows.push([menuBtn("🔌 Disconnect", "disconnect_wa")]);
   }
-  return kb;
+
+  return { inline_keyboard: rows };
 }
 
 bot.callbackQuery("check_joined", async (ctx) => {
@@ -2124,15 +2117,9 @@ bot.command("start", async (ctx) => {
   if (trialJustStarted) {
     await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
   }
-  // Reply to the /start message itself so Telegram shows it as a quoted reply (❞)
-  const startMsgId = ctx.msg?.message_id;
   await ctx.reply(
     mainMenuText(userId, "welcome"),
-    {
-      parse_mode: "HTML",
-      reply_markup: mainMenu(userId),
-      ...(startMsgId ? { reply_parameters: { message_id: startMsgId } } : {}),
-    }
+    { parse_mode: "HTML", reply_markup: mainMenu(userId) }
   );
 });
 
