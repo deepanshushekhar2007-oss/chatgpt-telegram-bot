@@ -4428,9 +4428,19 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  try { await ctx.answerCallbackQuery(); } catch {}
   const userId = ctx.from.id;
-  if (!(await checkAccessMiddleware(ctx))) return;
+  try {
+    if (!(await checkAccessMiddleware(ctx))) return;
+  } catch (err: any) {
+    console.error("[CTC] access check failed:", err?.message ?? err);
+    try {
+      await ctx.reply("❌ CTC Checker unavailable right now. Please try again.", {
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
   if (!isConnected(String(userId))) {
     try {
       await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
@@ -4455,12 +4465,14 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
       reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
     });
   } catch {
-    // editMessageText can fail on old/deleted messages — fall back to a fresh reply
-    // so the user always sees the prompt regardless.
-    await ctx.reply(ctcPrompt, {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
-    });
+    try {
+      await ctx.reply(ctcPrompt, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
+      });
+    } catch (err: any) {
+      console.error("[CTC] prompt failed:", err?.message ?? err);
+    }
   }
 });
 
@@ -4607,7 +4619,27 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
       );
     } catch {}
 
-    const groupInfo = await getGroupIdFromLink(userId, cleanLink);
+    let groupInfo;
+    try {
+      groupInfo = await getGroupIdFromLink(userId, cleanLink);
+    } catch (err: any) {
+      runningFailed++;
+      groupResults.push({
+        groupId: "",
+        groupName: groupLabel,
+        link: cleanLink,
+        vcfContacts: pair.vcfContacts,
+        inMembers: [],
+        inPending: [],
+        notFoundPhones: pair.vcfContacts.map(c => c.phone),
+        allMemberPhones: new Set(),
+        allPendingPhones: new Set(),
+        pendingAvailable: false,
+        couldNotAccess: true,
+      });
+      console.error("[CTC] getGroupIdFromLink failed:", err?.message ?? err);
+      continue;
+    }
     if (!groupInfo) {
       runningFailed++;
       groupResults.push({
@@ -4635,7 +4667,27 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     } catch {}
 
     const phones = pair.vcfContacts.map((c) => c.phone);
-    const checkResult = await checkContactsInGroup(userId, groupInfo.id, phones);
+    let checkResult;
+    try {
+      checkResult = await checkContactsInGroup(userId, groupInfo.id, phones);
+    } catch (err: any) {
+      runningFailed++;
+      groupResults.push({
+        groupId: groupInfo.id,
+        groupName: groupInfo.subject,
+        link: cleanLink,
+        vcfContacts: pair.vcfContacts,
+        inMembers: [],
+        inPending: [],
+        notFoundPhones: pair.vcfContacts.map(c => c.phone),
+        allMemberPhones: new Set(),
+        allPendingPhones: new Set(),
+        pendingAvailable: false,
+        couldNotAccess: true,
+      });
+      console.error("[CTC] checkContactsInGroup failed:", err?.message ?? err);
+      continue;
+    }
     const { inMembers, inPending, notFound: notFoundPhones, pendingAvailable, allMemberPhones, allPendingPhones } = checkResult;
 
     // Track ALL pending phones for duplicate detection (not just VCF matches)
