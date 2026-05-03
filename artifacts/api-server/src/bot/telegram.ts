@@ -4428,53 +4428,140 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  try { await ctx.answerCallbackQuery(); } catch {}
+  // Always answer the callback query immediately — stops the spinner and
+  // prevents Telegram's 10-second silent-drop from kicking in.
+  try { await ctx.answerCallbackQuery(); } catch (e: any) {
+    console.error("[CTC] answerCallbackQuery failed:", e?.message ?? e);
+  }
+
   const userId = ctx.from.id;
+  console.error(`[CTC-DEBUG] ctc_checker handler reached for userId=${userId}`);
+
+  // ── Access check ──────────────────────────────────────────────────────────
+  let accessOk = false;
   try {
-    if (!(await checkAccessMiddleware(ctx))) return;
+    accessOk = await checkAccessMiddleware(ctx);
   } catch (err: any) {
-    console.error("[CTC] access check failed:", err?.message ?? err);
+    console.error("[CTC] checkAccessMiddleware threw:", err?.message ?? err);
+    // Fall through — show generic error reply below
+  }
+  if (!accessOk) {
+    console.error(`[CTC-DEBUG] accessOk=false for userId=${userId}`);
+    // checkAccessMiddleware usually sends its own feedback (ban/force-sub/
+    // subscription popup). Send a safety-net reply in case it didn't.
     try {
-      await ctx.reply("❌ CTC Checker unavailable right now. Please try again.", {
+      await ctx.reply("❌ Access denied. Please contact the bot owner.", {
         reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
       });
     } catch {}
     return;
   }
+
+  // ── WhatsApp connection check ─────────────────────────────────────────────
   if (!isConnected(String(userId))) {
+    console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
     try {
-      await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
-      });
-    } catch {
-      await ctx.reply("❌ <b>WhatsApp not connected!</b> Please connect first.", {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa"),
-      });
+      await ctx.reply(
+        "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("📱 Connect WhatsApp", "connect_wa").row()
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    } catch (err: any) {
+      console.error("[CTC] wa-not-connected reply failed:", err?.message ?? err);
     }
     return;
   }
-  userStates.set(userId, { step: "ctc_enter_links", ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 } });
+
+  // ── Set state + show prompt ───────────────────────────────────────────────
+  userStates.set(userId, {
+    step: "ctc_enter_links",
+    ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 },
+  });
+
   const ctcPrompt =
-    "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n" +
+    "🔍 <b>CTC Checker</b>\n\n" +
+    "Step 1: Send all WhatsApp group links, one per line:\n\n" +
     "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
+
+  const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
+
+  // Use reply() as PRIMARY to guarantee a new message is always delivered,
+  // even if the original menu message is too old to edit.  After sending,
+  // best-effort delete / edit the old menu message to reduce clutter.
   try {
-    await ctx.editMessageText(ctcPrompt, {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
-    });
-  } catch {
+    await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    // Clean up the old message (best-effort — ignore errors)
+    try { await ctx.deleteMessage(); } catch {}
+  } catch (err: any) {
+    console.error("[CTC] prompt reply failed:", err?.message ?? err);
+    // Last resort: try editing in-place
     try {
-      await ctx.reply(ctcPrompt, {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
-      });
-    } catch (err: any) {
-      console.error("[CTC] prompt failed:", err?.message ?? err);
+      await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    } catch (err2: any) {
+      console.error("[CTC] prompt edit also failed:", err2?.message ?? err2);
     }
   }
 });
+
+bot.callbackQuery("ctc_start_check", async (ctx) => {
+  try { await ctx.answerCallbackQuery(); } catch (e: any) {
+    console.error("[CTC-START] answerCallbackQuery failed:", e?.message ?? e);
+  }
+  const userId = ctx.from.id;
+  console.error(`[CTC-DEBUG] ctc_start_check reached for userId=${userId}`);
+
+  const state = userStates.get(userId);
+  if (!state?.ctcData) {
+    console.error(`[CTC-START] No state for userId=${userId}`);
+    try {
+      await ctx.reply("⚠️ Session expired. Please start CTC Checker again.", {
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+
+  const activePairs = state.ctcData.pairs.filter((p) => p.vcfContacts.length > 0);
+  if (!activePairs.length) {
+    try {
+      await ctx.editMessageText("⚠️ No VCF files provided. Please send VCF files first.");
+    } catch {
+      try { await ctx.reply("⚠️ No VCF files provided. Please send VCF files first."); } catch {}
+    }
+    return;
+  }
+
+  const chatId = ctx.callbackQuery.message?.chat.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+  if (!chatId || !msgId) {
+    console.error(`[CTC-START] No chatId/msgId for userId=${userId}`);
+    try { await ctx.reply("❌ Could not start check. Please try again."); } catch {}
+    return;
+  }
+
+  userStates.delete(userId);
+
+  try {
+    await ctx.editMessageText(
+      `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
+      { parse_mode: "HTML" }
+    );
+  } catch {
+    try {
+      await bot.api.sendMessage(
+        chatId,
+        `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }
+
+  void ctcCheckBackground(String(userId), activePairs, chatId, msgId);
+}
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
   await ctx.answerCallbackQuery();
