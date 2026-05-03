@@ -8855,6 +8855,16 @@ async function runGroupChatDualBackground(
   };
   cigSessions.set(userId, session);
 
+  // Persist to MongoDB so the session survives bot restarts.
+  void saveAutoChatSession({
+    userId,
+    autoUserId,
+    startedAt: Date.now(),
+    sessionType: "cig",
+    groups,
+    autoChatExpiresAt,
+  }).catch(() => {});
+
   // Protect BOTH WhatsApp sessions (primary + secondary) from idle and
   // memory-pressure eviction for the entire duration of this Chat In Group job.
   protectSessionFromEviction(primaryUserId);
@@ -8991,6 +9001,10 @@ async function runGroupChatDualBackground(
 
   session.running = false;
   session.nextDelayMs = 0;
+
+  // Remove from MongoDB — session is done (or stopped by user/admin/expiry).
+  void deleteAutoChatSession(userId).catch(() => {});
+
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
@@ -9198,6 +9212,17 @@ async function runChatFriendBackground(
   };
   acfSessions.set(userId, session);
 
+  // Persist to MongoDB so the session survives bot restarts.
+  void saveAutoChatSession({
+    userId,
+    autoUserId,
+    startedAt: Date.now(),
+    sessionType: "acf",
+    primaryJid,
+    autoJid,
+    autoChatExpiresAt,
+  }).catch(() => {});
+
   // Protect BOTH WhatsApp sessions (primary + secondary) from idle and
   // memory-pressure eviction for the entire duration of this Auto Chat
   // Friend job. If either socket gets closed, the loop silently fails
@@ -9315,6 +9340,10 @@ async function runChatFriendBackground(
 
   session.running = false;
   session.nextDelayMs = 0;
+
+  // Remove from MongoDB — session is done (or stopped by user/admin/expiry).
+  void deleteAutoChatSession(userId).catch(() => {});
+
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
@@ -9451,11 +9480,12 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
   void saveAutoChatSession({
     userId,
     autoUserId,
+    startedAt: Date.now(),
+    sessionType: "old",
     groupIds: cappedGroups.map((g) => g.id),
     message,
     delaySeconds,
     repeatCount,
-    startedAt: Date.now(),
   }).catch(() => {});
 
   // Protect the secondary WhatsApp session from idle / memory-pressure
@@ -12858,30 +12888,136 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
     const sessions = await loadAllAutoChatSessions();
     if (!sessions.length) return;
     console.log(`[AUTO_CHAT] Restoring ${sessions.length} autochat session(s) from MongoDB after restart...`);
+
     for (const s of sessions) {
       try {
         const telegramIdStr = String(s.userId);
-        // Try to reconnect the auto WA session.
-        const autoSessionId = s.autoUserId;
-        try { await ensureSessionLoaded(autoSessionId); } catch {}
-        if (!isAutoConnected(telegramIdStr)) {
-          console.log(`[AUTO_CHAT] Skipping restore for userId=${s.userId}: auto WA not connected`);
+        const primaryUserId = telegramIdStr;
+        const autoUserId = s.autoUserId;
+        const sessionType = s.sessionType ?? "old";
+
+        // ── Step 1: Check if expiry already passed ──────────────────────────
+        if (s.autoChatExpiresAt && Date.now() >= s.autoChatExpiresAt) {
+          console.log(`[AUTO_CHAT] Session for userId=${s.userId} expired — skipping restore`);
           await deleteAutoChatSession(s.userId).catch(() => {});
-          // Notify the user so they know to restart manually.
-          await bot.api.sendMessage(s.userId,
-            "⚠️ <b>Auto Chat Resume Failed</b>\n\nServer restart ke baad Auto Chat resume karne ki koshish ki, lekin Auto Chat WhatsApp reconnect nahi hua.\n\nKripya Auto Chat dobara shuru karein.",
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
-          ).catch(() => {});
+          try {
+            await bot.api.sendMessage(s.userId,
+              "⏰ <b>Auto Chat Expired</b>\n\n" +
+              "Your Auto Chat session had expired by the time the bot restarted.\n" +
+              "Start a new Auto Chat session from the menu.",
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
+            );
+          } catch {}
           continue;
         }
-        const statusMsg = await bot.api.sendMessage(s.userId,
-          "♻️ <b>Auto Chat Restored!</b>\n\nServer restart ke baad Auto Chat automatically resume ho gaya hai.\n\n⏳ Sending messages...",
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "auto_chat_stop") }
-        ).catch(() => null);
-        if (!statusMsg) continue;
-        const groups = s.groupIds.map((id) => ({ id, subject: "" }));
-        void runAutoChatBackground(s.userId, s.autoUserId, s.userId, statusMsg.message_id, groups, s.message, s.delaySeconds, s.repeatCount);
-        console.log(`[AUTO_CHAT] Restored session for userId=${s.userId} (${s.groupIds.length} groups)`);
+
+        // ── Step 2: Reconnect both WhatsApp sessions ─────────────────────────
+        // Try to load the primary session (the user's main WA account).
+        try { await ensureSessionLoaded(primaryUserId); } catch {}
+        // Try to load the auto session (the secondary WA account).
+        try { await ensureSessionLoaded(autoUserId); } catch {}
+
+        // Wait up to 30s for the primary WA to connect.
+        let primaryOk = isConnected(primaryUserId);
+        if (!primaryOk) {
+          primaryOk = await waitForWhatsAppConnected(primaryUserId, { timeoutMs: 30_000, pollMs: 1_000 }).catch(() => false);
+        }
+
+        // Wait up to 30s for the auto WA to connect.
+        let autoOk = isAutoConnected(telegramIdStr);
+        if (!autoOk) {
+          autoOk = await waitForWhatsAppConnected(autoUserId, { timeoutMs: 30_000, pollMs: 1_000 }).catch(() => false);
+        }
+
+        // For ACF both must be connected; for CIG we need auto at minimum.
+        const requiredBoth = sessionType === "acf";
+        if (requiredBoth && (!primaryOk || !autoOk)) {
+          console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: WA not connected (primary=${primaryOk}, auto=${autoOk})`);
+          await deleteAutoChatSession(s.userId).catch(() => {});
+          try {
+            await bot.api.sendMessage(s.userId,
+              "⚠️ <b>Auto Chat Resume Failed</b>\n\n" +
+              "After the bot restarted, we tried to reconnect your WhatsApp accounts but one or both could not connect.\n\n" +
+              "Please restart Auto Chat manually from the menu.",
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
+            );
+          } catch {}
+          continue;
+        }
+        if (!autoOk) {
+          console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: auto WA not connected`);
+          await deleteAutoChatSession(s.userId).catch(() => {});
+          try {
+            await bot.api.sendMessage(s.userId,
+              "⚠️ <b>Auto Chat Resume Failed</b>\n\n" +
+              "After the bot restarted, we tried to reconnect your Auto WhatsApp account but it could not connect.\n\n" +
+              "Please restart Auto Chat manually from the menu.",
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
+            );
+          } catch {}
+          continue;
+        }
+
+        // ── Step 3: Resume the correct session type ──────────────────────────
+        if (sessionType === "cig") {
+          // ── Chat In Group restore ──────────────────────────────────────────
+          const groups = (s.groups && s.groups.length > 0)
+            ? s.groups
+            : (s.groupIds ?? []).map((id) => ({ id, subject: "" }));
+          if (!groups.length) {
+            await deleteAutoChatSession(s.userId).catch(() => {});
+            continue;
+          }
+          const expiryLabel = s.autoChatExpiresAt
+            ? `\n⏳ Time remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
+            : "";
+          const statusMsg = await bot.api.sendMessage(s.userId,
+            "♻️ <b>Chat In Group Restored!</b>\n\n" +
+            "The bot restarted and your Chat In Group session has been automatically resumed.\n" +
+            `📋 Groups: <b>${groups.length}</b>${expiryLabel}\n\n` +
+            "⏳ Resuming messages...",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "cig_stop_btn") }
+          ).catch(() => null);
+          if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
+          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt);
+          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups)`);
+
+        } else if (sessionType === "acf") {
+          // ── Chat Friend restore ────────────────────────────────────────────
+          if (!s.primaryJid || !s.autoJid) {
+            await deleteAutoChatSession(s.userId).catch(() => {});
+            continue;
+          }
+          const expiryLabel = s.autoChatExpiresAt
+            ? `\n⏳ Time remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
+            : "";
+          const statusMsg = await bot.api.sendMessage(s.userId,
+            "♻️ <b>Chat Friend Restored!</b>\n\n" +
+            "The bot restarted and your Chat Friend session has been automatically resumed." +
+            expiryLabel + "\n\n" +
+            "⏳ Resuming messages...",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "acf_stop_btn") }
+          ).catch(() => null);
+          if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
+          void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt);
+          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId}`);
+
+        } else {
+          // ── Legacy "old" Auto Chat restore ────────────────────────────────
+          const groupIds = s.groupIds ?? [];
+          if (!groupIds.length) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
+          const statusMsg = await bot.api.sendMessage(s.userId,
+            "♻️ <b>Auto Chat Restored!</b>\n\n" +
+            "The bot restarted and your Auto Chat session has been automatically resumed.\n\n" +
+            "⏳ Sending messages...",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "auto_chat_stop") }
+          ).catch(() => null);
+          if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
+          const groups = groupIds.map((id) => ({ id, subject: "" }));
+          void runAutoChatBackground(s.userId, autoUserId, s.userId, statusMsg.message_id, groups, s.message ?? "", s.delaySeconds ?? 60, s.repeatCount ?? 0);
+          console.log(`[AUTO_CHAT] Restored legacy session for userId=${s.userId} (${groupIds.length} groups)`);
+        }
+
       } catch (err: any) {
         console.error(`[AUTO_CHAT] Failed to restore session for userId=${s.userId}:`, err?.message);
         await deleteAutoChatSession(s.userId).catch(() => {});
@@ -12928,7 +13064,9 @@ export async function startBot() {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
     // After settings are loaded, restore any persisted autochat sessions from MongoDB.
     // Small delay to let WhatsApp sessions reconnect first.
-    setTimeout(() => { void restorePersistedAutoChatSessions(); }, 15_000);
+    // 30s delay — gives WhatsApp sessions enough time to reconnect from
+    // Mongo auth state before we try to resume CIG / ACF / old sessions.
+    setTimeout(() => { void restorePersistedAutoChatSessions(); }, 30_000);
   });
 
   bot.catch((err) => {

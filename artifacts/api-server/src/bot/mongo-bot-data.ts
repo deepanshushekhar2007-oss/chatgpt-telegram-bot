@@ -464,11 +464,24 @@ export async function deleteRedeemCode(
 export interface PersistedAutoChatSession {
   userId: number;
   autoUserId: string;
-  groupIds: string[];
-  message: string;
-  delaySeconds: number;
-  repeatCount: number;
   startedAt: number;
+  // "old" = legacy runAutoChatBackground, "cig" = Chat In Group, "acf" = Chat Friend
+  sessionType: "old" | "cig" | "acf";
+
+  // ── old / cig shared ──────────────────────────────────────────────────────
+  groupIds?: string[];   // old: group ids to message
+  message?: string;
+  delaySeconds?: number;
+  repeatCount?: number;
+
+  // ── cig-specific ──────────────────────────────────────────────────────────
+  groups?: Array<{ id: string; subject: string }>; // full groups with subjects
+  autoChatExpiresAt?: number;
+
+  // ── acf-specific ──────────────────────────────────────────────────────────
+  primaryJid?: string;
+  autoJid?: string;
+  // autoChatExpiresAt shared above
 }
 
 export async function saveAutoChatSession(session: PersistedAutoChatSession): Promise<void> {
@@ -492,11 +505,16 @@ export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSessio
     return docs.map((d) => ({
       userId: d["userId"] as number,
       autoUserId: d["autoUserId"] as string,
-      groupIds: (d["groupIds"] || []) as string[],
-      message: d["message"] as string,
-      delaySeconds: d["delaySeconds"] as number,
-      repeatCount: d["repeatCount"] as number,
       startedAt: d["startedAt"] as number,
+      sessionType: (d["sessionType"] as "old" | "cig" | "acf") ?? "old",
+      groupIds: (d["groupIds"] || []) as string[],
+      message: d["message"] as string | undefined,
+      delaySeconds: d["delaySeconds"] as number | undefined,
+      repeatCount: d["repeatCount"] as number | undefined,
+      groups: d["groups"] as Array<{ id: string; subject: string }> | undefined,
+      autoChatExpiresAt: d["autoChatExpiresAt"] as number | undefined,
+      primaryJid: d["primaryJid"] as string | undefined,
+      autoJid: d["autoJid"] as string | undefined,
     }));
   } catch {
     return [];
