@@ -72,7 +72,7 @@ import {
   deleteRedeemCode,
   AccessState,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
   Language,
   LANGUAGES,
@@ -2792,12 +2792,12 @@ bot.command("ws", async (ctx) => {
   const adminId = ctx.from!.id;
   const args = (ctx.message?.text || "").split(/\s+/).slice(1);
   const stateKey = `admin_ws_original_${adminId}`;
+  const storedSessions = await listStoredWhatsAppSessions();
 
   if (!args.length) {
-    const activeIds = [...getActiveSessionUserIds()];
-    if (!activeIds.length) {
+    if (!storedSessions.length) {
       await ctx.reply(
-        "🔀 <b>WhatsApp Sessions</b>\n\nNo active sessions found.\n\n" +
+        "🔀 <b>WhatsApp Sessions</b>\n\nNo saved sessions found.\n\n" +
           "Usage:\n" +
           "<code>/ws [userId]</code> — switch to a user's WhatsApp\n" +
           "<code>/ws off</code> — switch back to your own WhatsApp",
@@ -2806,10 +2806,11 @@ bot.command("ws", async (ctx) => {
       return;
     }
 
-    const lines = await Promise.all(activeIds.map(async (uid) => {
-      const phone = getConnectedWhatsAppNumber(uid) || "(unknown)";
-      return `• <code>${uid}</code> — <code>${esc(phone)}</code>`;
-    }));
+    const activeIds = getActiveSessionUserIds();
+    const lines = storedSessions.map((s) => {
+      const live = activeIds.has(s.userId) ? "🟢 live" : "⚪ offline";
+      return `• <code>${s.userId}</code> — <code>${esc(s.phoneNumber || "(unknown)")}</code> — ${live}`;
+    });
 
     await ctx.reply(
       "🔀 <b>WhatsApp Sessions</b>\n\n" +
@@ -2854,8 +2855,8 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  const targetPhone = getConnectedWhatsAppNumber(targetId);
-  if (!targetPhone && !(await ensureSessionLoaded(targetId))) {
+  const stored = storedSessions.find((s) => s.userId === targetId);
+  if (!stored) {
     await ctx.reply(`⚠️ No saved WhatsApp session found for <code>${targetId}</code>.`, { parse_mode: "HTML" });
     return;
   }
@@ -2864,12 +2865,15 @@ bot.command("ws", async (ctx) => {
   protectSessionFromEviction(targetId);
   protectSessionFromEviction(String(adminId));
   const switched = await ensureSessionLoaded(targetId);
+  if (!switched && stored.phoneNumber) {
+    await connectWhatsApp(targetId, stored.phoneNumber.replace(/^\+/, ""), () => {}, () => {}, () => {});
+  }
 
   await ctx.reply(
-    switched
+    (switched || getActiveSessionUserIds().has(targetId))
       ? "✅ <b>Switched WhatsApp session</b>\n\n" +
         `👤 <b>User:</b> <code>${targetId}</code>\n` +
-        `📱 <b>Phone:</b> <code>${esc(getConnectedWhatsAppNumber(targetId) || targetPhone || "(unknown)")}</code>\n\n` +
+        `📱 <b>Phone:</b> <code>${esc(stored.phoneNumber || "(unknown)")}</code>\n\n` +
         "Use <code>/ws off</code> to return to your own session."
       : `⚠️ Could not switch to <code>${targetId}</code>.`,
     { parse_mode: "HTML" }
