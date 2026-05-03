@@ -477,6 +477,8 @@ export interface PersistedAutoChatSession {
   // ── cig-specific ──────────────────────────────────────────────────────────
   groups?: Array<{ id: string; subject: string }>; // full groups with subjects
   autoChatExpiresAt?: number;
+  currentGroupIndex?: number; // which group was active when bot restarted
+  messageIndex?: number;      // how many messages had been sent (for rotation)
 
   // ── acf-specific ──────────────────────────────────────────────────────────
   primaryJid?: string;
@@ -513,6 +515,8 @@ export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSessio
       repeatCount: d["repeatCount"] as number | undefined,
       groups: d["groups"] as Array<{ id: string; subject: string }> | undefined,
       autoChatExpiresAt: d["autoChatExpiresAt"] as number | undefined,
+      currentGroupIndex: d["currentGroupIndex"] as number | undefined,
+      messageIndex: d["messageIndex"] as number | undefined,
       primaryJid: d["primaryJid"] as string | undefined,
       autoJid: d["autoJid"] as string | undefined,
     }));

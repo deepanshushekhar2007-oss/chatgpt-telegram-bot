@@ -75,7 +75,7 @@ import {
   deleteAutoChatSession,
   loadAllAutoChatSessions,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
   Language,
   LANGUAGES,
@@ -8833,7 +8833,9 @@ async function runGroupChatDualBackground(
   chatId: number,
   msgId: number,
   groups: Array<{ id: string; subject: string }>,
-  autoChatExpiresAt?: number
+  autoChatExpiresAt?: number,
+  startGroupIndex = 0,
+  startMessageIndex = 0
 ): Promise<void> {
   const session: CigSession = {
     running: true,
@@ -8847,10 +8849,10 @@ async function runGroupChatDualBackground(
     sentByAccount1: 0,
     sentByAccount2: 0,
     botMode: "both",
-    currentGroupIndex: 0,
+    currentGroupIndex: startGroupIndex,
     cycle: 1,
     nextDelayMs: 0,
-    rotationIndex: 0,
+    rotationIndex: startMessageIndex,
     autoChatExpiresAt,
   };
   cigSessions.set(userId, session);
@@ -8990,6 +8992,18 @@ async function runGroupChatDualBackground(
       // ── Rotate to next group ───────────────────────────────────────────
       groupIndex = (groupIndex + 1) % groups.length;
       session.currentGroupIndex = groupIndex;
+
+      // Save progress to MongoDB so restart can resume from this group.
+      void saveAutoChatSession({
+        userId,
+        autoUserId,
+        startedAt: Date.now(),
+        sessionType: "cig",
+        groups,
+        autoChatExpiresAt,
+        currentGroupIndex: groupIndex,
+        messageIndex: messageIndex,
+      }).catch(() => {});
     }
   } catch (err: any) {
     console.error(`[ACIG][${userId}] Error:`, err?.message);
@@ -12883,6 +12897,30 @@ function splitMessage(msg: string, maxLen: number): string[] {
   return parts;
 }
 
+/**
+ * On bot startup, automatically reconnect all WhatsApp auto-sessions
+ * (userId_auto) that were previously saved — so users don't need to
+ * re-enter their number after a bot restart.
+ */
+async function restoreAutoWaSessionsOnStartup(): Promise<void> {
+  try {
+    const allSessions = await listStoredWhatsAppSessions();
+    const autoSessions = allSessions.filter((s) => s.userId.endsWith("_auto"));
+    if (!autoSessions.length) return;
+    console.log(`[AUTO_WA] Reconnecting ${autoSessions.length} auto WhatsApp session(s) on startup...`);
+    for (const s of autoSessions) {
+      try {
+        await ensureSessionLoaded(s.userId);
+        console.log(`[AUTO_WA] Loaded auto session: ${s.userId} (${s.phoneNumber})`);
+      } catch (err: any) {
+        console.error(`[AUTO_WA] Failed to load auto session ${s.userId}:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error("[AUTO_WA] restoreAutoWaSessionsOnStartup error:", err?.message);
+  }
+}
+
 async function restorePersistedAutoChatSessions(): Promise<void> {
   try {
     const sessions = await loadAllAutoChatSessions();
@@ -12979,7 +13017,7 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "cig_stop_btn") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt);
+          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0);
           console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups)`);
 
         } else if (sessionType === "acf") {
@@ -13060,10 +13098,14 @@ export async function startBot() {
     });
   });
 
+  // Reconnect all previously saved auto-WA sessions (userId_auto) in background
+  // so users don't need to re-enter their number after a bot restart.
+  // 10s delay — small wait so MongoDB connection is stable.
+  setTimeout(() => { void restoreAutoWaSessionsOnStartup(); }, 10_000);
+
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
     // After settings are loaded, restore any persisted autochat sessions from MongoDB.
-    // Small delay to let WhatsApp sessions reconnect first.
     // 30s delay — gives WhatsApp sessions enough time to reconnect from
     // Mongo auth state before we try to resume CIG / ACF / old sessions.
     setTimeout(() => { void restorePersistedAutoChatSessions(); }, 30_000);
