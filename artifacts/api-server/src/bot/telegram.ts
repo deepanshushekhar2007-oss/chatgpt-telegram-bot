@@ -4483,9 +4483,9 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   });
 
   const ctcPrompt =
-    "🔍 <b>CTC Checker</b>\n\n" +
+    "🔍 CTC Checker\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "&lt;code&gt;https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456&lt;/code&gt;";
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
