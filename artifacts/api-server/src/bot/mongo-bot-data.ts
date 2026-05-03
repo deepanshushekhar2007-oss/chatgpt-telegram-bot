@@ -16,6 +16,8 @@ interface BotData {
   totalUsers: number[];
   autoChatEnabled: boolean;
   autoChatAccessList: number[];
+  // userId (string) → expiry timestamp in ms. Absent = unlimited access.
+  autoChatAccessExpiry: Record<string, number>;
   // ── Referral Mode ────────────────────────────────────────────────────────
   // When referMode is ON:
   //   - Every new user automatically gets a 24-hour free trial (after they
@@ -52,6 +54,7 @@ const DEFAULT_DATA: BotData = {
   totalUsers: [],
   autoChatEnabled: true,
   autoChatAccessList: [],
+  autoChatAccessExpiry: {},
   referMode: false,
   freeTrials: {},
   referredBy: {},
@@ -71,6 +74,7 @@ export async function loadBotData(): Promise<BotData> {
         totalUsers: doc.totalUsers ?? [],
         autoChatEnabled: doc.autoChatEnabled ?? true,
         autoChatAccessList: doc.autoChatAccessList ?? [],
+        autoChatAccessExpiry: doc.autoChatAccessExpiry ?? {},
         referMode: doc.referMode ?? false,
         freeTrials: doc.freeTrials ?? {},
         referredBy: doc.referredBy ?? {},
@@ -97,6 +101,7 @@ export async function saveBotData(data: BotData): Promise<void> {
           totalUsers: data.totalUsers,
           autoChatEnabled: data.autoChatEnabled,
           autoChatAccessList: data.autoChatAccessList,
+          autoChatAccessExpiry: data.autoChatAccessExpiry,
           referMode: data.referMode,
           freeTrials: data.freeTrials,
           referredBy: data.referredBy,

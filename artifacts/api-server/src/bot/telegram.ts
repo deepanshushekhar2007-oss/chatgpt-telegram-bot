@@ -1323,11 +1323,17 @@ async function safeBackgroundEdit(
 
 let autoChatGlobalEnabled: boolean = true;
 const autoChatAccessSet: Set<number> = new Set();
+// userId → expiry timestamp in ms. Not present = unlimited.
+const autoChatAccessExpiry: Map<number, number> = new Map();
 
 function canUserSeeAutoChat(userId: number): boolean {
   if (isAdmin(userId)) return true;
   if (autoChatGlobalEnabled) return true;
-  return autoChatAccessSet.has(userId);
+  if (!autoChatAccessSet.has(userId)) return false;
+  // If the user has a time-limited autochat grant, check expiry
+  const exp = autoChatAccessExpiry.get(userId);
+  if (exp !== undefined && Date.now() > exp) return false;
+  return true;
 }
 
 async function syncAutoChatSettings(): Promise<void> {
@@ -1335,8 +1341,12 @@ async function syncAutoChatSettings(): Promise<void> {
     const data = await loadBotData();
     autoChatGlobalEnabled = data.autoChatEnabled ?? true;
     autoChatAccessSet.clear();
+    autoChatAccessExpiry.clear();
     for (const id of data.autoChatAccessList ?? []) {
       autoChatAccessSet.add(id);
+    }
+    for (const [k, v] of Object.entries(data.autoChatAccessExpiry ?? {})) {
+      autoChatAccessExpiry.set(Number(k), v);
     }
   } catch (err: any) {
     console.error("[AutoChat] syncAutoChatSettings error:", err?.message);
@@ -2798,10 +2808,11 @@ bot.command("admin", async (ctx) => {
     "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
     "🔴 <code>/refermode off</code> — Disable refer mode (back to normal)\n\n" +
     "🤖 <b>Auto Chat Controls:</b>\n" +
-    "🟢 <code>/autochat on</code> — Auto Chat for all users ON\n" +
-    "🔴 <code>/autochat off</code> — Auto Chat for all users OFF\n" +
-    "✅ <code>/accessautochat [id]</code> — Auto Chat ON for specific user\n" +
-    "❌ <code>/revokeautochat [id]</code> — Auto Chat OFF for specific user\n\n" +
+    "🟢 <code>/autochat on</code> — Auto Chat ON for all users\n" +
+    "🔴 <code>/autochat off</code> — Auto Chat OFF for all users\n" +
+    "✅ <code>/accessautochat [id]</code> — Grant unlimited Auto Chat access\n" +
+    "✅ <code>/accessautochat [id] [days]</code> — Grant time-limited Auto Chat access\n" +
+    "❌ <code>/revokeautochat [id]</code> — Revoke Auto Chat access\n\n" +
     "🎫 <b>Redeem Codes:</b>\n" +
     "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
     "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
@@ -2883,15 +2894,74 @@ bot.command("autochat", async (ctx) => {
 
 bot.command("accessautochat", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
-  const id = parseInt((ctx.message?.text || "").split(/\s+/)[1]);
-  if (isNaN(id)) { await ctx.reply("❓ Usage: <code>/accessautochat [user_id]</code>", { parse_mode: "HTML" }); return; }
+  const parts = (ctx.message?.text || "").split(/\s+/);
+  const id = parseInt(parts[1]);
+  const days = parts[2] ? parseInt(parts[2]) : NaN;
+
+  if (isNaN(id)) {
+    await ctx.reply(
+      "❓ <b>Usage:</b>\n\n" +
+      "<code>/accessautochat [user_id]</code> — Unlimited Auto Chat access\n" +
+      "<code>/accessautochat [user_id] [days]</code> — Time-limited Auto Chat access\n\n" +
+      "<b>Examples:</b>\n" +
+      "<code>/accessautochat 123456789</code> — Unlimited\n" +
+      "<code>/accessautochat 123456789 7</code> — 7 days",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
   const data = await loadBotData();
+
+  // Add to access list if not already there
   if (!data.autoChatAccessList.includes(id)) {
     data.autoChatAccessList.push(id);
-    await saveBotData(data);
-    autoChatAccessSet.add(id);
   }
-  await ctx.reply(`✅ <b>Auto Chat Access Granted!</b>\n\n👤 User: <code>${id}</code>\n🤖 Is user ko ab Auto Chat button dikhega (chahe global OFF ho).`, { parse_mode: "HTML" });
+
+  // Set or clear expiry
+  let expiresAt: number | undefined;
+  if (!isNaN(days) && days > 0) {
+    expiresAt = Date.now() + days * 24 * 60 * 60 * 1000;
+    data.autoChatAccessExpiry[String(id)] = expiresAt;
+    autoChatAccessExpiry.set(id, expiresAt);
+  } else {
+    // No days = unlimited → remove any existing expiry
+    delete data.autoChatAccessExpiry[String(id)];
+    autoChatAccessExpiry.delete(id);
+  }
+
+  await saveBotData(data);
+  autoChatAccessSet.add(id);
+
+  const durationText = expiresAt
+    ? `⏳ Duration: <b>${days} day${days === 1 ? "" : "s"}</b>\n📅 Expires: <b>${new Date(expiresAt).toUTCString()}</b>`
+    : "♾️ Duration: <b>Unlimited</b>";
+
+  // Confirm to admin
+  await ctx.reply(
+    `✅ <b>Auto Chat Access Granted!</b>\n\n` +
+    `👤 User: <code>${id}</code>\n` +
+    `${durationText}\n\n` +
+    `🤖 This user can now access the Auto Chat feature.`,
+    { parse_mode: "HTML" }
+  );
+
+  // Notify the user
+  try {
+    await bot.api.sendMessage(
+      id,
+      "🎉 <b>Auto Chat Feature Activated!</b>\n\n" +
+      "The admin has granted you access to the <b>Auto Chat</b> feature.\n\n" +
+      `${durationText}\n\n` +
+      "You can now use:\n" +
+      "• 👥 <b>Chat In Group</b> — Auto send messages in WhatsApp groups\n" +
+      "• 👫 <b>Chat Friend</b> — Auto conversation between two accounts\n\n" +
+      "Open the bot menu and tap <b>🤖 Auto Chat</b> to get started!",
+      { parse_mode: "HTML" }
+    );
+  } catch {
+    // User may have blocked the bot — ignore silently
+  }
 });
 
 bot.command("revokeautochat", async (ctx) => {
@@ -2900,8 +2970,10 @@ bot.command("revokeautochat", async (ctx) => {
   if (isNaN(id)) { await ctx.reply("❓ Usage: <code>/revokeautochat [user_id]</code>", { parse_mode: "HTML" }); return; }
   const data = await loadBotData();
   data.autoChatAccessList = data.autoChatAccessList.filter((u) => u !== id);
+  delete data.autoChatAccessExpiry[String(id)];
   await saveBotData(data);
   autoChatAccessSet.delete(id);
+  autoChatAccessExpiry.delete(id);
 
   // Stop any running CIG session for this user immediately
   const cigSession = cigSessions.get(id);
@@ -3286,14 +3358,23 @@ bot.command("status", async (ctx) => {
 
   const autoChatEnabled = data.autoChatEnabled ?? true;
   const autoChatAccessList = data.autoChatAccessList ?? [];
+  const autoChatExpiry = data.autoChatAccessExpiry ?? {};
   let autoChatAccessText = autoChatAccessList.length
-    ? autoChatAccessList.map((id) => `  🤖 <code>${id}</code>`).join("\n") + "\n"
+    ? autoChatAccessList.map((id) => {
+        const exp = autoChatExpiry[String(id)];
+        if (!exp) return `  🤖 <code>${id}</code> — ♾️ Unlimited`;
+        const expired = Date.now() > exp;
+        const label = expired
+          ? `❌ Expired`
+          : `✅ Expires ${new Date(exp).toUTCString()}`;
+        return `  🤖 <code>${id}</code> — ${label}`;
+      }).join("\n") + "\n"
     : "  None\n";
 
   await ctx.reply(
     "📊 <b>Bot Status</b>\n\n" +
     `🔒 <b>Subscription Mode:</b> ${data.subscriptionMode ? "ON 🟢" : "OFF 🔴"}\n` +
-    `🤖 <b>Auto Chat:</b> ${autoChatEnabled ? "ON 🟢 (Sabhi users ke liye)" : "OFF 🔴 (Sirf selected users ke liye)"}\n` +
+    `🤖 <b>Auto Chat:</b> ${autoChatEnabled ? "ON 🟢 (All users)" : "OFF 🔴 (Selected users only)"}\n` +
     `👑 <b>Owner:</b> ${OWNER_USERNAME}\n` +
     `👥 <b>Total Users:</b> ${data.totalUsers.length}\n\n` +
     `✅ <b>Access List (${Object.keys(data.accessList).length}):</b>\n${accessText || "  None\n"}\n` +
