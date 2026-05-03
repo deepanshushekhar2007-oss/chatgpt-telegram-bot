@@ -71,15 +71,8 @@ import {
   listAllRedeemCodes,
   deleteRedeemCode,
   AccessState,
-  getButtonColors,
-  setButtonColor,
-  resetAllButtonColors,
-  saveActiveCigSession,
-  deleteActiveCigSession,
-  loadActiveCigSessions,
-  PersistentCigSession,
 } from "./mongo-bot-data";
-import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
+import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
   Language,
   LANGUAGES,
@@ -1185,50 +1178,6 @@ const cigSessions: Map<number, CigSession> = new Map();
 const acfSessions: Map<number, AcfSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
 
-// ── Admin WA session borrowing ───────────────────────────────────────────────
-// Maps adminTelegramId -> the userId whose WA session admin has borrowed.
-// When set, all WA operations from admin use the borrowed user's session.
-const adminBorrowedWaSession: Map<number, string> = new Map();
-
-// ── Button color cache ───────────────────────────────────────────────────────
-// Loaded from DB on startup and kept in-memory for fast mainMenu() renders.
-let cachedButtonColors: Record<string, string> = {};
-
-// ── Button Definitions ───────────────────────────────────────────────────────
-const MENU_BUTTON_DEFS: Array<{ id: string; defaultLabel: string }> = [
-  { id: "connect_wa",        defaultLabel: "📱 Connect WhatsApp" },
-  { id: "create_groups",     defaultLabel: "👥 Create Groups" },
-  { id: "join_groups",       defaultLabel: "🔗 Join Groups" },
-  { id: "ctc_checker",       defaultLabel: "🔍 CTC Checker" },
-  { id: "get_link",          defaultLabel: "🔗 Get Link" },
-  { id: "leave_group",       defaultLabel: "🚪 Leave Group" },
-  { id: "remove_members",    defaultLabel: "🗑️ Remove Members" },
-  { id: "make_admin",        defaultLabel: "👑 Make Admin" },
-  { id: "approval",          defaultLabel: "✅ Approval" },
-  { id: "pending_list",      defaultLabel: "📋 Get Pending List" },
-  { id: "add_members",       defaultLabel: "➕ Add Members" },
-  { id: "edit_settings",     defaultLabel: "⚙️ Edit Settings" },
-  { id: "change_group_name", defaultLabel: "🏷️ Change Name" },
-  { id: "auto_accepter",     defaultLabel: "🛡️ Auto Accepter" },
-  { id: "auto_chat_menu",    defaultLabel: "🤖 Auto Chat" },
-  { id: "session_refresh",   defaultLabel: "🔄 Session Refresh" },
-  { id: "disconnect_wa",     defaultLabel: "🔌 Disconnect" },
-];
-
-// Builds a raw Telegram InlineKeyboardButton with the native `color` field.
-// Telegram supports "primary" (blue), "success" (green), "danger" (red),
-// and "default" (standard grey). No emoji prefix is added — only the actual
-// button background colour changes for clients that support it.
-function menuBtn(text: string, cbData: string): Record<string, any> {
-  const colorClass = cachedButtonColors[cbData];
-  const btn: Record<string, any> = { text, callback_data: cbData };
-  if (colorClass && colorClass !== "default") btn.color = colorClass;
-  return btn;
-}
-
-// ── Admin pending button-color selection ─────────────────────────────────────
-const adminButtonColorPending: Map<number, string> = new Map(); // adminId -> buttonId being edited
-
 // ─────────────────────────────────────────────────────────────────────────────
 // User-activity tracking (in-memory). Drives three behaviours:
 //   1. The "✅ WhatsApp connected +XXX" celebration message on /start is only
@@ -1357,57 +1306,8 @@ async function syncAutoChatSettings(): Promise<void> {
     for (const id of data.autoChatAccessList ?? []) {
       autoChatAccessSet.add(id);
     }
-    // Sync button colors cache
-    cachedButtonColors = data.buttonColors ?? {};
   } catch (err: any) {
     console.error("[AutoChat] syncAutoChatSettings error:", err?.message);
-  }
-}
-
-// ── Restore active CIG sessions after Render restart ─────────────────────────
-// Called once on startup after WA sessions are loaded.
-async function restoreActiveCigSessions(): Promise<void> {
-  const sessions = await loadActiveCigSessions();
-  if (!sessions.length) return;
-  console.log(`[CIG][RESTORE] Found ${sessions.length} persisted CIG session(s) — restoring...`);
-
-  for (const saved of sessions) {
-    const userId = Number(saved.userId);
-    if (isNaN(userId)) continue;
-    // Skip if already running (shouldn't happen but guard it)
-    if (cigSessions.has(userId)) continue;
-
-    void (async () => {
-      try {
-        // Wait up to 45s for both WA accounts to be ready
-        await waitForWhatsAppConnected(saved.primaryUserId, { timeoutMs: 45_000, pollMs: 500 });
-        await waitForWhatsAppConnected(saved.autoUserId, { timeoutMs: 45_000, pollMs: 500 });
-
-        // Send a fresh message to the user's chat
-        const sentMsg = await bot.api.sendMessage(
-          saved.chatId,
-          "♻️ <b>Auto Chat (CIG) resumed</b> after server restart!\n\n" +
-          `📋 Groups: ${saved.groups.length}\n` +
-          `⏱️ Started: ${new Date(saved.startedAt).toLocaleString()}`,
-          { parse_mode: "HTML" }
-        );
-
-        // Re-launch the loop with the fresh message ID
-        void runGroupChatDualBackground(
-          userId,
-          saved.primaryUserId,
-          saved.autoUserId,
-          saved.chatId,
-          sentMsg.message_id,
-          saved.groups
-        );
-        console.log(`[CIG][RESTORE] Restored CIG session for user ${userId}`);
-      } catch (err: any) {
-        console.error(`[CIG][RESTORE] Failed to restore session for ${userId}:`, err?.message);
-        // Clean up the stale DB entry so it doesn't keep retrying
-        await deleteActiveCigSession(saved.userId);
-      }
-    })();
   }
 }
 
@@ -1797,37 +1697,29 @@ async function startQrPairing(ctx: any, userId: number): Promise<void> {
   );
 }
 
-// Returns the main menu as a raw inline keyboard so that the native Telegram
-// `color` field can be included on each button. Grammy passes unknown fields
-// through to the Bot API as-is, so Telegram clients that support coloured
-// buttons will render them with the correct background colour.
-function mainMenu(userId?: number): { inline_keyboard: any[][] } {
+function mainMenu(userId?: number): InlineKeyboard {
   const connected = userId !== undefined && isConnected(String(userId));
-  const rows: any[][] = [];
-
+  const kb = new InlineKeyboard();
   if (!connected) {
-    rows.push([{ text: "📱 Connect WhatsApp", callback_data: "connect_wa" }]);
+    kb.text("📱 Connect WhatsApp", "connect_wa").row();
   }
-
-  rows.push([menuBtn("👥 Create Groups", "create_groups"), menuBtn("🔗 Join Groups", "join_groups")]);
-  rows.push([menuBtn("🔍 CTC Checker", "ctc_checker"),    menuBtn("🔗 Get Link", "get_link")]);
-  rows.push([menuBtn("🚪 Leave Group", "leave_group"),     menuBtn("🗑️ Remove Members", "remove_members")]);
-  rows.push([menuBtn("👑 Make Admin", "make_admin"),       menuBtn("✅ Approval", "approval")]);
-  rows.push([menuBtn("📋 Get Pending List", "pending_list"), menuBtn("➕ Add Members", "add_members")]);
-  rows.push([menuBtn("⚙️ Edit Settings", "edit_settings"), menuBtn("🏷️ Change Name", "change_group_name")]);
-  rows.push([menuBtn("🛡️ Auto Accepter", "auto_accepter")]);
-
+  kb
+    .text("👥 Create Groups", "create_groups").text("🔗 Join Groups", "join_groups").row()
+    .text("🔍 CTC Checker", "ctc_checker").text("🔗 Get Link", "get_link").row()
+    .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
+    .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
+    .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
+    .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
+    .text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
-    rows.push([menuBtn("🤖 Auto Chat", "auto_chat_menu")]);
+    kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
-
   if (connected) {
-    rows.push([menuBtn("🔄 Session Refresh", "session_refresh"), menuBtn("🔌 Disconnect", "disconnect_wa")]);
+    kb.text("🔄 Session Refresh", "session_refresh").text("🔌 Disconnect", "disconnect_wa");
   } else {
-    rows.push([menuBtn("🔌 Disconnect", "disconnect_wa")]);
+    kb.text("🔌 Disconnect", "disconnect_wa");
   }
-
-  return { inline_keyboard: rows };
+  return kb;
 }
 
 bot.callbackQuery("check_joined", async (ctx) => {
@@ -2882,302 +2774,10 @@ bot.command("admin", async (ctx) => {
     "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
     "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
     "📋 <code>/redeem list</code> — List all codes with live status\n" +
-    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code\n\n" +
-    "🎨 <b>Button Colours:</b>\n" +
-    "🎨 <code>/button colour</code> — Change menu button colours (all users)\n\n" +
-    "📱 <b>WhatsApp Sessions (Admin):</b>\n" +
-    "📋 <code>/ws</code> — List all connected WA sessions\n" +
-    "🔗 <code>/ws [userId]</code> — Borrow a user's WA session (admin use)\n" +
-    "🔌 <code>/ws off</code> — Release the borrowed WA session",
+    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
 
     { parse_mode: "HTML" }
   );
-});
-
-// ─── /ws — Admin WhatsApp session viewer & borrower ──────────────────────────
-// /ws              → list ALL sessions from MongoDB (live 🟢 vs offline 🔴)
-// /ws [userId]     → reconnect that user from MongoDB + admin borrows session
-// /ws off          → admin releases the borrowed session
-bot.command("ws", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
-  const adminId = ctx.from!.id;
-  const args = (ctx.message?.text || "").split(/\s+/).slice(1);
-  const arg0 = args[0]?.trim() ?? "";
-
-  // ── /ws off — release borrowed session ─────────────────────────────────────
-  if (arg0 === "off") {
-    const borrowed = adminBorrowedWaSession.get(adminId);
-    adminBorrowedWaSession.delete(adminId);
-    await ctx.reply(
-      borrowed
-        ? `✅ <b>WhatsApp session released!</b>\n\nUser <code>${borrowed}</code> ki WA session admin se hat gayi.\n(MongoDB se delete nahi hua — user ki session safe hai.)`
-        : "ℹ️ Koi borrowed session nahi tha.",
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  // ── /ws [userId] — reconnect + borrow a specific user's WA session ─────────
-  if (arg0 !== "") {
-    const targetUserId = arg0;
-    const alreadyLive = !!getConnectedWhatsAppNumber(targetUserId);
-
-    // Send a progress message so admin sees what's happening
-    const progressMsg = await ctx.reply(
-      alreadyLive
-        ? `🔄 <b>Session already live — borrowing...</b>`
-        : `⏳ <b>Reconnecting from MongoDB...</b>\n\nUser <code>${targetUserId}</code> ka session load ho raha hai, please wait (up to 30s).`,
-      { parse_mode: "HTML" }
-    );
-
-    let phone = getConnectedWhatsAppNumber(targetUserId);
-    let statusLine = "";
-
-    if (!phone) {
-      try {
-        // Load from MongoDB and wait for socket to connect
-        await ensureSessionLoaded(targetUserId);
-        await waitForWhatsAppConnected(targetUserId, { timeoutMs: 30_000, pollMs: 500 });
-        phone = getConnectedWhatsAppNumber(targetUserId);
-        statusLine = phone
-          ? `📞 Phone: <code>${phone}</code>\n✅ MongoDB se reconnect hua!`
-          : `⚠️ Session load hua par phone number detect nahi hua`;
-      } catch (err: any) {
-        try {
-          await bot.api.editMessageText(ctx.chat!.id, progressMsg.message_id,
-            `❌ <b>Reconnect failed!</b>\n\nUser <code>${targetUserId}</code>\nError: ${err?.message ?? "Unknown"}`,
-            { parse_mode: "HTML" }
-          );
-        } catch {}
-        return;
-      }
-    } else {
-      statusLine = `📞 Phone: <code>${phone}</code>\n✅ Already connected (live)`;
-    }
-
-    adminBorrowedWaSession.set(adminId, targetUserId);
-
-    try {
-      await bot.api.editMessageText(ctx.chat!.id, progressMsg.message_id,
-        `✅ <b>WA Session Connected!</b>\n\n` +
-        `👤 User ID: <code>${targetUserId}</code>\n${statusLine}\n\n` +
-        `Ab aap iss user ka WhatsApp use kar sakte ho.\n` +
-        `Band karne ke liye: <code>/ws off</code>`,
-        { parse_mode: "HTML" }
-      );
-    } catch {}
-    return;
-  }
-
-  // ── /ws — list ALL sessions from MongoDB (live + offline) ──────────────────
-  let allStored: Array<{ userId: string; phoneNumber: string }> = [];
-  try {
-    allStored = await listStoredWhatsAppSessions();
-  } catch {}
-
-  // Filter out internal _auto sessions from the list
-  const mainSessions = allStored.filter(s => !s.userId.endsWith("_auto"));
-
-  if (!mainSessions.length) {
-    const currentBorrowed = adminBorrowedWaSession.get(adminId);
-    await ctx.reply(
-      `📱 <b>WhatsApp Sessions</b>\n\n❌ MongoDB me koi session saved nahi hai.` +
-      (currentBorrowed ? `\n\n🔗 Borrowed: <code>${currentBorrowed}</code>` : "") +
-      `\n\n<b>Commands:</b>\n• <code>/ws [userId]</code> — User ka WA connect karo\n• <code>/ws off</code> — Release karo`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  const lines: string[] = [];
-  for (const s of mainSessions) {
-    const live = !!getConnectedWhatsAppNumber(s.userId);
-    const statusIcon = live ? "🟢" : "🔴";
-    const statusText = live ? "Live" : "Offline";
-    const phoneDisplay = s.phoneNumber ? `📞 <code>${s.phoneNumber}</code>` : `📞 <i>unknown</i>`;
-    lines.push(`${statusIcon} <b>${statusText}</b> | 👤 <code>${s.userId}</code> | ${phoneDisplay}`);
-  }
-
-  const liveCount = mainSessions.filter(s => !!getConnectedWhatsAppNumber(s.userId)).length;
-  const offlineCount = mainSessions.length - liveCount;
-  const currentBorrowed = adminBorrowedWaSession.get(adminId);
-
-  await ctx.reply(
-    `📱 <b>All WhatsApp Sessions (MongoDB)</b>\n` +
-    `🟢 Live: ${liveCount} | 🔴 Offline: ${offlineCount} | 📦 Total: ${mainSessions.length}\n\n` +
-    lines.join("\n") +
-    (currentBorrowed ? `\n\n🔗 <b>Ab borrow ho raha hai:</b> <code>${currentBorrowed}</code>` : "") +
-    `\n\n<b>Commands:</b>\n` +
-    `• <code>/ws [userId]</code> — Offline session ko live karo + borrow karo\n` +
-    `• <code>/ws off</code> — Borrowed session release karo`,
-    { parse_mode: "HTML" }
-  );
-});
-
-// ─── /button colour — Admin button colour manager ────────────────────────────
-bot.command("button", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
-  const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
-  if (arg !== "colour" && arg !== "color") {
-    await ctx.reply("❓ Usage: <code>/button colour</code>", { parse_mode: "HTML" });
-    return;
-  }
-
-  const colors = cachedButtonColors;
-  const kb = new InlineKeyboard();
-  for (let i = 0; i < MENU_BUTTON_DEFS.length; i += 2) {
-    const def1 = MENU_BUTTON_DEFS[i];
-    const def2 = MENU_BUTTON_DEFS[i + 1];
-    const colorEmoji1 = BUTTON_COLOR_EMOJI[colors[def1.id] ?? ""] ?? "";
-    const label1 = colorEmoji1 ? `${colorEmoji1} ${def1.defaultLabel.replace(/^\S+\s+/, "")}` : def1.defaultLabel;
-    if (def2) {
-      const colorEmoji2 = BUTTON_COLOR_EMOJI[colors[def2.id] ?? ""] ?? "";
-      const label2 = colorEmoji2 ? `${colorEmoji2} ${def2.defaultLabel.replace(/^\S+\s+/, "")}` : def2.defaultLabel;
-      kb.text(label1, `bcm_pick:${def1.id}`).text(label2, `bcm_pick:${def2.id}`).row();
-    } else {
-      kb.text(label1, `bcm_pick:${def1.id}`).row();
-    }
-  }
-  kb.text("🔄 Reset All Colours", "bcm_reset_all");
-
-  await ctx.reply(
-    "🎨 <b>Button Colour Manager</b>\n\n" +
-    "Jis button ka colour change karna hai uspe click karo.\n" +
-    "Coloured circle (🔵🟢🔴🟡⚫🟣🟠⚪) dikhega current colour ke liye.",
-    { parse_mode: "HTML", reply_markup: kb }
-  );
-});
-
-// Button colour manager: user picks a button
-bot.callbackQuery(/^bcm_pick:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  const buttonId = ctx.match[1];
-  const def = MENU_BUTTON_DEFS.find(d => d.id === buttonId);
-  if (!def) return;
-
-  adminButtonColorPending.set(ctx.from.id, buttonId);
-  const currentColor = cachedButtonColors[buttonId] ?? "default";
-  // Only the 3 colour classes Telegram actually renders differently + default reset
-  const kb = new InlineKeyboard();
-  const tick = (v: string) => currentColor === v ? " ✅" : "";
-  kb.text(`🔵 Primary${tick("primary")}`,  `bcm_set:${buttonId}:primary`)
-    .text(`🟢 Success${tick("success")}`,  `bcm_set:${buttonId}:success`).row()
-    .text(`🔴 Danger${tick("danger")}`,    `bcm_set:${buttonId}:danger`)
-    .text(`✖️ Default${tick("default")}`,  `bcm_set:${buttonId}:default`).row()
-    .text("« Back", "bcm_back");
-
-  try {
-    await ctx.editMessageText(
-      `🎨 <b>${def.defaultLabel}</b> ka colour choose karo:\n\n` +
-      `Current: <b>${currentColor}</b>\n\n` +
-      `• 🔵 Primary — blue\n• 🟢 Success — green\n• 🔴 Danger — red\n• ✖️ Default — reset`,
-      { parse_mode: "HTML", reply_markup: kb }
-    );
-  } catch {}
-});
-
-// Button colour manager: user picks a colour
-bot.callbackQuery(/^bcm_set:([^:]+):(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  const buttonId = ctx.match[1];
-  const colorClass = ctx.match[2];
-  const def = MENU_BUTTON_DEFS.find(d => d.id === buttonId);
-  if (!def) return;
-
-  await setButtonColor(buttonId, colorClass);
-  cachedButtonColors[buttonId] = colorClass === "default" ? "" : colorClass;
-  if (colorClass === "default") delete cachedButtonColors[buttonId];
-
-  const emoji = BUTTON_COLOR_EMOJI[colorClass] ?? "";
-  const displayLabel = emoji ? `${emoji} ${def.defaultLabel.replace(/^\S+\s+/, "")}` : def.defaultLabel;
-
-  try {
-    await ctx.editMessageText(
-      `✅ <b>Colour Updated!</b>\n\n` +
-      `Button: ${def.defaultLabel}\n` +
-      `New colour: <b>${colorClass}</b> ${emoji}\n` +
-      `Preview: <b>${displayLabel}</b>\n\n` +
-      `Sab users ke liye button update ho gaya!`,
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("🎨 Back to Colour Manager", "bcm_back_cmd")
-          .row()
-          .text("🏠 Main Menu", "main_menu"),
-      }
-    );
-  } catch {}
-});
-
-// Reset all button colours
-bot.callbackQuery("bcm_reset_all", async (ctx) => {
-  await ctx.answerCallbackQuery("Resetting...");
-  if (!isAdmin(ctx.from.id)) return;
-  await resetAllButtonColors();
-  cachedButtonColors = {};
-  try {
-    await ctx.editMessageText(
-      "✅ <b>Sab button colours reset ho gaye!</b>\n\nSab buttons ab original style pe wapas hain.",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-    );
-  } catch {}
-});
-
-// Back to colour manager list (from "Back to Colour Manager" button)
-bot.callbackQuery("bcm_back_cmd", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  await ctx.deleteMessage().catch(() => {});
-  const colors = cachedButtonColors;
-  const kb = new InlineKeyboard();
-  for (let i = 0; i < MENU_BUTTON_DEFS.length; i += 2) {
-    const def1 = MENU_BUTTON_DEFS[i];
-    const def2 = MENU_BUTTON_DEFS[i + 1];
-    const colorEmoji1 = BUTTON_COLOR_EMOJI[colors[def1.id] ?? ""] ?? "";
-    const label1 = colorEmoji1 ? `${colorEmoji1} ${def1.defaultLabel.replace(/^\S+\s+/, "")}` : def1.defaultLabel;
-    if (def2) {
-      const colorEmoji2 = BUTTON_COLOR_EMOJI[colors[def2.id] ?? ""] ?? "";
-      const label2 = colorEmoji2 ? `${colorEmoji2} ${def2.defaultLabel.replace(/^\S+\s+/, "")}` : def2.defaultLabel;
-      kb.text(label1, `bcm_pick:${def1.id}`).text(label2, `bcm_pick:${def2.id}`).row();
-    } else {
-      kb.text(label1, `bcm_pick:${def1.id}`).row();
-    }
-  }
-  kb.text("🔄 Reset All Colours", "bcm_reset_all");
-  await ctx.reply(
-    "🎨 <b>Button Colour Manager</b>\n\nJis button ka colour change karna hai uspe click karo.",
-    { parse_mode: "HTML", reply_markup: kb }
-  );
-});
-
-// Back to colour manager list
-bot.callbackQuery("bcm_back", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  const colors = cachedButtonColors;
-  const kb = new InlineKeyboard();
-  for (let i = 0; i < MENU_BUTTON_DEFS.length; i += 2) {
-    const def1 = MENU_BUTTON_DEFS[i];
-    const def2 = MENU_BUTTON_DEFS[i + 1];
-    const colorEmoji1 = BUTTON_COLOR_EMOJI[colors[def1.id] ?? ""] ?? "";
-    const label1 = colorEmoji1 ? `${colorEmoji1} ${def1.defaultLabel.replace(/^\S+\s+/, "")}` : def1.defaultLabel;
-    if (def2) {
-      const colorEmoji2 = BUTTON_COLOR_EMOJI[colors[def2.id] ?? ""] ?? "";
-      const label2 = colorEmoji2 ? `${colorEmoji2} ${def2.defaultLabel.replace(/^\S+\s+/, "")}` : def2.defaultLabel;
-      kb.text(label1, `bcm_pick:${def1.id}`).text(label2, `bcm_pick:${def2.id}`).row();
-    } else {
-      kb.text(label1, `bcm_pick:${def1.id}`).row();
-    }
-  }
-  kb.text("🔄 Reset All Colours", "bcm_reset_all");
-  try {
-    await ctx.editMessageText(
-      "🎨 <b>Button Colour Manager</b>\n\nJis button ka colour change karna hai uspe click karo.",
-      { parse_mode: "HTML", reply_markup: kb }
-    );
-  } catch {}
 });
 
 // ─── /refermode on|off ──────────────────────────────────────────────────────
@@ -9014,36 +8614,36 @@ async function runGroupChatDualBackground(
   };
   cigSessions.set(userId, session);
 
-  // ── Persist session to MongoDB so it can be restored after a Render restart
-  void saveActiveCigSession({
-    userId: String(userId),
-    primaryUserId,
-    autoUserId,
-    chatId,
-    groups,
-    startedAt: Date.now(),
-  });
-
   try {
     let groupIndex = 0;
     let messageIndex = 0;
+    let senderIndex = 0;
 
     while (!session.cancelled && session.running) {
       if (!groups.length) break;
       const group = groups[groupIndex];
       session.currentGroupIndex = groupIndex;
-      session.cycle = Math.floor(messageIndex / groups.length) + 1;
+      session.cycle = Math.floor(messageIndex / (groups.length * 2)) + 1;
       if (session.cancelled) break;
 
-      // ── Step 1: Account 1 sends to this group ──────────────────────────────
-      if (isSessionActive(session)) {
-        const message1 = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
-        const ok1 = await sendGroupMessage(primaryUserId, group.id, message1);
-        if (ok1) { session.sent++; session.sentByAccount1++; } else session.failed++;
-        messageIndex++;
+      // Send 2 messages per group before rotating to next group
+      for (let msgInGroup = 0; msgInGroup < 2; msgInGroup++) {
+        if (!isSessionActive(session)) break;
 
-        // Show progress — 30 s wait coming up
-        session.nextDelayMs = 30_000;
+        const isAccount1 = senderIndex % 2 === 0;
+        const senderUserId = isAccount1 ? primaryUserId : autoUserId;
+        const message = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
+        const ok = await sendGroupMessage(senderUserId, group.id, message);
+        if (ok) {
+          session.sent++;
+          if (isAccount1) session.sentByAccount1++; else session.sentByAccount2++;
+        } else session.failed++;
+
+        messageIndex++;
+        senderIndex++;
+        session.nextDelayMs = getSequentialDelayMs(session.rotationIndex);
+        session.rotationIndex++;
+
         try {
           await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
             parse_mode: "HTML",
@@ -9054,36 +8654,13 @@ async function runGroupChatDualBackground(
           });
         } catch {}
 
-        // Wait 30 seconds before account 2 sends to the SAME group
-        await waitWithCancel(session, 30_000);
-      }
-
-      // ── Step 2: Account 2 sends to the SAME group ─────────────────────────
-      if (isSessionActive(session)) {
-        const message2 = AUTO_GROUP_MESSAGES[messageIndex % AUTO_GROUP_MESSAGES.length];
-        const ok2 = await sendGroupMessage(autoUserId, group.id, message2);
-        if (ok2) { session.sent++; session.sentByAccount2++; } else session.failed++;
-        messageIndex++;
-
-        // Show progress — 2 min wait before next group
-        session.nextDelayMs = 120_000;
-        try {
-          await bot.api.editMessageText(chatId, msgId, cigProgressText(session), {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("🔄 Refresh", "cig_refresh")
-              .text("⏹️ Stop", "cig_stop_btn").row()
-              .text("🏠 Main Menu", "main_menu"),
-          });
-        } catch {}
-
-        // Wait 2 minutes before rotating to the next group
-        await waitWithCancel(session, 120_000);
+        if (!isSessionActive(session)) break;
+        await waitWithCancel(session, session.nextDelayMs);
+        if (!isSessionActive(session)) break;
       }
 
       if (!isSessionActive(session)) break;
 
-      // ── Rotate to next group ───────────────────────────────────────────────
       groupIndex = (groupIndex + 1) % groups.length;
       session.currentGroupIndex = groupIndex;
     }
@@ -9093,10 +8670,6 @@ async function runGroupChatDualBackground(
 
   session.running = false;
   session.nextDelayMs = 0;
-
-  // Remove the persisted session entry — session ended normally or was stopped
-  void deleteActiveCigSession(String(userId));
-
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
@@ -12887,12 +12460,6 @@ export async function startBot() {
 
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
-    // Restore any CIG sessions that were running before the server restarted
-    void restoreActiveCigSessions().then(() => {
-      console.log("[CIG][RESTORE] Session restore pass complete.");
-    }).catch((err: any) => {
-      console.error("[CIG][RESTORE] Error during session restore:", err?.message);
-    });
   });
 
   bot.catch((err) => {
