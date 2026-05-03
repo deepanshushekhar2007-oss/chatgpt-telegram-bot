@@ -71,6 +71,9 @@ import {
   listAllRedeemCodes,
   deleteRedeemCode,
   AccessState,
+  saveAutoChatSession,
+  deleteAutoChatSession,
+  loadAllAutoChatSessions,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession } from "./mongo-auth-state";
 import {
@@ -1349,7 +1352,7 @@ function buildPendingListKeyboard(state: UserState): InlineKeyboard {
     kb.text(`${isSelected ? "✅" : "☐"} ${g.groupName} (${g.pendingCount})`, `pl_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "pl_prev_page").text(`📄 ${page + 1}/${totalPages}`, "pl_page_info").text(next, "pl_next_page").row();
@@ -5889,7 +5892,7 @@ function buildArKeyboard(state: UserState): InlineKeyboard {
     kb.text(label, `ar_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "ar_prev_page").text(`📄 ${page + 1}/${totalPages}`, "ar_page_info").text(next, "ar_next_page").row();
@@ -6204,7 +6207,7 @@ function buildLeaveKeyboard(state: UserState): InlineKeyboard {
     kb.text(label, `lv_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "lv_prev_page").text(`📄 ${page + 1}/${totalPages}`, "lv_page_info").text(next, "lv_next_page").row();
@@ -6504,11 +6507,10 @@ function buildRemoveMembersKeyboard(state: UserState): InlineKeyboard {
     kb.text(label, `rm_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
-    if (page > 0) kb.text("⬅️ Previous", "rm_page_prev");
-    kb.text(`📄 ${page + 1}/${totalPages}`, "rm_page_info");
-    if (page < totalPages - 1) kb.text("➡️ Next", "rm_page_next");
-    kb.row();
+  {
+    const prev = page > 0 ? "⬅️ Previous" : " ";
+    const next = page < totalPages - 1 ? "➡️ Next" : " ";
+    kb.text(prev, "rm_page_prev").text(`📄 ${page + 1}/${totalPages}`, "rm_page_info").text(next, "rm_page_next").row();
   }
 
   if (allGroups.length > 1) {
@@ -6882,7 +6884,7 @@ function buildMakeAdminKeyboard(state: UserState): InlineKeyboard {
     kb.text(label, `ma_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "ma_prev_page").text(`📄 ${page + 1}/${totalPages}`, "ma_page_info").text(next, "ma_next_page").row();
@@ -7134,7 +7136,7 @@ function buildApprovalKeyboard(state: UserState): InlineKeyboard {
     kb.text(label, `ap_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Previous 20" : " ";
     const next = page < totalPages - 1 ? "Next 20 ➡️" : " ";
     kb.text(prev, "ap_prev_page").text(`📄 ${page + 1}/${totalPages}`, "ap_page_info").text(next, "ap_next_page").row();
@@ -8487,7 +8489,7 @@ function buildAcigKeyboard(state: UserState): InlineKeyboard {
     kb.text(`${isSelected ? "✅" : "☐"} ${g.subject.substring(0, 28)}`, `acig_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "acig_prev_page").text(`📄 ${page + 1}/${totalPages}`, "acig_page_info").text(next, "acig_next_page").row();
@@ -9034,6 +9036,17 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
   autoChatSessions.set(userId, session);
   activeAutoChatCount++;
 
+  // Persist to MongoDB so session survives Render restarts.
+  void saveAutoChatSession({
+    userId,
+    autoUserId,
+    groupIds: cappedGroups.map((g) => g.id),
+    message,
+    delaySeconds,
+    repeatCount,
+    startedAt: Date.now(),
+  }).catch(() => {});
+
   // Protect the secondary WhatsApp session from idle / memory-pressure
   // eviction for the entire duration of this Auto Chat job. Without this,
   // a memory-pressure LRU pass could close the socket mid-loop and every
@@ -9117,6 +9130,9 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     session.running = false;
     activeAutoChatCount = Math.max(0, activeAutoChatCount - 1);
 
+    // Remove persisted session — it has completed or was stopped.
+    void deleteAutoChatSession(userId).catch(() => {});
+
     // Release the secondary WhatsApp session back to normal eviction rules.
     unprotectSession(autoUserId);
 
@@ -9156,7 +9172,7 @@ function buildChatGroupKeyboard(state: UserState): InlineKeyboard {
     kb.text(`${isSelected ? "✅" : "☐"} ${g.subject.substring(0, 28)}`, `cig_tog_${i}`).row();
   }
 
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "cig_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cig_page_info").text(next, "cig_next_page").row();
@@ -9401,7 +9417,7 @@ function buildEditSettingsGroupKeyboard(state: UserState): InlineKeyboard {
     const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
     kb.text(label, `es_tog_${i}`).row();
   }
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "es_prev_page").text(`📄 ${page + 1}/${totalPages}`, "es_page_info").text(next, "es_next_page").row();
@@ -9971,7 +9987,7 @@ function buildCgnManualKeyboard(state: UserState): InlineKeyboard {
     const tag = orderIdx >= 0 ? `✅ ${orderIdx + 1}.` : "☐";
     kb.text(`${tag} ${g.subject}`, `cgn_m_tog_${i}`).row();
   }
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "cgn_m_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cgn_m_page_info").text(next, "cgn_m_next_page").row();
@@ -10199,7 +10215,7 @@ function buildCgnAutoSelectKeyboard(state: UserState): InlineKeyboard {
     const tag = orderIdx >= 0 ? `✅ ${orderIdx + 1}.` : "☐";
     kb.text(`${tag} ${g.groupName} (${g.pendingCount})`, `cgn_a_tog_${i}`).row();
   }
-  if (totalPages > 1) {
+  {
     const prev = page > 0 ? "⬅️ Prev" : " ";
     const next = page < totalPages - 1 ? "Next ➡️" : " ";
     kb.text(prev, "cgn_a_prev_page").text(`📄 ${page + 1}/${totalPages}`, "cgn_a_page_info").text(next, "cgn_a_next_page").row();
@@ -12426,6 +12442,45 @@ function splitMessage(msg: string, maxLen: number): string[] {
   return parts;
 }
 
+async function restorePersistedAutoChatSessions(): Promise<void> {
+  try {
+    const sessions = await loadAllAutoChatSessions();
+    if (!sessions.length) return;
+    console.log(`[AUTO_CHAT] Restoring ${sessions.length} autochat session(s) from MongoDB after restart...`);
+    for (const s of sessions) {
+      try {
+        const telegramIdStr = String(s.userId);
+        // Try to reconnect the auto WA session.
+        const autoSessionId = s.autoUserId;
+        try { await ensureSessionLoaded(autoSessionId); } catch {}
+        if (!isAutoConnected(telegramIdStr)) {
+          console.log(`[AUTO_CHAT] Skipping restore for userId=${s.userId}: auto WA not connected`);
+          await deleteAutoChatSession(s.userId).catch(() => {});
+          // Notify the user so they know to restart manually.
+          await bot.api.sendMessage(s.userId,
+            "⚠️ <b>Auto Chat Resume Failed</b>\n\nServer restart ke baad Auto Chat resume karne ki koshish ki, lekin Auto Chat WhatsApp reconnect nahi hua.\n\nKripya Auto Chat dobara shuru karein.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
+          ).catch(() => {});
+          continue;
+        }
+        const statusMsg = await bot.api.sendMessage(s.userId,
+          "♻️ <b>Auto Chat Restored!</b>\n\nServer restart ke baad Auto Chat automatically resume ho gaya hai.\n\n⏳ Sending messages...",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "auto_chat_stop") }
+        ).catch(() => null);
+        if (!statusMsg) continue;
+        const groups = s.groupIds.map((id) => ({ id, subject: "" }));
+        void runAutoChatBackground(s.userId, s.autoUserId, s.userId, statusMsg.message_id, groups, s.message, s.delaySeconds, s.repeatCount);
+        console.log(`[AUTO_CHAT] Restored session for userId=${s.userId} (${s.groupIds.length} groups)`);
+      } catch (err: any) {
+        console.error(`[AUTO_CHAT] Failed to restore session for userId=${s.userId}:`, err?.message);
+        await deleteAutoChatSession(s.userId).catch(() => {});
+      }
+    }
+  } catch (err: any) {
+    console.error("[AUTO_CHAT] restorePersistedAutoChatSessions error:", err?.message);
+  }
+}
+
 export async function startBot() {
   if (!token) {
     console.log("[BOT] TELEGRAM_BOT_TOKEN not set — bot disabled. Set it to enable the Telegram bot.");
@@ -12460,6 +12515,9 @@ export async function startBot() {
 
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
+    // After settings are loaded, restore any persisted autochat sessions from MongoDB.
+    // Small delay to let WhatsApp sessions reconnect first.
+    setTimeout(() => { void restorePersistedAutoChatSessions(); }, 15_000);
   });
 
   bot.catch((err) => {
