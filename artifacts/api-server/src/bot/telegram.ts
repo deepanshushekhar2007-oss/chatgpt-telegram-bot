@@ -78,6 +78,8 @@ import {
   loadPendingGroupCreation,
   deletePendingGroupCreation,
   type PersistedGroupSettings,
+  addOneWsSlot,
+  loadAllExtraWsSlots,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -1019,6 +1021,10 @@ interface UserState {
     cancelled: boolean;
     botMode?: "single" | "both";
     autoChatDurationMs?: number;
+    // multi-WS: for each group, which WS slot indices are in it (slot 0=primary, 1=auto, 2+=ws3...)
+    wsGroupMembership?: number[][];
+    // multi-WS: all connected WS session IDs at the time of group selection
+    wsUserIds?: string[];
   };
   autoConnectStep?: string;
   // ── Change Group Name feature ────────────────────────────────────────────
@@ -1090,6 +1096,10 @@ interface CigSession {
   nextDelayMs: number;
   rotationIndex: number;
   autoChatExpiresAt?: number;
+  // multi-WS fields (when >2 WS accounts)
+  wsUserIds?: string[];
+  sentByAccount?: number[];
+  wsGroupMembership?: number[][];
 }
 
 interface AcfSession {
@@ -1107,6 +1117,9 @@ interface AcfSession {
   nextDelayMs: number;
   rotationIndex: number;
   autoChatExpiresAt?: number;
+  // multi-WS fields (when >2 WS accounts)
+  wsUserIds?: string[];
+  wsJids?: string[];
 }
 
 const CHAT_FRIEND_PAIRS: [string, string][] = [
@@ -1329,6 +1342,42 @@ let autoChatGlobalEnabled: boolean = true;
 const autoChatAccessSet: Set<number> = new Set();
 // userId → expiry timestamp in ms. Not present = unlimited.
 const autoChatAccessExpiry: Map<number, number> = new Map();
+// userId → number of EXTRA WS slots beyond the default 2 (primary + auto).
+// 0 = max 2 WS, 1 = max 3 WS, ..., 8 = max 10 WS.
+const extraWsSlotsCache: Map<number, number> = new Map();
+
+// ── Multi-WS helpers ───────────────────────────────────────────────────────
+// Session ID scheme:
+//   slot 0 → userId (primary WA)
+//   slot 1 → userId_auto (2nd WA, backward compat)
+//   slot 2 → userId_ws3, slot 3 → userId_ws4, ..., slot 9 → userId_ws10
+function getWsUserId(userId: string, slotIndex: number): string {
+  if (slotIndex === 0) return userId;
+  if (slotIndex === 1) return `${userId}_auto`;
+  return `${userId}_ws${slotIndex + 1}`;
+}
+function getMaxWsCount(userId: number): number {
+  return 2 + (extraWsSlotsCache.get(userId) ?? 0);
+}
+// Returns all connected WS session IDs for a user (in slot order).
+function getConnectedWsUserIds(userId: string): string[] {
+  const numId = Number(userId);
+  const maxSlots = getMaxWsCount(numId);
+  const result: string[] = [];
+  for (let i = 0; i < maxSlots; i++) {
+    const wsId = getWsUserId(userId, i);
+    if (isConnected(wsId)) result.push(wsId);
+  }
+  return result;
+}
+// Returns all WS session IDs up to max (whether connected or not).
+function getAllWsUserIds(userId: string): string[] {
+  const numId = Number(userId);
+  const maxSlots = getMaxWsCount(numId);
+  const result: string[] = [];
+  for (let i = 0; i < maxSlots; i++) result.push(getWsUserId(userId, i));
+  return result;
+}
 
 function canUserSeeAutoChat(userId: number): boolean {
   if (isAdmin(userId)) return true;
@@ -1346,11 +1395,15 @@ async function syncAutoChatSettings(): Promise<void> {
     autoChatGlobalEnabled = data.autoChatEnabled ?? true;
     autoChatAccessSet.clear();
     autoChatAccessExpiry.clear();
+    extraWsSlotsCache.clear();
     for (const id of data.autoChatAccessList ?? []) {
       autoChatAccessSet.add(id);
     }
     for (const [k, v] of Object.entries(data.autoChatAccessExpiry ?? {})) {
       autoChatAccessExpiry.set(Number(k), v);
+    }
+    for (const [k, v] of Object.entries(data.extraWsSlots ?? {})) {
+      extraWsSlotsCache.set(Number(k), v);
     }
   } catch (err: any) {
     console.error("[AutoChat] syncAutoChatSettings error:", err?.message);
@@ -2816,7 +2869,8 @@ bot.command("admin", async (ctx) => {
     "🔴 <code>/autochat off</code> — Auto Chat OFF for all users\n" +
     "✅ <code>/accessautochat [id]</code> — Grant unlimited Auto Chat access\n" +
     "✅ <code>/accessautochat [id] [days]</code> — Grant time-limited Auto Chat access\n" +
-    "❌ <code>/revokeautochat [id]</code> — Revoke Auto Chat access\n\n" +
+    "❌ <code>/revokeautochat [id]</code> — Revoke Auto Chat access\n" +
+    "📱 <code>/add2ws [id]</code> — Give user +1 extra WS slot (max 10 total)\n\n" +
     "🎫 <b>Redeem Codes:</b>\n" +
     "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
     "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
@@ -3031,6 +3085,55 @@ bot.command("revokeautochat", async (ctx) => {
     `❌ <b>Auto Chat Access Revoked!</b>\n\n👤 User: <code>${id}</code>\n🚫 This user will no longer see the Auto Chat button.${stopped}`,
     { parse_mode: "HTML" }
   );
+});
+
+// ─── /add2ws [userid] — Give user extra WS slot ─────────────────────────────
+// Each call increments the user's extra WS slots by 1. Default max is 2 WS
+// (primary + auto). Each /add2ws grants +1 more slot. Hard cap = 10 total.
+bot.command("add2ws", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const id = parseInt((ctx.message?.text || "").split(/\s+/)[1]);
+  if (isNaN(id)) {
+    await ctx.reply(
+      "❓ <b>Usage:</b> <code>/add2ws [user_id]</code>\n\n" +
+      "Each call gives the user +1 extra WhatsApp slot (max 10 total).\n\n" +
+      "<b>Example:</b>\n" +
+      "<code>/add2ws 123456789</code> → User can now connect 3rd WA\n" +
+      "<code>/add2ws 123456789</code> again → User can now connect 4th WA\n\n" +
+      "Max: 10 WA accounts per user.",
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  const result = await addOneWsSlot(id);
+  if (result.alreadyMax) {
+    await ctx.reply(
+      `⚠️ <b>Already at Max!</b>\n\n👤 User: <code>${id}</code>\n📱 Already has <b>10 WS slots</b> (maximum).\nCannot add more.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  // Update RAM cache
+  extraWsSlotsCache.set(id, result.newTotal - 2);
+  await ctx.reply(
+    `✅ <b>Extra WS Slot Added!</b>\n\n` +
+    `👤 User: <code>${id}</code>\n` +
+    `📱 Can now connect up to <b>${result.newTotal} WhatsApp accounts</b>\n\n` +
+    `Next WS slot: <b>${result.newTotal}${result.newTotal === 3 ? "rd" : result.newTotal === 4 ? "th" : "th"}</b> WhatsApp\n\n` +
+    `💡 Run again to add one more slot (max 10).`,
+    { parse_mode: "HTML" }
+  );
+  // Notify user
+  try {
+    await bot.api.sendMessage(
+      id,
+      `📱 <b>Extra WhatsApp Slot Unlocked!</b>\n\n` +
+      `Admin ne aapko <b>${result.newTotal}rd WhatsApp</b> connect karne ka access de diya hai!\n\n` +
+      `Ab aap <b>${result.newTotal} WhatsApp accounts</b> connect kar sakte ho Auto Chat ke liye.\n\n` +
+      `Auto Chat menu → Add WS Account button se connect karo.`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
 });
 
 bot.command("access", async (ctx) => {
@@ -8550,21 +8653,76 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
     return;
   }
 
-  const autoNumber = getAutoConnectedNumber(String(userId));
   const mainNumber = getConnectedWhatsAppNumber(String(userId));
+  const connectedWsIds = getConnectedWsUserIds(String(userId));
+  const maxSlots = getMaxWsCount(userId);
+  const extraSlots = extraWsSlotsCache.get(userId) ?? 0;
+
+  // Build WS account status text
+  let wsStatusText = "";
+  for (let i = 0; i < connectedWsIds.length; i++) {
+    const num = getConnectedWhatsAppNumber(connectedWsIds[i]);
+    wsStatusText += `📱 WA ${i + 1}: <code>${esc(num || "connected")}</code>\n`;
+  }
+
+  const kb = new InlineKeyboard()
+    .text("👥 Chat In Group", "acig_start").row()
+    .text("👫 Chat Friend", "acf_start").row();
+
+  // Show "Add WS Account" button only if user has extra slots AND hasn't reached max
+  if (extraSlots > 0 && connectedWsIds.length < maxSlots) {
+    kb.text(`➕ Add WS Account (${connectedWsIds.length}/${maxSlots})`, "connect_extra_wa").row();
+  }
+
+  kb.text("🔌 Disconnect Auto WA", "auto_disconnect_wa").row()
+    .text("🏠 Main Menu", "main_menu");
+
   await ctx.editMessageText(
     "🤖 <b>Auto Chat Menu</b>\n\n" +
-    (mainNumber ? `📞 Primary WA: <code>${esc(mainNumber)}</code>\n` : "") +
-    (autoNumber ? `🤖 Auto WA: <code>${esc(autoNumber)}</code>\n` : "") +
+    `📊 Connected: <b>${connectedWsIds.length}/${maxSlots}</b> WhatsApp accounts\n` +
+    wsStatusText +
     "\nKya karna chahte ho?",
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text("👥 Chat In Group", "acig_start").row()
-        .text("👫 Chat Friend", "acf_start").row()
-        .text("🔌 Disconnect Auto WA", "auto_disconnect_wa").row()
-        .text("🏠 Main Menu", "main_menu"),
-    }
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+// ─── Connect Extra WS Account (3rd, 4th... up to 10th) ───────────────────────
+bot.callbackQuery("connect_extra_wa", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+
+  const extraSlots = extraWsSlotsCache.get(userId) ?? 0;
+  if (extraSlots === 0) {
+    await ctx.editMessageText(
+      "🚫 <b>Extra WS Access Nahi Hai</b>\n\nAdmin se /add2ws command se extra WS slot lena hoga.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu") }
+    );
+    return;
+  }
+
+  const connectedWsIds = getConnectedWsUserIds(String(userId));
+  const maxSlots = getMaxWsCount(userId);
+  if (connectedWsIds.length >= maxSlots) {
+    await ctx.editMessageText(
+      `✅ <b>Sab WS Connected Hain!</b>\n\nAapke paas <b>${connectedWsIds.length}/${maxSlots}</b> WS accounts connected hain.\nSab slots use ho chuke hain.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu") }
+    );
+    return;
+  }
+
+  const nextSlot = connectedWsIds.length; // next slot to connect (0-indexed)
+  const wsNumber = nextSlot + 1;
+  userStates.set(userId, {
+    step: "extra_connect_phone",
+    autoConnectStep: `slot_${nextSlot}`,
+  });
+  await ctx.editMessageText(
+    `📱 <b>Connect ${wsNumber}${wsNumber === 2 ? "nd" : wsNumber === 3 ? "rd" : "th"} WhatsApp Account</b>\n\n` +
+    `Abhi <b>${connectedWsIds.length}/${maxSlots}</b> WA accounts connected hain.\n\n` +
+    `${wsNumber}${wsNumber === 2 ? "nd" : wsNumber === 3 ? "rd" : "th"} WhatsApp ka phone number bhejo (country code ke saath):\n` +
+    `Example: <code>919876543210</code>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "auto_chat_menu") }
   );
 });
 
@@ -8683,31 +8841,57 @@ bot.callbackQuery("acig_start", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
-  if (!isAutoConnected(String(userId))) {
-    await ctx.editMessageText("❌ Auto Chat WA connected nahi hai.", {
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
+
+  const connectedWsIds = getConnectedWsUserIds(String(userId));
+  if (connectedWsIds.length < 2) {
+    await ctx.editMessageText(
+      "❌ <b>Kam se Kam 2 WA Chahiye!</b>\n\n" +
+      "Chat In Group ke liye primary + auto WA dono connected hone chahiye.\n\n" +
+      `Abhi connected: <b>${connectedWsIds.length}</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu").text("🏠 Menu", "main_menu"),
+      }
+    );
     return;
   }
 
-  const autoUserId = getAutoUserId(String(userId));
-  let primaryGroups: Array<{ id: string; subject: string }> = [];
-  let autoGroups: Array<{ id: string; subject: string }> = [];
-  try {
-    [primaryGroups, autoGroups] = await Promise.all([
-      getAllGroups(String(userId)),
-      getAllGroups(autoUserId),
-    ]);
-  } catch {}
+  // Fetch groups for all connected WS accounts in parallel
+  await ctx.editMessageText(
+    `⏳ <b>Groups Dhundh Raha Hai...</b>\n\n📱 ${connectedWsIds.length} WS accounts ke groups fetch ho rahe hain...`,
+    { parse_mode: "HTML" }
+  );
+  const allWsGroups: Array<Array<{ id: string; subject: string }>> = await Promise.all(
+    connectedWsIds.map(wsId => getAllGroups(wsId).catch(() => []))
+  );
 
-  const autoGroupIds = new Set(autoGroups.map(g => g.id));
-  const commonGroups = primaryGroups.filter(g => autoGroupIds.has(g.id));
+  // Build group membership map: groupId → { group, wsIndices[] }
+  const membershipMap = new Map<string, { group: { id: string; subject: string }; wsIndices: number[] }>();
+  for (let wsIdx = 0; wsIdx < allWsGroups.length; wsIdx++) {
+    for (const g of allWsGroups[wsIdx]) {
+      if (!membershipMap.has(g.id)) {
+        membershipMap.set(g.id, { group: g, wsIndices: [] });
+      }
+      membershipMap.get(g.id)!.wsIndices.push(wsIdx);
+    }
+  }
+
+  // Only groups where ≥2 WS accounts are members
+  const commonGroups: Array<{ id: string; subject: string }> = [];
+  const wsGroupMembership: number[][] = [];
+  for (const { group, wsIndices } of membershipMap.values()) {
+    if (wsIndices.length >= 2) {
+      commonGroups.push(group);
+      wsGroupMembership.push(wsIndices);
+    }
+  }
 
   if (!commonGroups.length) {
+    const perWsText = allWsGroups.map((g, i) => `WA ${i + 1}: ${g.length} groups`).join("\n");
     await ctx.editMessageText(
       "❌ <b>Koi common group nahi mila!</b>\n\n" +
-      "Dono WhatsApp numbers jo groups me hain unme se koi common group nahi hai.\n\n" +
-      `Primary WA groups: ${primaryGroups.length}\nAuto WA groups: ${autoGroups.length}`,
+      "Aapke connected WA accounts mein se koi 2+ accounts ek hi group mein nahi hain.\n\n" +
+      perWsText,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu").text("🏠 Menu", "main_menu"),
@@ -8726,13 +8910,16 @@ bot.callbackQuery("acig_start", async (ctx) => {
       delaySeconds: 5,
       cancelled: false,
       botMode: "both",
+      wsUserIds: connectedWsIds,
+      wsGroupMembership,
     },
   });
 
   await ctx.editMessageText(
     "👥 <b>Chat In Group — Groups Select Karo</b>\n\n" +
-    `📋 ${commonGroups.length} common groups mile (dono WA me hain).\n\n` +
-    "Jin groups me dono numbers se msg bhejnha hai unhe select karo:",
+    `📱 Connected WA: <b>${connectedWsIds.length} accounts</b>\n` +
+    `📋 <b>${commonGroups.length}</b> common groups mile (≥2 WA mein hain).\n\n` +
+    "Jin groups me messages bhejne hain unhe select karo:",
     {
       parse_mode: "HTML",
       reply_markup: buildAcigKeyboard(userStates.get(userId)!),
@@ -8846,8 +9033,11 @@ bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
   const durationMs = parseInt(ctx.match[1]);
   const data = state.chatInGroupData;
   data.autoChatDurationMs = durationMs;
-  const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
-  const autoUserId = getAutoUserId(String(userId));
+  const selectedIndices = [...data.selectedIndices];
+  const selectedGroups = selectedIndices.map(i => data.allGroups[i]);
+  const selectedWsGroupMembership = data.wsGroupMembership
+    ? selectedIndices.map(i => data.wsGroupMembership![i])
+    : undefined;
   const durationLabel = durationMs === 0
     ? "No Limit"
     : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
@@ -8855,15 +9045,23 @@ bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
   const statusMsg = await ctx.editMessageText(
     "👥 <b>Chat In Group Started!</b>\n\n" +
     `⏱️ Duration: <b>${durationLabel}</b>\n` +
-    "Funny/study messages will rotate across all selected groups.\n\n" +
-    "Use Stop to end it early.",
+    `📱 WA Accounts: <b>${data.wsUserIds?.length ?? 2}</b>\n` +
+    "Messages rotate karte rahenge selected groups mein.\n\n" +
+    "Stop karne ke liye Stop dabao.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
   const autoChatExpiresAt = durationMs === 0 ? undefined : Date.now() + durationMs;
   userStates.delete(userId);
-  void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, autoChatExpiresAt);
+
+  // Use multi-WS function if wsUserIds and wsGroupMembership available
+  if (data.wsUserIds && data.wsUserIds.length >= 2 && selectedWsGroupMembership) {
+    void runGroupChatMultiBackground(userId, data.wsUserIds, chatId, msgId, selectedGroups, selectedWsGroupMembership, autoChatExpiresAt);
+  } else {
+    const autoUserId = getAutoUserId(String(userId));
+    void runGroupChatDualBackground(userId, String(userId), autoUserId, chatId, msgId, selectedGroups, autoChatExpiresAt);
+  }
 });
 
 function cigProgressText(session: CigSession): string {
@@ -9089,6 +9287,177 @@ async function runGroupChatDualBackground(
   }
 }
 
+// ─── Multi-WS Chat In Group ─────────────────────────────────────────────────
+// Rotates messages across all selected groups, using ALL connected WS accounts
+// that are members of each group. For each group, each WS account in that
+// group sends one message before moving to the next group.
+async function runGroupChatMultiBackground(
+  userId: number,
+  wsUserIds: string[],
+  chatId: number,
+  msgId: number,
+  groups: Array<{ id: string; subject: string }>,
+  wsGroupMembership: number[][], // for each group, which wsUserIds slot indices are in it
+  autoChatExpiresAt?: number,
+  startGroupIndex = 0,
+  startSentByAccount?: number[],
+): Promise<void> {
+  if (activeAutoChatCount >= MAX_CONCURRENT_AUTOCHAT) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Server busy hai</b>\n\nAbhi ${activeAutoChatCount} sessions chal rahe hain. Thodi der baad try karo.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
+  const sentByAccount: number[] = startSentByAccount ?? new Array(wsUserIds.length).fill(0);
+  const session: CigSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    groups,
+    message: "Multi-WS rotation",
+    sent: sentByAccount.reduce((a, b) => a + b, 0),
+    failed: 0,
+    sentByAccount1: sentByAccount[0] ?? 0,
+    sentByAccount2: sentByAccount[1] ?? 0,
+    botMode: "both",
+    currentGroupIndex: startGroupIndex,
+    cycle: 1,
+    nextDelayMs: 0,
+    rotationIndex: 0,
+    autoChatExpiresAt,
+    wsUserIds,
+    sentByAccount,
+    wsGroupMembership,
+  };
+  cigSessions.set(userId, session);
+
+  void saveAutoChatSession({
+    userId,
+    autoUserId: wsUserIds[1] ?? wsUserIds[0],
+    startedAt: Date.now(),
+    sessionType: "cig",
+    groups: groups.map(g => ({ id: g.id, subject: g.subject })),
+    currentGroupIndex: startGroupIndex,
+    messageIndex: 0,
+    autoChatExpiresAt,
+    wsUserIds,
+    wsGroupMembership,
+    sentCount: session.sent,
+  }).catch(() => {});
+
+  for (const wsId of wsUserIds) protectSessionFromEviction(wsId);
+  activeAutoChatCount++;
+
+  const BETWEEN_GROUP_DELAY = 12_000;
+  const BETWEEN_SEND_DELAY = 3_000;
+  let lastProgressUpdate = 0;
+
+  try {
+    outer: while (session.running && !session.cancelled) {
+      for (let gi = session.currentGroupIndex; gi < groups.length; gi++) {
+        if (!session.running || session.cancelled) break outer;
+        if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) {
+          session.cancelled = false;
+          break outer;
+        }
+
+        const group = groups[gi];
+        session.currentGroupIndex = gi;
+        const membersInGroup = wsGroupMembership[gi] ?? [0, 1];
+
+        for (const wsIdx of membersInGroup) {
+          if (!session.running || session.cancelled) break outer;
+          const wsId = wsUserIds[wsIdx];
+          if (!wsId || !isConnected(wsId)) continue;
+
+          const msgText = AUTO_GROUP_MESSAGES[session.rotationIndex % AUTO_GROUP_MESSAGES.length];
+          session.rotationIndex++;
+          const ok = await sendGroupMessage(wsId, group.id, msgText).catch(() => false);
+          if (ok) {
+            session.sent++;
+            sentByAccount[wsIdx] = (sentByAccount[wsIdx] ?? 0) + 1;
+            session.sentByAccount1 = sentByAccount[0] ?? 0;
+            session.sentByAccount2 = sentByAccount[1] ?? 0;
+          } else {
+            session.failed++;
+          }
+
+          // Throttled progress update
+          const now = Date.now();
+          if (now - lastProgressUpdate > AUTOCHAT_PROGRESS_THROTTLE_MS) {
+            lastProgressUpdate = now;
+            const acctText = wsUserIds.map((_, i) => `WA ${i + 1}: ${sentByAccount[i] ?? 0}`).join(" | ");
+            try {
+              await bot.api.editMessageText(chatId, msgId,
+                `🤖 <b>Auto Chat (Multi-WS) Running</b>\n\n` +
+                `📍 Group: <b>${esc(group.subject || group.id)}</b>\n` +
+                `📊 ${acctText}\n📩 Total: <b>${session.sent}</b> | ❌ Failed: <b>${session.failed}</b>\n` +
+                (autoChatExpiresAt ? `\n⏳ ${formatRemaining(autoChatExpiresAt)} remaining` : "") +
+                `\n\nPress Stop to stop.`,
+                {
+                  parse_mode: "HTML",
+                  reply_markup: new InlineKeyboard().text("🔄 Refresh", "cig_refresh").text("⏹️ Stop", "cig_stop_btn"),
+                }
+              );
+            } catch {}
+          }
+
+          if (membersInGroup.indexOf(wsIdx) < membersInGroup.length - 1) {
+            session.nextDelayMs = BETWEEN_SEND_DELAY;
+            await new Promise(r => setTimeout(r, BETWEEN_SEND_DELAY));
+          }
+        }
+
+        if (gi < groups.length - 1) {
+          session.nextDelayMs = BETWEEN_GROUP_DELAY;
+          await new Promise(r => setTimeout(r, BETWEEN_GROUP_DELAY));
+        }
+
+        void saveAutoChatSession({
+          userId,
+          autoUserId: wsUserIds[1] ?? wsUserIds[0],
+          startedAt: Date.now(),
+          sessionType: "cig",
+          groups: groups.map(g => ({ id: g.id, subject: g.subject })),
+          currentGroupIndex: gi + 1 < groups.length ? gi + 1 : 0,
+          messageIndex: session.rotationIndex,
+          autoChatExpiresAt,
+          wsUserIds,
+          wsGroupMembership,
+          sentCount: session.sent,
+        }).catch(() => {});
+      }
+
+      // One full cycle done — restart from beginning
+      session.currentGroupIndex = 0;
+      session.cycle++;
+    }
+  } catch (err: any) {
+    console.error(`[CIG_MULTI][${userId}] Error:`, err?.message);
+  }
+
+  for (const wsId of wsUserIds) unprotectSession(wsId);
+  activeAutoChatCount--;
+  session.running = false;
+  session.nextDelayMs = 0;
+  void deleteAutoChatSession(userId).catch(() => {});
+
+  if (!session.cancelled) {
+    const acctText = wsUserIds.map((_, i) => `WA ${i + 1}: ${sentByAccount[i] ?? 0}`).join(" | ");
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat In Group Complete!</b>\n\n📊 ${acctText}\n📩 Total: <b>${session.sent}</b>\n❌ Failed: <b>${session.failed}</b>\n📋 Groups: <b>${groups.length}</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
 bot.callbackQuery("cig_refresh", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -9164,42 +9533,47 @@ bot.callbackQuery("acf_start", async (ctx) => {
     return;
   }
   if (existingSession) acfSessions.delete(userId);
-  if (!isAutoConnected(String(userId))) {
-    await ctx.editMessageText("❌ Auto Chat WA connected nahi hai.", {
-      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-    });
+
+  // Multi-WS: get all connected WS
+  const connectedWsIds = getConnectedWsUserIds(String(userId));
+  if (connectedWsIds.length < 2) {
+    await ctx.editMessageText(
+      "❌ <b>Kam se Kam 2 WA Chahiye!</b>\n\n" +
+      "Chat Friend ke liye primary + auto WA dono connected hone chahiye.\n\n" +
+      `Abhi connected: <b>${connectedWsIds.length}</b>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu") }
+    );
     return;
   }
 
-  const primaryNumber = getConnectedWhatsAppNumber(String(userId));
-  const autoNumber = getAutoConnectedNumber(String(userId));
+  // Get phone numbers for all connected WS
+  const wsNumbers = connectedWsIds.map(wsId => getConnectedWhatsAppNumber(wsId) || "");
+  const wsJids = wsNumbers.map(n => n.replace(/[^0-9]/g, "") + "@s.whatsapp.net");
+  const numbersText = connectedWsIds.map((_, i) => `📱 WA ${i + 1}: <code>${esc(wsNumbers[i] || "connected")}</code>`).join("\n");
 
-  if (!primaryNumber || !autoNumber) {
-    await ctx.editMessageText("❌ Dono WhatsApp numbers detect nahi hue. Reconnect karo.", {
-      reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu"),
-    });
-    return;
-  }
-
-  // Show duration selection before starting
+  // Store all WS info for the duration callback
   userStates.set(userId, {
     step: "acf_select_duration",
     chatInGroupData: {
       allGroups: [],
       selectedIndices: new Set(),
       page: 0,
-      message: `${primaryNumber}|${autoNumber}`,
+      message: wsJids.join("|"),
       delaySeconds: 0,
       cancelled: false,
+      wsUserIds: connectedWsIds,
     },
   });
 
+  // Total pairs = N*(N-1) where N = connected WS count (all ordered pairs)
+  const totalPairs = connectedWsIds.length * (connectedWsIds.length - 1);
   await ctx.editMessageText(
     "⏱️ <b>Select Chat Friend Duration</b>\n\n" +
-    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
-    `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
-    "How long should Chat Friend run?\n\n" +
-    "After the selected time, it will stop automatically and you will be notified.",
+    `📊 Connected: <b>${connectedWsIds.length} WA accounts</b>\n` +
+    `🔁 Total message pairs per cycle: <b>${totalPairs}</b>\n\n` +
+    numbersText + "\n\n" +
+    "Har WA account baaki sab se baat karega aapas mein.\n\n" +
+    "How long should Chat Friend run?",
     {
       parse_mode: "HTML",
       reply_markup: buildDurationKeyboard(userId, "acf_dur"),
@@ -9213,32 +9587,31 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
   const durationMs = parseInt(ctx.match[1]);
-  const numbers = (state.chatInGroupData.message || "").split("|");
-  const primaryNumber = numbers[0] || "";
-  const autoNumber = numbers[1] || "";
-  if (!primaryNumber || !autoNumber) return;
+  const data = state.chatInGroupData;
+  const wsJids = (data.message || "").split("|").filter(Boolean);
+  const wsUserIds = data.wsUserIds ?? [];
+  if (wsJids.length < 2 || wsUserIds.length < 2) return;
 
-  const primaryJid = primaryNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
-  const autoJid = autoNumber.replace(/[^0-9]/g, "") + "@s.whatsapp.net";
-  const totalPairs = CHAT_FRIEND_PAIRS.length;
   const autoChatExpiresAt = durationMs === 0 ? undefined : Date.now() + durationMs;
   const durationLabel = durationMs === 0
     ? "No Limit"
     : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
+  const totalPairs = wsUserIds.length * (wsUserIds.length - 1);
 
   const statusMsg = await ctx.editMessageText(
     "👫 <b>Chat Friend Started!</b>\n\n" +
-    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
-    `🤖 Auto: <code>${esc(autoNumber)}</code>\n` +
+    `📊 WA Accounts: <b>${wsUserIds.length}</b>\n` +
+    `🔁 Pairs per cycle: <b>${totalPairs}</b>\n` +
     `⏱️ Duration: <b>${durationLabel}</b>\n\n` +
-    "Auto funny/study messages will continue until time is up or you press Stop.",
+    "Sab WA accounts aapas mein funny/study messages exchange karenge.\nStop karne ke liye Stop dabao.",
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
   const chatId = ctx.chat!.id;
   userStates.delete(userId);
 
-  void runChatFriendBackground(userId, String(userId), getAutoUserId(String(userId)), chatId, msgId, primaryJid, autoJid, totalPairs, autoChatExpiresAt);
+  // Use multi-WS function for all cases (handles 2-WS as well as 3-10 WS)
+  void runChatFriendMultiBackground(userId, wsUserIds, wsJids, chatId, msgId, autoChatExpiresAt);
 });
 
 function acfProgressText(session: AcfSession): string {
@@ -9422,6 +9795,166 @@ async function runChatFriendBackground(
     try {
       await bot.api.editMessageText(chatId, msgId,
         `✅ <b>Chat Friend Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n💬 Pairs: ${session.totalPairs}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
+// ─── Multi-WS Chat Friend ───────────────────────────────────────────────────
+// Generates all ordered pairs (i→j, j→i) across all connected WS accounts.
+// WS[i] sends a chat message to WS[j]'s JID, then WS[j] replies to WS[i]'s JID.
+// With N WS accounts, total pairs per full cycle = N*(N-1).
+async function runChatFriendMultiBackground(
+  userId: number,
+  wsUserIds: string[],
+  wsJids: string[],
+  chatId: number,
+  msgId: number,
+  autoChatExpiresAt?: number,
+): Promise<void> {
+  if (activeAutoChatCount >= MAX_CONCURRENT_AUTOCHAT) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Server busy hai</b>\n\nAbhi ${activeAutoChatCount} sessions chal rahe hain. Thodi der baad try karo.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
+  // Build all ordered pairs (i, j) where i ≠ j
+  const pairs: Array<[number, number]> = [];
+  for (let i = 0; i < wsUserIds.length; i++) {
+    for (let j = 0; j < wsUserIds.length; j++) {
+      if (i !== j) pairs.push([i, j]);
+    }
+  }
+  const totalPairs = pairs.length;
+
+  const session: AcfSession = {
+    running: true,
+    cancelled: false,
+    chatId,
+    msgId,
+    primaryJid: wsJids[0] ?? "",
+    autoJid: wsJids[1] ?? "",
+    sent: 0,
+    failed: 0,
+    currentPair: 0,
+    totalPairs,
+    cycle: 1,
+    nextDelayMs: 0,
+    rotationIndex: 0,
+    autoChatExpiresAt,
+    wsUserIds,
+    wsJids,
+  };
+  acfSessions.set(userId, session);
+
+  void saveAutoChatSession({
+    userId,
+    autoUserId: wsUserIds[1] ?? wsUserIds[0],
+    startedAt: Date.now(),
+    sessionType: "acf",
+    primaryJid: wsJids[0] ?? "",
+    autoJid: wsJids[1] ?? "",
+    autoChatExpiresAt,
+    wsUserIds,
+    wsJids,
+    sentCount: 0,
+  }).catch(() => {});
+
+  for (const wsId of wsUserIds) protectSessionFromEviction(wsId);
+  activeAutoChatCount++;
+
+  const BETWEEN_PAIR_DELAY_MS = 5_000;
+  const BETWEEN_CYCLE_DELAY_MS = 15_000;
+  let lastProgressUpdate = 0;
+
+  try {
+    while (session.running && !session.cancelled) {
+      if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) break;
+
+      for (let pi = 0; pi < pairs.length; pi++) {
+        if (!session.running || session.cancelled) break;
+        if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) break;
+
+        const [senderIdx, receiverIdx] = pairs[pi];
+        const senderId = wsUserIds[senderIdx];
+        const receiverJid = wsJids[receiverIdx];
+        if (!senderId || !receiverJid || !isConnected(senderId)) {
+          session.failed++;
+          continue;
+        }
+
+        const chatPair = CHAT_FRIEND_PAIRS[session.rotationIndex % CHAT_FRIEND_PAIRS.length];
+        const msgText = senderIdx < receiverIdx ? chatPair[0] : chatPair[1];
+        session.rotationIndex++;
+
+        const ok = await sendGroupMessage(senderId, receiverJid, msgText).catch(() => false);
+        if (ok) session.sent++;
+        else session.failed++;
+
+        session.currentPair = pi;
+
+        const now = Date.now();
+        if (now - lastProgressUpdate > AUTOCHAT_PROGRESS_THROTTLE_MS) {
+          lastProgressUpdate = now;
+          try {
+            await bot.api.editMessageText(chatId, msgId,
+              `👫 <b>Chat Friend (Multi-WS) Running...</b>\n\n` +
+              `📊 WA Accounts: <b>${wsUserIds.length}</b>\n` +
+              `🔁 Cycle: <b>${session.cycle}</b> | Pair: <b>${pi + 1}/${totalPairs}</b>\n` +
+              `📤 Sent: <b>${session.sent}</b> | ❌ Failed: <b>${session.failed}</b>\n` +
+              (autoChatExpiresAt ? `\n⏳ ${formatRemaining(autoChatExpiresAt)} remaining` : "") +
+              `\n\nPress Stop to end it.`,
+              {
+                parse_mode: "HTML",
+                reply_markup: new InlineKeyboard().text("🔄 Refresh", "acf_refresh").text("⏹️ Stop", "acf_stop_btn"),
+              }
+            );
+          } catch {}
+        }
+
+        if (pi < pairs.length - 1) {
+          session.nextDelayMs = BETWEEN_PAIR_DELAY_MS;
+          await new Promise(r => setTimeout(r, BETWEEN_PAIR_DELAY_MS));
+        }
+      }
+
+      // One full cycle done
+      session.cycle++;
+      session.nextDelayMs = BETWEEN_CYCLE_DELAY_MS;
+      await new Promise(r => setTimeout(r, BETWEEN_CYCLE_DELAY_MS));
+
+      void saveAutoChatSession({
+        userId,
+        autoUserId: wsUserIds[1] ?? wsUserIds[0],
+        startedAt: Date.now(),
+        sessionType: "acf",
+        primaryJid: wsJids[0] ?? "",
+        autoJid: wsJids[1] ?? "",
+        autoChatExpiresAt,
+        wsUserIds,
+        wsJids,
+        sentCount: session.sent,
+      }).catch(() => {});
+    }
+  } catch (err: any) {
+    console.error(`[ACF_MULTI][${userId}] Error:`, err?.message);
+  }
+
+  for (const wsId of wsUserIds) unprotectSession(wsId);
+  activeAutoChatCount--;
+  session.running = false;
+  session.nextDelayMs = 0;
+  void deleteAutoChatSession(userId).catch(() => {});
+
+  if (!session.cancelled) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Chat Friend Complete!</b>\n\n📊 WA Accounts: ${wsUserIds.length}\n📤 Sent: <b>${session.sent}</b>\n❌ Failed: <b>${session.failed}</b>\n🔁 Cycles: <b>${session.cycle}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -12177,6 +12710,67 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  // ── Extra WA connect flow (3rd, 4th... WS accounts) ──────────────────────
+  if (state.step === "extra_connect_phone") {
+    const phone = text.replace(/\s/g, "");
+    if (!/^\+?\d{10,15}$/.test(phone)) {
+      await ctx.reply("❌ Invalid phone number.\nExample: <code>919876543210</code>", { parse_mode: "HTML" }); return;
+    }
+    // Determine next slot from autoConnectStep (e.g. "slot_2" means slot index 2)
+    const slotMatch = (state.autoConnectStep || "").match(/slot_(\d+)/);
+    const slotIndex = slotMatch ? parseInt(slotMatch[1]) : 2;
+    const extraWsId = getWsUserId(String(userId), slotIndex);
+    const wsNumber = slotIndex + 1;
+    userStates.delete(userId);
+    const statusMsg = await ctx.reply(
+      `⏳ <b>WA ${wsNumber} Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Pairing code aa raha hai, 10-20 seconds wait karo...`,
+      { parse_mode: "HTML" }
+    );
+    try {
+      await connectWhatsApp(extraWsId, phone,
+        async (code) => {
+          try {
+            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
+              `🔑 <b>WA ${wsNumber} Pairing Code:</b>\n\n<code>${esc(code)}</code>\n\n` +
+              `📋 <b>Steps:</b>\n1️⃣ ${wsNumber}${wsNumber === 2 ? "nd" : wsNumber === 3 ? "rd" : "th"} WhatsApp open karo\n2️⃣ Settings → Linked Devices\n` +
+              `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
+              `5️⃣ Code enter karo: <code>${esc(code)}</code>\n\n⌛ Confirm hone ka wait kar raha hun...`,
+              { parse_mode: "HTML" }
+            );
+          } catch {}
+        },
+        async () => {
+          try {
+            const connectedNum = getConnectedWhatsAppNumber(extraWsId);
+            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
+              `✅ <b>WA ${wsNumber} Connected!</b>\n\n` +
+              (connectedNum ? `📞 Number: <code>${esc(connectedNum)}</code>\n\n` : "") +
+              `🎉 Ab Auto Chat mein ${wsNumber} accounts use honge!`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat Menu", "auto_chat_menu").text("🏠 Menu", "main_menu") }
+            );
+          } catch {}
+        },
+        async (reason) => {
+          try {
+            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
+              `⚠️ <b>WA ${wsNumber} Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Dobara try karo.`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("➕ Retry", "connect_extra_wa").text("🏠 Menu", "main_menu") }
+            );
+          } catch {}
+        }
+      );
+    } catch (err: any) {
+      console.error(`[BOT] extra connectWhatsApp slot ${slotIndex} threw for user ${userId}:`, err?.message);
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
+          `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("➕ Retry", "connect_extra_wa").text("🏠 Menu", "main_menu") }
+        );
+      } catch {}
+    }
+    return;
+  }
+
   if (state.step === "cig_enter_message" && state.chatInGroupData) {
     state.chatInGroupData.message = text;
     state.step = "cig_confirm";
@@ -12965,15 +13559,18 @@ function splitMessage(msg: string, maxLen: number): string[] {
 async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
-    const autoSessions = allSessions.filter((s) => s.userId.endsWith("_auto"));
-    if (!autoSessions.length) return;
-    console.log(`[AUTO_WA] Reconnecting ${autoSessions.length} auto WhatsApp session(s) on startup...`);
-    for (const s of autoSessions) {
+    // Restore all non-primary WA sessions: _auto (2nd WA) and _ws3..._ws10 (3rd+ WA).
+    const secondarySessions = allSessions.filter(
+      (s) => s.userId.endsWith("_auto") || /_ws\d+$/.test(s.userId)
+    );
+    if (!secondarySessions.length) return;
+    console.log(`[AUTO_WA] Reconnecting ${secondarySessions.length} extra WhatsApp session(s) on startup...`);
+    for (const s of secondarySessions) {
       try {
         await ensureSessionLoaded(s.userId);
-        console.log(`[AUTO_WA] Loaded auto session: ${s.userId} (${s.phoneNumber})`);
+        console.log(`[AUTO_WA] Loaded session: ${s.userId} (${s.phoneNumber})`);
       } catch (err: any) {
-        console.error(`[AUTO_WA] Failed to load auto session ${s.userId}:`, err?.message);
+        console.error(`[AUTO_WA] Failed to load session ${s.userId}:`, err?.message);
       }
     }
   } catch (err: any) {
@@ -13077,8 +13674,13 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "cig_stop_btn") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0);
-          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups)`);
+          // Use multi-WS restore if session has wsUserIds and wsGroupMembership
+          if (s.wsUserIds && s.wsUserIds.length >= 2 && s.wsGroupMembership && s.wsGroupMembership.length > 0) {
+            void runGroupChatMultiBackground(s.userId, s.wsUserIds, s.userId, statusMsg.message_id, groups, s.wsGroupMembership, s.autoChatExpiresAt, s.currentGroupIndex ?? 0);
+          } else {
+            void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0);
+          }
+          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups, wsCount=${s.wsUserIds?.length ?? 2})`);
 
         } else if (sessionType === "acf") {
           // ── Chat Friend restore ────────────────────────────────────────────
@@ -13097,8 +13699,13 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "acf_stop_btn") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt);
-          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId}`);
+          // Use multi-WS restore if session has wsUserIds and wsJids
+          if (s.wsUserIds && s.wsUserIds.length >= 2 && s.wsJids && s.wsJids.length >= 2) {
+            void runChatFriendMultiBackground(s.userId, s.wsUserIds, s.wsJids, s.userId, statusMsg.message_id, s.autoChatExpiresAt);
+          } else {
+            void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt);
+          }
+          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (wsCount=${s.wsUserIds?.length ?? 2})`);
 
         } else {
           // ── Legacy "old" Auto Chat restore ────────────────────────────────
@@ -13136,22 +13743,41 @@ export async function startBot() {
   // (with their WhatsApp number) whenever any of their WhatsApp sessions disconnects —
   // including sessions that were silently restored on bot startup.
   setDisconnectNotifier((sessionUserId, reason, phoneNumber) => {
-    // Auto-Chat sessions use IDs like `${telegramId}_auto`; map to the actual Telegram user.
-    const isAuto = sessionUserId.endsWith("_auto");
-    const telegramIdStr = isAuto ? sessionUserId.replace(/_auto$/, "") : sessionUserId;
+    // Parse the Telegram user ID from the session ID.
+    // Patterns: plain userId (primary), userId_auto (2nd WA), userId_ws3...userId_ws10 (3rd+).
+    let telegramIdStr: string;
+    let accountLabel: string;
+    let reconnectAction: string;
+
+    if (sessionUserId.endsWith("_auto")) {
+      telegramIdStr = sessionUserId.replace(/_auto$/, "");
+      accountLabel = "Auto Chat WhatsApp (WA 2)";
+      reconnectAction = "connect_auto_wa";
+    } else if (/_ws\d+$/.test(sessionUserId)) {
+      // e.g. "123456_ws3" → telegramId="123456", slot=3
+      const match = sessionUserId.match(/^(.+)_ws(\d+)$/);
+      telegramIdStr = match ? match[1] : sessionUserId;
+      const slotNum = match ? match[2] : "?";
+      accountLabel = `WhatsApp ${slotNum}`;
+      reconnectAction = "connect_extra_wa";
+    } else {
+      telegramIdStr = sessionUserId;
+      accountLabel = "WhatsApp (Primary)";
+      reconnectAction = "connect_wa";
+    }
+
     const telegramId = Number(telegramIdStr);
     if (!Number.isFinite(telegramId)) return;
     const phoneText = phoneNumber ? phoneNumber : "(unknown)";
-    const accountLabel = isAuto ? "Auto Chat WhatsApp" : "WhatsApp";
     const message =
       `⚠️ <b>${accountLabel} Disconnected</b>\n\n` +
-      `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
+      `Your number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
       `Reason: ${esc(reason || "Unknown")}\n\n` +
       `Please reconnect to continue using the bot.`;
     void bot.api.sendMessage(telegramId, message, {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text(isAuto ? "🤖 Reconnect Auto WA" : "📱 Reconnect WhatsApp", isAuto ? "connect_auto_wa" : "connect_wa")
+        .text("🔌 Reconnect", reconnectAction)
         .text("🏠 Menu", "main_menu"),
     }).catch((err) => {
       console.error(`[BOT][NOTIFY-DISCONNECT] Failed to notify ${telegramId}:`, err?.message);
