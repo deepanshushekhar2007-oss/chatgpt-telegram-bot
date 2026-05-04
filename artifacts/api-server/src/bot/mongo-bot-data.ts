@@ -524,3 +524,70 @@ export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSessio
     return [];
   }
 }
+
+// ─── Pending Group Creation Persistence ─────────────────────────────────────
+// Saves the create-group state to MongoDB so a bot restart doesn't lose the
+// user's entered name, numbers, permissions, etc. Expires after 20 minutes.
+
+export interface PersistedGroupSettings {
+  name: string;
+  description: string;
+  count: number;
+  finalNames: string[];
+  namingMode: "auto" | "custom";
+  editGroupInfo: boolean;
+  sendMessages: boolean;
+  addMembers: boolean;
+  approveJoin: boolean;
+  disappearingMessages: number;
+  friendNumbers: string[];
+  makeFriendAdmin: boolean;
+  // dpBuffers (photo Buffers) are NOT persisted — they must be re-uploaded
+  // if the session is restored from MongoDB after a bot restart.
+}
+
+export const PENDING_GROUP_TTL_MS = 20 * 60 * 1000; // 20 minutes
+
+export async function savePendingGroupCreation(
+  userId: number,
+  gs: PersistedGroupSettings
+): Promise<void> {
+  try {
+    const col = await getCollection("pending_group_creation");
+    await col.replaceOne(
+      { userId },
+      {
+        userId,
+        savedAt: Date.now(),
+        expiresAt: Date.now() + PENDING_GROUP_TTL_MS,
+        groupSettings: gs,
+      },
+      { upsert: true }
+    );
+  } catch {}
+}
+
+export async function loadPendingGroupCreation(
+  userId: number
+): Promise<PersistedGroupSettings | null> {
+  try {
+    const col = await getCollection("pending_group_creation");
+    const doc = await col.findOne({ userId });
+    if (!doc) return null;
+    // Expired?
+    if (doc["expiresAt"] && Date.now() > (doc["expiresAt"] as number)) {
+      await col.deleteOne({ userId }).catch(() => {});
+      return null;
+    }
+    return doc["groupSettings"] as PersistedGroupSettings;
+  } catch {
+    return null;
+  }
+}
+
+export async function deletePendingGroupCreation(userId: number): Promise<void> {
+  try {
+    const col = await getCollection("pending_group_creation");
+    await col.deleteOne({ userId });
+  } catch {}
+}

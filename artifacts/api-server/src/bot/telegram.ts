@@ -74,6 +74,10 @@ import {
   saveAutoChatSession,
   deleteAutoChatSession,
   loadAllAutoChatSessions,
+  savePendingGroupCreation,
+  loadPendingGroupCreation,
+  deletePendingGroupCreation,
+  type PersistedGroupSettings,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -4349,6 +4353,26 @@ async function showGroupSummary(ctx: any) {
     `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
     "🚀 Ready to create?";
   const markup = new InlineKeyboard().text("✅ Create Now", "group_create_start").text("❌ Cancel", "main_menu");
+
+  // Persist the state to MongoDB so the user can still create groups even
+  // if the bot restarts between this screen and clicking "Create Now".
+  // Photos (dpBuffers) are NOT persisted — they would need to be re-uploaded
+  // if the session is restored from MongoDB. Valid for 20 minutes.
+  void savePendingGroupCreation(userId, {
+    name: gs.name,
+    description: gs.description,
+    count: gs.count,
+    finalNames: gs.finalNames,
+    namingMode: gs.namingMode,
+    editGroupInfo: gs.editGroupInfo,
+    sendMessages: gs.sendMessages,
+    addMembers: gs.addMembers,
+    approveJoin: gs.approveJoin,
+    disappearingMessages: gs.disappearingMessages,
+    friendNumbers: gs.friendNumbers,
+    makeFriendAdmin: gs.makeFriendAdmin,
+  }).catch(() => {});
+
   try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: markup }); }
   catch { await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup }); }
 }
@@ -4356,16 +4380,49 @@ async function showGroupSummary(ctx: any) {
 bot.callbackQuery("group_create_start", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.groupSettings) return;
-
-  const gs = { ...state.groupSettings };
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
-  state.step = "group_creating";
-  state.groupCreationCancel = false;
+  // ── Try RAM state first ───────────────────────────────────────────────────
+  let gs: GroupSettings | null = null;
+  const state = userStates.get(userId);
+  if (state?.groupSettings) {
+    gs = { ...state.groupSettings };
+    state.step = "group_creating";
+    state.groupCreationCancel = false;
+  } else {
+    // ── Fallback: restore from MongoDB (handles bot restarts) ──────────────
+    const persisted = await loadPendingGroupCreation(userId);
+    if (persisted) {
+      gs = {
+        ...persisted,
+        dpBuffers: [], // Photos are not persisted — re-upload needed
+      };
+      // Re-create the state entry so cancel/progress logic works.
+      userStates.set(userId, {
+        step: "group_creating",
+        groupSettings: gs,
+        groupCreationCancel: false,
+      });
+    }
+  }
+
+  if (!gs || !gs.finalNames.length) {
+    // State expired (>20 min) or never saved — tell the user clearly.
+    await ctx.editMessageText(
+      "⚠️ <b>Session Expired</b>\n\n" +
+      "Your group creation session has expired (20 minutes limit).\n\n" +
+      "Please start again by tapping <b>Create Groups</b> from the menu.",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("👥 Create Groups", "create_groups")
+          .text("🏠 Main Menu", "main_menu"),
+      }
+    );
+    return;
+  }
 
   await ctx.editMessageText(
     `⏳ <b>Creating ${gs.finalNames.length} group(s)...</b>\n\n🔄 0/${gs.finalNames.length} done...`,
@@ -4543,6 +4600,9 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   gs.dpBuffers = [];
 
   userStates.delete(numericUserId);
+
+  // Clean up the MongoDB-persisted pending state — creation is complete.
+  void deletePendingGroupCreation(numericUserId).catch(() => {});
 
   const cancelled = results.some((r) => r.error === "Cancelled by user");
   const created = results.filter((r) => r.link).length;
