@@ -185,7 +185,11 @@ export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: stri
       const rawId = creds?.me?.id || creds?.me?.lid || "";
       const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
       phoneNumber = digits ? `+${digits}` : "";
-      if (!creds?.registered) continue;
+      // Include QR-connected sessions that have me.id set even if registered flag
+      // is not yet true (can happen when creds.update fires before registered=true
+      // is persisted — common for QR pairing flow timing edge cases).
+      const hasConnected = creds?.registered === true || (creds?.me?.id && String(creds.me.id).includes("@"));
+      if (!hasConnected) continue;
     } catch {
       continue;
     }

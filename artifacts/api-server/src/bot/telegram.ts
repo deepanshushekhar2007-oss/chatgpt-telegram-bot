@@ -4731,7 +4731,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   if (!isConnected(String(userId))) {
     console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
     try {
-      await ctx.reply(
+      await ctx.editMessageText(
         "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
         {
           parse_mode: "HTML",
@@ -4741,7 +4741,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
         }
       );
     } catch (err: any) {
-      console.error("[CTC] wa-not-connected reply failed:", err?.message ?? err);
+      console.error("[CTC] wa-not-connected edit failed:", err?.message ?? err);
     }
     return;
   }
@@ -4759,20 +4759,16 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Use reply() as PRIMARY to guarantee a new message is always delivered,
-  // even if the original menu message is too old to edit.  After sending,
-  // best-effort delete / edit the old menu message to reduce clutter.
+  // Edit the existing message in-place — same behaviour as every other button.
   try {
-    await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-    // Clean up the old message (best-effort — ignore errors)
-    try { await ctx.deleteMessage(); } catch {}
+    await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
   } catch (err: any) {
-    console.error("[CTC] prompt reply failed:", err?.message ?? err);
-    // Last resort: try editing in-place
+    console.error("[CTC] prompt edit failed:", err?.message ?? err);
+    // Fallback: send a new message only if editing fails (e.g. message too old)
     try {
-      await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
     } catch (err2: any) {
-      console.error("[CTC] prompt edit also failed:", err2?.message ?? err2);
+      console.error("[CTC] prompt reply fallback also failed:", err2?.message ?? err2);
     }
   }
 });
@@ -8895,7 +8891,11 @@ async function runGroupChatDualBackground(
   groups: Array<{ id: string; subject: string }>,
   autoChatExpiresAt?: number,
   startGroupIndex = 0,
-  startMessageIndex = 0
+  startMessageIndex = 0,
+  startSent = 0,
+  startSentByAccount1 = 0,
+  startSentByAccount2 = 0,
+  startFailed = 0
 ): Promise<void> {
   const session: CigSession = {
     running: true,
@@ -8904,10 +8904,10 @@ async function runGroupChatDualBackground(
     msgId,
     groups,
     message: "Auto funny/study rotation",
-    sent: 0,
-    failed: 0,
-    sentByAccount1: 0,
-    sentByAccount2: 0,
+    sent: startSent,
+    failed: startFailed,
+    sentByAccount1: startSentByAccount1,
+    sentByAccount2: startSentByAccount2,
     botMode: "both",
     currentGroupIndex: startGroupIndex,
     cycle: 1,
@@ -9063,6 +9063,10 @@ async function runGroupChatDualBackground(
         autoChatExpiresAt,
         currentGroupIndex: groupIndex,
         messageIndex: messageIndex,
+        sentCount: session.sent,
+        sentByAccount1: session.sentByAccount1,
+        sentByAccount2: session.sentByAccount2,
+        failedCount: session.failed,
       }).catch(() => {});
     }
   } catch (err: any) {
@@ -9266,7 +9270,9 @@ async function runChatFriendBackground(
   primaryJid: string,
   autoJid: string,
   totalPairs: number,
-  autoChatExpiresAt?: number
+  autoChatExpiresAt?: number,
+  startSent = 0,
+  startFailed = 0
 ): Promise<void> {
   const session: AcfSession = {
     running: true,
@@ -9275,8 +9281,8 @@ async function runChatFriendBackground(
     msgId,
     primaryJid,
     autoJid,
-    sent: 0,
-    failed: 0,
+    sent: startSent,
+    failed: startFailed,
     currentPair: 0,
     totalPairs,
     cycle: 1,
@@ -9402,6 +9408,23 @@ async function runChatFriendBackground(
         await waitWithCancel(session, session.nextDelayMs);
       }
       if (!isSessionActive(session)) break;
+
+      // Periodically persist counts so a bot restart can resume with the
+      // correct sent/failed totals instead of starting from zero.
+      if (i % 5 === 0) {
+        void saveAutoChatSession({
+          userId,
+          autoUserId,
+          startedAt: Date.now(),
+          sessionType: "acf",
+          primaryJid,
+          autoJid,
+          autoChatExpiresAt,
+          sentCount: session.sent,
+          failedCount: session.failed,
+        }).catch(() => {});
+      }
+
       i++;
     }
   } catch (err: any) {
@@ -13067,18 +13090,25 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             continue;
           }
           const expiryLabel = s.autoChatExpiresAt
-            ? `\n⏳ Time remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
+            ? `\n⏳ Time Remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
             : "";
+          const restoredSent = s.sentCount ?? 0;
+          const restoredAcc1 = s.sentByAccount1 ?? 0;
+          const restoredAcc2 = s.sentByAccount2 ?? 0;
+          const restoredFailed = s.failedCount ?? 0;
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "♻️ <b>Chat In Group Restored!</b>\n\n" +
-            "The bot restarted and your Chat In Group session has been automatically resumed.\n" +
-            `📋 Groups: <b>${groups.length}</b>${expiryLabel}\n\n` +
-            "⏳ Resuming messages...",
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "cig_stop_btn") }
+            "🤖 <b>Chat In Group Chal Raha Hai...</b>\n\n" +
+            `📋 Groups: <b>${groups.length}</b>\n` +
+            `📱 Account 1: <b>${restoredAcc1} messages</b>\n` +
+            `📱 Account 2: <b>${restoredAcc2} messages</b>\n` +
+            `📤 Total Sent: <b>${restoredSent}</b>\n` +
+            `❌ Failed: <b>${restoredFailed}</b>` +
+            expiryLabel + "\n\nPress Stop to stop the chat.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "cig_refresh").text("⏹️ Stop", "cig_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0);
-          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups)`);
+          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0, restoredSent, restoredAcc1, restoredAcc2, restoredFailed);
+          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups, sent=${restoredSent})`);
 
         } else if (sessionType === "acf") {
           // ── Chat Friend restore ────────────────────────────────────────────
@@ -13087,28 +13117,28 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             continue;
           }
           const expiryLabel = s.autoChatExpiresAt
-            ? `\n⏳ Time remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
+            ? `\n⏳ Time Remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
             : "";
+          const restoredSent = s.sentCount ?? 0;
+          const restoredFailed = s.failedCount ?? 0;
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "♻️ <b>Chat Friend Restored!</b>\n\n" +
-            "The bot restarted and your Chat Friend session has been automatically resumed." +
-            expiryLabel + "\n\n" +
-            "⏳ Resuming messages...",
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "acf_stop_btn") }
+            "👫 <b>Chat Friend Chal Raha Hai...</b>\n\n" +
+            `📤 Sent: <b>${restoredSent}</b>\n` +
+            `❌ Failed: <b>${restoredFailed}</b>` +
+            expiryLabel + "\n\nPress Stop to end it.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "acf_refresh").text("⏹️ Stop", "acf_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt);
-          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId}`);
+          void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt, restoredSent, restoredFailed);
+          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (sent=${restoredSent})`);
 
         } else {
           // ── Legacy "old" Auto Chat restore ────────────────────────────────
           const groupIds = s.groupIds ?? [];
           if (!groupIds.length) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "♻️ <b>Auto Chat Restored!</b>\n\n" +
-            "The bot restarted and your Auto Chat session has been automatically resumed.\n\n" +
-            "⏳ Sending messages...",
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏹️ Stop", "auto_chat_stop") }
+            "🤖 <b>Auto Chat Chal Raha Hai...</b>\n\n⏳ Please wait...",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "auto_chat_refresh").text("⏹️ Stop", "auto_chat_stop").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
           const groups = groupIds.map((id) => ({ id, subject: "" }));

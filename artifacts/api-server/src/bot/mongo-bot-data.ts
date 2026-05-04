@@ -484,6 +484,13 @@ export interface PersistedAutoChatSession {
   primaryJid?: string;
   autoJid?: string;
   // autoChatExpiresAt shared above
+
+  // ── message count fields (cig + acf) ─────────────────────────────────────
+  // Saved periodically so counts survive a bot restart mid-session.
+  sentCount?: number;
+  sentByAccount1?: number;
+  sentByAccount2?: number;
+  failedCount?: number;
 }
 
 export async function saveAutoChatSession(session: PersistedAutoChatSession): Promise<void> {
@@ -519,6 +526,10 @@ export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSessio
       messageIndex: d["messageIndex"] as number | undefined,
       primaryJid: d["primaryJid"] as string | undefined,
       autoJid: d["autoJid"] as string | undefined,
+      sentCount: d["sentCount"] as number | undefined,
+      sentByAccount1: d["sentByAccount1"] as number | undefined,
+      sentByAccount2: d["sentByAccount2"] as number | undefined,
+      failedCount: d["failedCount"] as number | undefined,
     }));
   } catch {
     return [];
