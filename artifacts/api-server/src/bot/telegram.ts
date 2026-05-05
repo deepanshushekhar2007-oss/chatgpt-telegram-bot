@@ -40,6 +40,7 @@ import {
   setGroupDisappearingMessages,
   setGroupName,
   resetGroupInviteLink,
+  demoteGroupAdmin,
   ensureSessionLoaded,
   hasStoredWhatsAppSession,
   waitForWhatsAppConnected,
@@ -975,6 +976,14 @@ interface UserState {
     selectedIndices: Set<number>;
     page: number;
   };
+  demoteAdminData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    mode?: "all" | "numbers";
+    phoneNumbers?: string[];
+  };
   approvalData?: {
     allGroups: Array<{ id: string; subject: string }>;
     patterns: SimilarGroup[];
@@ -1305,6 +1314,7 @@ const removeMembersCancelRequests: Set<number> = new Set();
 const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
 const resetLinkCancelRequests: Set<number> = new Set();
+const demoteAdminCancelRequests: Set<number> = new Set();
 
 // ── Cancel-dialog protection ────────────────────────────────────────────────
 // When a user taps a "❌ Cancel" button on a long-running flow, the bot shows
@@ -1762,7 +1772,8 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
-    .text("🔗 Reset Link", "reset_link").text("🛡️ Auto Accepter", "auto_accepter").row();
+    .text("🔗 Reset Link", "reset_link").text("👤 Demote Admin", "demote_admin").row()
+    .text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -2427,8 +2438,18 @@ bot.command("help", async (ctx) => {
     `        (e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61")\n` +
     `   • Review and confirm — live progress + Cancel\n\n` +
 
+    `👤 15. Demote Admin\n` +
+    `• Select admin groups — choose Similar Groups or All Groups\n` +
+    `• Choose demote mode:\n` +
+    `   🔴 Demote All Admins: removes admin from every non-owner admin in selected groups\n` +
+    `   📱 Demote Selected Numbers: send numbers (one per line) → only those admins get demoted\n` +
+    `• Confirm before starting in both modes\n` +
+    `• Live progress shows each group and number being processed\n` +
+    `• Cancel button to stop at any time\n` +
+    `• Group owners (super-admins) are never demoted\n\n` +
+
     (canUserSeeAutoChat(userId) ?
-    `🤖 15. Auto Chat  ⭐ Paid Service\n` +
+    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
     `• Auto Chat ke liye 2nd WhatsApp connect karo\n` +
     `• Chat Friend: funny/study messages auto send hote rahenge jab tak Stop na dabao\n` +
     `• Chat In Group: selected common groups mein funny/study messages rotate hote rahenge\n` +
@@ -2436,12 +2457,12 @@ bot.command("help", async (ctx) => {
     `• Delay rotation: 10 sec, 1 min, 10 min, 20 min, 30 min, 1 hour, 2 hours\n` +
     `• Live status, sent/failed count, refresh aur stop controls milte hain\n\n`
     :
-    `🤖 15. Auto Chat  ⭐ Paid Service\n` +
+    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
     `• Automatically send messages to friends or groups on WhatsApp\n` +
     `• Random delay rotation keeps it natural and safe\n` +
     `• To buy Auto Chat access, message ${OWNER_USERNAME} on Telegram\n\n`) +
 
-    `🛡️ 16. Auto Request Accepter\n` +
+    `🛡️ 17. Auto Request Accepter\n` +
     `• Automatically accept pending join requests in selected groups\n` +
     `• Only accepts users who joined via invite link (NOT direct admin-adds)\n` +
     `• How to use:\n` +
@@ -3831,6 +3852,7 @@ function clearUserMemoryState(telegramUserId: number): void {
   approvalCancelRequests.delete(telegramUserId);
   makeAdminCancelRequests.delete(telegramUserId);
   resetLinkCancelRequests.delete(telegramUserId);
+  demoteAdminCancelRequests.delete(telegramUserId);
 
   // 7. New-session flag
   newSessionFlag.delete(telegramUserId);
@@ -3890,7 +3912,7 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
   // 6. Cancel-request flag sets
   const cancelCleared = joinCancelRequests.size + getLinkCancelRequests.size +
     addMembersCancelRequests.size + removeMembersCancelRequests.size +
-    approvalCancelRequests.size + makeAdminCancelRequests.size + resetLinkCancelRequests.size;
+    approvalCancelRequests.size + makeAdminCancelRequests.size + resetLinkCancelRequests.size + demoteAdminCancelRequests.size;
   joinCancelRequests.clear();
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
@@ -3898,6 +3920,7 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
   approvalCancelRequests.clear();
   makeAdminCancelRequests.clear();
   resetLinkCancelRequests.clear();
+  demoteAdminCancelRequests.clear();
 
   // 7. newSessionFlag
   const newSessionCleared = newSessionFlag.size;
@@ -5933,8 +5956,9 @@ bot.callbackQuery("help_button", async (ctx) => {
     `11. Edit Settings — Change group settings/permissions\n` +
     `12. Change Name — Rename your groups\n` +
     `13. Reset Link — Reset group invite links\n` +
-    `14. Auto Chat ⭐ — Auto send messages to friends/groups\n` +
-    `15. Auto Accepter — Auto-accept invite-link join requests\n\n` +
+    `14. Demote Admin — Remove admin rights from members\n` +
+    `15. Auto Chat ⭐ — Auto send messages to friends/groups\n` +
+    `16. Auto Accepter — Auto-accept invite-link join requests\n\n` +
     `💬 Commands:\n` +
     `/start — Open main menu\n` +
     `/help  — Full detailed help guide\n\n` +
@@ -8824,6 +8848,537 @@ async function resetLinkBackground(
   }
 
   const chunks = splitMessage(resultText, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  }
+}
+
+// ─── Demote Admin Feature ────────────────────────────────────────────────────
+
+const DA_PAGE_SIZE = 20;
+
+function buildDemoteAdminKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const allGroups = state.demoteAdminData!.allGroups;
+  const selected = state.demoteAdminData!.selectedIndices;
+  const page = state.demoteAdminData!.page;
+  const totalPages = Math.max(1, Math.ceil(allGroups.length / DA_PAGE_SIZE));
+  const start = page * DA_PAGE_SIZE;
+  const end = Math.min(start + DA_PAGE_SIZE, allGroups.length);
+
+  for (let i = start; i < end; i++) {
+    const g = allGroups[i];
+    const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `da_tog_${i}`).row();
+  }
+
+  const prev = page > 0 ? "⬅️ Previous 20" : " ";
+  const next = page < totalPages - 1 ? "Next 20 ➡️" : " ";
+  kb.text(prev, "da_prev_page").text(`📄 ${page + 1}/${totalPages}`, "da_page_info").text(next, "da_next_page").row();
+
+  if (allGroups.length > 1) {
+    kb.text("☑️ Select All", "da_select_all").text("🗑️ Clear All", "da_clear_all").row();
+  }
+  if (selected.size > 0) {
+    kb.text(`▶️ Proceed (${selected.size} groups)`, "da_proceed").row();
+  }
+  kb.text("🏠 Back", "main_menu");
+  return kb;
+}
+
+bot.callbackQuery("demote_admin", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
+  const allGroups = await getAllGroups(String(userId));
+  const adminGroups = allGroups.filter((g) => g.isAdmin);
+
+  if (!adminGroups.length) {
+    await ctx.editMessageText("📭 You are not an admin in any group.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    }); return;
+  }
+
+  const adminGroupsSimple = adminGroups.map((g) => ({ id: g.id, subject: g.subject }));
+  const patterns = detectSimilarGroups(adminGroupsSimple);
+
+  userStates.set(userId, {
+    step: "demote_admin_menu",
+    demoteAdminData: {
+      allGroups: adminGroupsSimple,
+      patterns,
+      selectedIndices: new Set(),
+      page: 0,
+    },
+  });
+
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "da_similar").text("📋 All Groups", "da_show_all").row();
+  else kb.text("📋 All Groups", "da_show_all").row();
+  kb.text("🏠 Main Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n` +
+    `📊 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
+    (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
+    `\n📌 Choose an option:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("da_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData) return;
+  const { patterns } = state.demoteAdminData;
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "demote_admin").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length})`, `da_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", "demote_admin").text("🏠 Menu", "main_menu");
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", {
+    parse_mode: "HTML", reply_markup: kb,
+  });
+});
+
+bot.callbackQuery(/^da_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData) return;
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.demoteAdminData.patterns[idx];
+  if (!pattern) return;
+  const patternIds = new Set(pattern.groups.map((g) => g.id));
+  state.demoteAdminData.selectedIndices = new Set();
+  for (let i = 0; i < state.demoteAdminData.allGroups.length; i++) {
+    if (patternIds.has(state.demoteAdminData.allGroups[i].id)) state.demoteAdminData.selectedIndices.add(i);
+  }
+  state.step = "demote_admin_select";
+  state.demoteAdminData.page = 0;
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_show_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData) return;
+  state.step = "demote_admin_select";
+  state.demoteAdminData.page = 0;
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\nSelect groups:`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery(/^da_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.demoteAdminData.allGroups.length) return;
+  if (state.demoteAdminData.selectedIndices.has(idx)) state.demoteAdminData.selectedIndices.delete(idx);
+  else state.demoteAdminData.selectedIndices.add(idx);
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.demoteAdminData) return;
+  if (state.demoteAdminData.page > 0) state.demoteAdminData.page--;
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.demoteAdminData) return;
+  const totalPages = Math.ceil(state.demoteAdminData.allGroups.length / DA_PAGE_SIZE);
+  if (state.demoteAdminData.page < totalPages - 1) state.demoteAdminData.page++;
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+});
+
+bot.callbackQuery("da_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.demoteAdminData) return;
+  for (let i = 0; i < state.demoteAdminData.allGroups.length; i++) state.demoteAdminData.selectedIndices.add(i);
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\nAll <b>${state.demoteAdminData.allGroups.length} groups selected</b>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.demoteAdminData) return;
+  state.demoteAdminData.selectedIndices.clear();
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>None selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("da_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
+
+  const selectedGroups = Array.from(state.demoteAdminData.selectedIndices).map((i) => state.demoteAdminData!.allGroups[i]);
+  const groupList = selectedGroups.slice(0, 20).map((g) => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 20 ? `\n... +${selectedGroups.length - 20} more` : "";
+
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n` +
+    `<b>${selectedGroups.length} group(s) selected:</b>\n${groupList}${more}\n\n` +
+    `Choose demote mode:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔴 Demote All Admins", "da_mode_all").row()
+        .text("📱 Demote Selected Numbers", "da_mode_numbers").row()
+        .text("🔙 Back", "da_show_all").text("🏠 Menu", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("da_mode_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
+
+  state.demoteAdminData.mode = "all";
+  const selectedGroups = Array.from(state.demoteAdminData.selectedIndices).map((i) => state.demoteAdminData!.allGroups[i]);
+  const groupList = selectedGroups.slice(0, 20).map((g) => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 20 ? `\n... +${selectedGroups.length - 20} more` : "";
+
+  await ctx.editMessageText(
+    `🔴 <b>Demote All Admins — Confirm</b>\n\n` +
+    `<b>${selectedGroups.length} group(s):</b>\n${groupList}${more}\n\n` +
+    `⚠️ This will demote <b>all non-owner admins</b> in the selected groups.\n\n` +
+    `Are you sure?`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Yes, Demote All", "da_all_confirm")
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("da_all_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
+
+  const selectedGroups = Array.from(state.demoteAdminData.selectedIndices).map((i) => state.demoteAdminData!.allGroups[i]);
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  userStates.delete(userId);
+  demoteAdminCancelRequests.delete(userId);
+
+  try {
+    await bot.api.editMessageText(chatId, msgId,
+      `⏳ <b>Demoting all admins in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+    );
+  } catch {}
+
+  void demoteAllBackground(userId, selectedGroups, chatId, msgId);
+});
+
+bot.callbackQuery("da_mode_numbers", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
+
+  state.demoteAdminData.mode = "numbers";
+  state.step = "demote_admin_enter_numbers";
+
+  await ctx.editMessageText(
+    `📱 <b>Demote Selected Numbers</b>\n\n` +
+    `Send the phone numbers to demote (one per line):\n\n` +
+    `Example:\n<code>919912345678\n919898765432</code>\n\n` +
+    `Only numbers that are currently admin in the selected groups will be demoted.`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("da_numbers_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.demoteAdminData || !state.demoteAdminData.phoneNumbers?.length) return;
+
+  const selectedGroups = Array.from(state.demoteAdminData.selectedIndices).map((i) => state.demoteAdminData!.allGroups[i]);
+  const phoneNumbers = state.demoteAdminData.phoneNumbers;
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  userStates.delete(userId);
+  demoteAdminCancelRequests.delete(userId);
+
+  try {
+    await bot.api.editMessageText(chatId, msgId,
+      `⏳ <b>Demoting ${phoneNumbers.length} number(s) in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+    );
+  } catch {}
+
+  void demoteSelectedBackground(userId, selectedGroups, phoneNumbers, chatId, msgId);
+});
+
+bot.callbackQuery("da_cancel_request", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (cancelDialogActiveFor.has(userId)) return;
+  cancelDialogActiveFor.add(userId);
+  try {
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard()
+        .text("✅ Yes, Cancel", "da_cancel_confirm")
+        .text("🔙 No, Continue", "da_cancel_abort"),
+    });
+  } catch {}
+});
+
+bot.callbackQuery("da_cancel_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Cancelling..." });
+  const userId = ctx.from.id;
+  demoteAdminCancelRequests.add(userId);
+  cancelDialogActiveFor.delete(userId);
+  try { await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }); } catch {}
+});
+
+bot.callbackQuery("da_cancel_abort", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Continuing..." });
+  cancelDialogActiveFor.delete(ctx.from.id);
+  try {
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request"),
+    });
+  } catch {}
+});
+
+async function demoteAllBackground(
+  userIdNum: number,
+  groups: Array<{ id: string; subject: string }>,
+  chatId: number,
+  msgId: number
+) {
+  const userId = String(userIdNum);
+  const lines: string[] = [];
+  let totalDemoted = 0;
+  let wasCancelled = false;
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+    const group = groups[gi];
+    let demoted = 0, skipped = 0, failed = 0;
+    const groupLines: string[] = [];
+
+    try {
+      if (!cancelDialogActiveFor.has(userIdNum)) {
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching admins...`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+        );
+      }
+    } catch {}
+
+    const participants = await getGroupParticipants(userId, group.id);
+    const admins = participants.filter((p) => p.isAdmin && !p.isSuperAdmin);
+
+    if (!admins.length) {
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ℹ️ No demotable admins found`);
+      continue;
+    }
+
+    for (let ai = 0; ai < admins.length; ai++) {
+      if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+      const admin = admins[ai];
+      const phone = admin.phone || admin.jid.split("@")[0];
+      const ok = await demoteGroupAdmin(userId, group.id, admin.jid);
+      if (ok) {
+        groupLines.push(`  ✅ +${phone} — Demoted`);
+        demoted++;
+        totalDemoted++;
+      } else {
+        groupLines.push(`  ❌ +${phone} — Failed`);
+        failed++;
+      }
+
+      if (ai % 3 === 0 || ai === admins.length - 1) {
+        try {
+          if (!cancelDialogActiveFor.has(userIdNum)) {
+            await bot.api.editMessageText(chatId, msgId,
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+              `Processing: ${ai + 1}/${admins.length}\n✅ Demoted: ${demoted} | ❌ Failed: ${failed}`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+            );
+          }
+        } catch {}
+      }
+      await new Promise((r) => setTimeout(r, 600));
+    }
+
+    if (wasCancelled) break;
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ❌ Failed: ${failed} | ⏭️ Skipped: ${skipped}`);
+  }
+
+  demoteAdminCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  let result = `👤 <b>Demote All Admins — Result</b>\n\n`;
+  result += lines.join("\n\n");
+  if (wasCancelled) result += `\n\n⛔ <b>Cancelled after ${lines.length}/${groups.length} group(s).</b>`;
+  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Total demoted: ${totalDemoted} across ${groups.length} group(s)!</b>`;
+
+  const chunks = splitMessage(result, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  }
+}
+
+async function demoteSelectedBackground(
+  userIdNum: number,
+  groups: Array<{ id: string; subject: string }>,
+  phoneNumbers: string[],
+  chatId: number,
+  msgId: number
+) {
+  const userId = String(userIdNum);
+  const lines: string[] = [];
+  let totalDemoted = 0;
+  let wasCancelled = false;
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+    const group = groups[gi];
+    const groupLines: string[] = [];
+    let demoted = 0, notAdmin = 0, notFound = 0, failed = 0;
+
+    try {
+      if (!cancelDialogActiveFor.has(userIdNum)) {
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Processing ${phoneNumbers.length} number(s)...`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+        );
+      }
+    } catch {}
+
+    const participants = await getGroupParticipants(userId, group.id);
+
+    for (let pi = 0; pi < phoneNumbers.length; pi++) {
+      if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+      const phone = phoneNumbers[pi].replace(/[^0-9]/g, "");
+      const participant = participants.find((p) => p.phone === phone || p.jid.startsWith(phone + "@"));
+
+      if (!participant) {
+        groupLines.push(`  ❌ +${phone} — Not found in group`);
+        notFound++;
+      } else if (!participant.isAdmin) {
+        groupLines.push(`  ⚠️ +${phone} — Not an admin`);
+        notAdmin++;
+      } else if (participant.isSuperAdmin) {
+        groupLines.push(`  ⚠️ +${phone} — Group owner, cannot demote`);
+        notAdmin++;
+      } else {
+        const ok = await demoteGroupAdmin(userId, group.id, participant.jid);
+        if (ok) {
+          groupLines.push(`  ✅ +${phone} — Demoted`);
+          demoted++;
+          totalDemoted++;
+        } else {
+          groupLines.push(`  ❌ +${phone} — Failed`);
+          failed++;
+        }
+      }
+
+      if (pi % 3 === 0 || pi === phoneNumbers.length - 1) {
+        try {
+          if (!cancelDialogActiveFor.has(userIdNum)) {
+            await bot.api.editMessageText(chatId, msgId,
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+              `Processing: ${pi + 1}/${phoneNumbers.length}\n✅ Demoted: ${demoted} | ⚠️ Skip: ${notAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
+            );
+          }
+        } catch {}
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (wasCancelled) break;
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ⚠️ Not admin: ${notAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`);
+  }
+
+  demoteAdminCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  let result = `👤 <b>Demote Selected Numbers — Result</b>\n\n`;
+  result += lines.join("\n\n");
+  if (wasCancelled) result += `\n\n⛔ <b>Cancelled after ${lines.length}/${groups.length} group(s).</b>`;
+  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Total demoted: ${totalDemoted} across ${groups.length} group(s)!</b>`;
+
+  const chunks = splitMessage(result, 4000);
   try {
     await bot.api.editMessageText(chatId, msgId, chunks[0], {
       parse_mode: "HTML",
@@ -12907,6 +13462,41 @@ bot.on("message:text", async (ctx) => {
     }
     state.approvalData.targetPhones = phoneNumbers;
     await showAdminApprovalChoice(ctx, userId);
+    return;
+  }
+
+  if (state.step === "demote_admin_enter_numbers") {
+    if (!state.demoteAdminData) return;
+    const phoneLines = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    const phoneNumbers: string[] = [];
+    for (const line of phoneLines) {
+      const cleaned = line.replace(/[^0-9+]/g, "");
+      if (cleaned.length >= 7) phoneNumbers.push(cleaned.replace(/^\+/, ""));
+    }
+    if (!phoneNumbers.length) {
+      await ctx.reply("❌ No valid phone numbers found. Send numbers with country code, e.g.\n<code>919912345678\n919898765432</code>",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+      );
+      return;
+    }
+    state.demoteAdminData.phoneNumbers = phoneNumbers;
+    const selectedGroups = Array.from(state.demoteAdminData.selectedIndices).map((i) => state.demoteAdminData!.allGroups[i]);
+    const groupList = selectedGroups.slice(0, 15).map((g) => `• ${esc(g.subject)}`).join("\n");
+    const moreGroups = selectedGroups.length > 15 ? `\n... +${selectedGroups.length - 15} more` : "";
+    const numList = phoneNumbers.slice(0, 15).map((p) => `• +${p}`).join("\n");
+    const moreNums = phoneNumbers.length > 15 ? `\n... +${phoneNumbers.length - 15} more` : "";
+    await ctx.reply(
+      `📱 <b>Demote Selected Numbers — Confirm</b>\n\n` +
+      `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+      `<b>${phoneNumbers.length} number(s) to demote:</b>\n${numList}${moreNums}\n\n` +
+      `⚠️ Only numbers currently admin in each group will be demoted.\n\nConfirm?`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Yes, Demote", "da_numbers_confirm")
+          .text("❌ Cancel", "main_menu"),
+      }
+    );
     return;
   }
 

@@ -1849,6 +1849,22 @@ export async function makeGroupAdmin(
   }
 }
 
+export async function demoteGroupAdmin(
+  userId: string,
+  groupId: string,
+  participantJid: string
+): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.groupParticipantsUpdate(groupId, [participantJid], "demote");
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Demote admin error:`, err?.message);
+    return false;
+  }
+}
+
 export async function approveGroupParticipant(
   userId: string,
   groupId: string,
