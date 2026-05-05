@@ -1762,8 +1762,7 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
-    .text("🔗 Reset Link", "reset_link").row()
-    .text("🛡️ Auto Accepter", "auto_accepter").row();
+    .text("🔗 Reset Link", "reset_link").text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -13511,27 +13510,11 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
         if (requiredBoth && (!primaryOk || !autoOk)) {
           console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: WA not connected (primary=${primaryOk}, auto=${autoOk})`);
           await deleteAutoChatSession(s.userId).catch(() => {});
-          try {
-            await bot.api.sendMessage(s.userId,
-              "⚠️ <b>Auto Chat Resume Failed</b>\n\n" +
-              "After the bot restarted, we tried to reconnect your WhatsApp accounts but one or both could not connect.\n\n" +
-              "Please restart Auto Chat manually from the menu.",
-              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
-            );
-          } catch {}
           continue;
         }
         if (!autoOk) {
           console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: auto WA not connected`);
           await deleteAutoChatSession(s.userId).catch(() => {});
-          try {
-            await bot.api.sendMessage(s.userId,
-              "⚠️ <b>Auto Chat Resume Failed</b>\n\n" +
-              "After the bot restarted, we tried to reconnect your Auto WhatsApp account but it could not connect.\n\n" +
-              "Please restart Auto Chat manually from the menu.",
-              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
-            );
-          } catch {}
           continue;
         }
 
