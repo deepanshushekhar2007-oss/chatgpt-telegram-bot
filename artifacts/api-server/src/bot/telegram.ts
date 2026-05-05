@@ -1,223 +1,223 @@
 import { Bot, InlineKeyboard, InputFile } from "grammy";
 import {
- connectWhatsApp,
- connectWhatsAppQr,
- isConnected,
- disconnectWhatsApp,
- idleDisconnectWhatsApp,
- refreshWhatsAppSession,
- createWhatsAppGroup,
- applyGroupSettings,
- setGroupIcon,
- joinGroupWithLink,
- getGroupPendingRequests,
- getGroupPendingRequestsJids,
- getGroupPendingRequestsDetailed,
- checkContactsInGroup,
- getGroupIdFromLink,
- GroupPermissions,
- getAllGroups,
- getGroupInviteLink,
- leaveGroup,
- getGroupParticipants,
- removeGroupParticipant,
- getGroupPendingList,
- makeGroupAdmin,
- approveGroupParticipant,
- rejectGroupParticipantsBulk,
- setGroupApprovalMode,
- findParticipantByPhone,
- addGroupParticipant,
- addGroupParticipantsBulk,
- isUserInGroup,
- getConnectedWhatsAppNumber,
- sendGroupMessage,
- getAutoUserId,
- isAutoConnected,
- getAutoConnectedNumber,
- getActiveSessionUserIds,
- setDisconnectNotifier,
- setGroupDisappearingMessages,
- setGroupName,
- resetGroupInviteLink,
- demoteGroupAdmin,
- ensureSessionLoaded,
- hasStoredWhatsAppSession,
- waitForWhatsAppConnected,
- sweepIdleSessions,
- getGroupPendingInviteLinkJoins,
- protectSessionFromEviction,
- unprotectSession,
- markSessionActive,
- sendSocketPresence,
+  connectWhatsApp,
+  connectWhatsAppQr,
+  isConnected,
+  disconnectWhatsApp,
+  idleDisconnectWhatsApp,
+  refreshWhatsAppSession,
+  createWhatsAppGroup,
+  applyGroupSettings,
+  setGroupIcon,
+  joinGroupWithLink,
+  getGroupPendingRequests,
+  getGroupPendingRequestsJids,
+  getGroupPendingRequestsDetailed,
+  checkContactsInGroup,
+  getGroupIdFromLink,
+  GroupPermissions,
+  getAllGroups,
+  getGroupInviteLink,
+  leaveGroup,
+  getGroupParticipants,
+  removeGroupParticipant,
+  getGroupPendingList,
+  makeGroupAdmin,
+  approveGroupParticipant,
+  rejectGroupParticipantsBulk,
+  setGroupApprovalMode,
+  findParticipantByPhone,
+  addGroupParticipant,
+  addGroupParticipantsBulk,
+  isUserInGroup,
+  getConnectedWhatsAppNumber,
+  sendGroupMessage,
+  getAutoUserId,
+  isAutoConnected,
+  getAutoConnectedNumber,
+  getActiveSessionUserIds,
+  setDisconnectNotifier,
+  setGroupDisappearingMessages,
+  setGroupName,
+  resetGroupInviteLink,
+  demoteGroupAdmin,
+  ensureSessionLoaded,
+  hasStoredWhatsAppSession,
+  waitForWhatsAppConnected,
+  sweepIdleSessions,
+  getGroupPendingInviteLinkJoins,
+  protectSessionFromEviction,
+  unprotectSession,
+  markSessionActive,
+  sendSocketPresence,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
 import https from "https";
 import http from "http";
-import { AsyncLocalStorage } from "async\_hooks";
+import { AsyncLocalStorage } from "async_hooks";
 import {
- loadBotData,
- saveBotData,
- trackUser as trackUserMongo,
- isUserBanned,
- hasUserAccess,
- getUserAccessState,
- ensureFreeTrial,
- recordReferral,
- setReferMode,
- getReferralStats,
- findAndMarkTrialsToWarn,
- createRedeemCode,
- redeemUserCode,
- getRedeemCodeInfo,
- listAllRedeemCodes,
- deleteRedeemCode,
- AccessState,
- saveAutoChatSession,
- deleteAutoChatSession,
- loadAllAutoChatSessions,
- savePendingGroupCreation,
- loadPendingGroupCreation,
- deletePendingGroupCreation,
- type PersistedGroupSettings,
- saveAutoAccepterJob,
- loadAllAutoAccepterJobs,
- deleteAutoAccepterJob,
- type PersistedAutoAccepterJob,
+  loadBotData,
+  saveBotData,
+  trackUser as trackUserMongo,
+  isUserBanned,
+  hasUserAccess,
+  getUserAccessState,
+  ensureFreeTrial,
+  recordReferral,
+  setReferMode,
+  getReferralStats,
+  findAndMarkTrialsToWarn,
+  createRedeemCode,
+  redeemUserCode,
+  getRedeemCodeInfo,
+  listAllRedeemCodes,
+  deleteRedeemCode,
+  AccessState,
+  saveAutoChatSession,
+  deleteAutoChatSession,
+  loadAllAutoChatSessions,
+  savePendingGroupCreation,
+  loadPendingGroupCreation,
+  deletePendingGroupCreation,
+  type PersistedGroupSettings,
+  saveAutoAccepterJob,
+  loadAllAutoAccepterJobs,
+  deleteAutoAccepterJob,
+  type PersistedAutoAccepterJob,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
- Language,
- LANGUAGES,
- getUserLang,
- hasUserLang,
- setUserLanguage,
- loadUserLanguages,
- translate,
- translateInlineKeyboard,
- warmUpLanguage,
- notr,
- isNotr,
- stripNotr,
- clearTranslationCaches,
+  Language,
+  LANGUAGES,
+  getUserLang,
+  hasUserLang,
+  setUserLanguage,
+  loadUserLanguages,
+  translate,
+  translateInlineKeyboard,
+  warmUpLanguage,
+  notr,
+  isNotr,
+  stripNotr,
+  clearTranslationCaches,
 } from "./i18n";
 
-const token = process.env\["TELEGRAM\_BOT\_TOKEN"\] \|\| "";
+const token = process.env["TELEGRAM_BOT_TOKEN"] || "";
 
-const ADMIN\_USER\_ID = Number(process.env\["ADMIN\_USER\_ID"\] \|\| "0");
-const FORCE\_SUB\_CHANNEL = process.env\["FORCE\_SUB\_CHANNEL"\] \|\| "";
-const OWNER\_USERNAME = "@SPIDYWS";
-const BOT\_DISPLAY\_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
+const ADMIN_USER_ID = Number(process.env["ADMIN_USER_ID"] || "0");
+const FORCE_SUB_CHANNEL = process.env["FORCE_SUB_CHANNEL"] || "";
+const OWNER_USERNAME = "@SPIDYWS";
+const BOT_DISPLAY_NAME = "ᴡꜱ ᴀᴜᴛᴏᴍᴀᴛɪᴏɴ";
 
 // ── Referral mode tunables ───────────────────────────────────────────────────
 // Free trial length given to every new user when refer mode is ON. After it
 // expires, the user must either refer someone else or buy premium from the
 // owner. One referral grants exactly one extra day of access (stacking).
-const FREE\_TRIAL\_MS = 24 \* 60 \* 60 \* 1000;
-const REFERRAL\_REWARD\_MS = 24 \* 60 \* 60 \* 1000;
+const FREE_TRIAL_MS = 24 * 60 * 60 * 1000;
+const REFERRAL_REWARD_MS = 24 * 60 * 60 * 1000;
 // How long before trial expiry we send the "your trial is ending soon"
-// warning. The scheduler checks every TRIAL\_WARNING\_INTERVAL\_MS, so the
-// warning may land anywhere inside \[warnBefore - tickInterval, warnBefore\].
-const TRIAL\_WARNING\_BEFORE\_MS = 30 \* 60 \* 1000;
-const TRIAL\_WARNING\_INTERVAL\_MS = 60 \* 1000;
+// warning. The scheduler checks every TRIAL_WARNING_INTERVAL_MS, so the
+// warning may land anywhere inside [warnBefore - tickInterval, warnBefore].
+const TRIAL_WARNING_BEFORE_MS = 30 * 60 * 1000;
+const TRIAL_WARNING_INTERVAL_MS = 60 * 1000;
 
-const bot = new Bot(token \|\| "placeholder");
+const bot = new Bot(token || "placeholder");
 
 // Cached bot username for building referral deep links. Populated lazily on
 // first access so we don't have to await getMe() during startup.
-let cachedBotUsername: string \| null = null;
+let cachedBotUsername: string | null = null;
 
 // ── Pending referrals (force-sub aware) ─────────────────────────────────────
-// When a user opens the bot via "/start ref\_" but is NOT yet
-// joined to FORCE\_SUB\_CHANNEL, the original /start handler returns early
+// When a user opens the bot via "/start ref_<referrerId>" but is NOT yet
+// joined to FORCE_SUB_CHANNEL, the original /start handler returns early
 // (force-sub guard) and the referral payload is lost — the referrer never
 // gets credit. This map stashes the referrer-id keyed by the new user's
-// telegram-id so the \`check\_joined\` callback can credit the referral once
+// telegram-id so the `check_joined` callback can credit the referral once
 // the user actually joins the channel.
 //
-// Entries are dropped after PENDING\_REFERRAL\_TTL\_MS or after they're consumed
-// by check\_joined / clearUserMemoryState. Cap is small (one entry per user
+// Entries are dropped after PENDING_REFERRAL_TTL_MS or after they're consumed
+// by check_joined / clearUserMemoryState. Cap is small (one entry per user
 // per /start) so unbounded growth is not a real concern, but the TTL sweep
 // keeps it tidy if a user opens the link and never joins.
-const pendingReferrals: Map = new Map();
-const PENDING\_REFERRAL\_TTL\_MS = 60 \* 60 \* 1000; // 1 hour
+const pendingReferrals: Map<number, { referrerId: number; createdAt: number }> = new Map();
+const PENDING_REFERRAL_TTL_MS = 60 * 60 * 1000; // 1 hour
 setInterval(() => {
- const cutoff = Date.now() - PENDING\_REFERRAL\_TTL\_MS;
- for (const \[uid, entry\] of pendingReferrals) {
- if (entry.createdAt < cutoff) pendingReferrals.delete(uid);
- }
-}, 15 \* 60 \* 1000);
+  const cutoff = Date.now() - PENDING_REFERRAL_TTL_MS;
+  for (const [uid, entry] of pendingReferrals) {
+    if (entry.createdAt < cutoff) pendingReferrals.delete(uid);
+  }
+}, 15 * 60 * 1000);
 
 // Shared referral-award helper. Called from /start when the user is already
-// joined to the channel AND from \`check\_joined\` when the user joins via the
+// joined to the channel AND from `check_joined` when the user joins via the
 // force-sub flow. Idempotent: recordReferral() in db.ts dedupes — a user can
 // only ever earn one referrer credit, no matter how many times this runs.
-async function processReferralAward(newUserId: number, referrerId: number): Promise {
- if (!referrerId \|\| !Number.isFinite(referrerId)) return;
- if (referrerId === newUserId) return; // can't refer yourself
- try {
- const data = await loadBotData();
- if (!data.referMode) return;
- const result = await recordReferral(
- newUserId, referrerId, REFERRAL\_REWARD\_MS, ADMIN\_USER\_ID
- );
- if (result.success && referrerId !== ADMIN\_USER\_ID) {
- const totalText = result.totalReferred
- ? \`\\n👥 **Total people you've referred:** ${result.totalReferred}\`
- : "";
- const remaining = result.referrerExpiresAt
- ? \`\\n⏰ **Your access now lasts:** ${formatRemaining(result.referrerExpiresAt)}\`
- : "";
- bot.api.sendMessage(
- referrerId,
- \`🎉 **New referral!**\\n\\n\` +
- \`User `${newUserId}` just started the bot through your link.\\n\\n\` +
- \`✅ **You've earned 1 extra day of free access.** ${remaining}${totalText}\`,
- { parse\_mode: "HTML" }
- ).catch((err: any) => {
- console.error(\`\[REFER\] Failed to notify referrer ${referrerId}:\`, err?.message);
- });
- }
- } catch (err: any) {
- console.error(\`\[REFER\] processReferralAward error:\`, err?.message);
- }
+async function processReferralAward(newUserId: number, referrerId: number): Promise<void> {
+  if (!referrerId || !Number.isFinite(referrerId)) return;
+  if (referrerId === newUserId) return; // can't refer yourself
+  try {
+    const data = await loadBotData();
+    if (!data.referMode) return;
+    const result = await recordReferral(
+      newUserId, referrerId, REFERRAL_REWARD_MS, ADMIN_USER_ID
+    );
+    if (result.success && referrerId !== ADMIN_USER_ID) {
+      const totalText = result.totalReferred
+        ? `\n👥 <b>Total people you've referred:</b> ${result.totalReferred}`
+        : "";
+      const remaining = result.referrerExpiresAt
+        ? `\n⏰ <b>Your access now lasts:</b> ${formatRemaining(result.referrerExpiresAt)}`
+        : "";
+      bot.api.sendMessage(
+        referrerId,
+        `🎉 <b>New referral!</b>\n\n` +
+        `User <code>${newUserId}</code> just started the bot through your link.\n\n` +
+        `✅ <b>You've earned 1 extra day of free access.</b>${remaining}${totalText}`,
+        { parse_mode: "HTML" }
+      ).catch((err: any) => {
+        console.error(`[REFER] Failed to notify referrer ${referrerId}:`, err?.message);
+      });
+    }
+  } catch (err: any) {
+    console.error(`[REFER] processReferralAward error:`, err?.message);
+  }
 }
 
-async function getBotUsername(): Promise {
- if (cachedBotUsername) return cachedBotUsername;
- try {
- const me = await bot.api.getMe();
- cachedBotUsername = me.username \|\| "";
- } catch (err: any) {
- console.error("\[REFER\] getMe failed:", err?.message);
- cachedBotUsername = "";
- }
- return cachedBotUsername;
+async function getBotUsername(): Promise<string> {
+  if (cachedBotUsername) return cachedBotUsername;
+  try {
+    const me = await bot.api.getMe();
+    cachedBotUsername = me.username || "";
+  } catch (err: any) {
+    console.error("[REFER] getMe failed:", err?.message);
+    cachedBotUsername = "";
+  }
+  return cachedBotUsername;
 }
 
 function buildReferLink(userId: number, botUsername: string): string {
- // tg deep-link format: https://t.me/?start=ref\_
- return \`https://t.me/${botUsername}?start=ref\_${userId}\`;
+  // tg deep-link format: https://t.me/<bot>?start=ref_<userId>
+  return `https://t.me/${botUsername}?start=ref_${userId}`;
 }
 
 function formatRemaining(expiresAt: number): string {
- const ms = expiresAt - Date.now();
- if (ms <= 0) return "expired";
- const totalMin = Math.floor(ms / 60000);
- if (totalMin < 60) return \`${totalMin} minute${totalMin === 1 ? "" : "s"}\`;
- const totalHrs = Math.floor(totalMin / 60);
- if (totalHrs < 24) {
- const mins = totalMin - totalHrs \* 60;
- return mins
- ? \`${totalHrs} hour${totalHrs === 1 ? "" : "s"} ${mins} min\`
- : \`${totalHrs} hour${totalHrs === 1 ? "" : "s"}\`;
- }
- const days = Math.floor(totalHrs / 24);
- const hrs = totalHrs - days \* 24;
- return hrs
- ? \`${days} day${days === 1 ? "" : "s"} ${hrs} hour${hrs === 1 ? "" : "s"}\`
- : \`${days} day${days === 1 ? "" : "s"}\`;
+  const ms = expiresAt - Date.now();
+  if (ms <= 0) return "expired";
+  const totalMin = Math.floor(ms / 60000);
+  if (totalMin < 60) return `${totalMin} minute${totalMin === 1 ? "" : "s"}`;
+  const totalHrs = Math.floor(totalMin / 60);
+  if (totalHrs < 24) {
+    const mins = totalMin - totalHrs * 60;
+    return mins
+      ? `${totalHrs} hour${totalHrs === 1 ? "" : "s"} ${mins} min`
+      : `${totalHrs} hour${totalHrs === 1 ? "" : "s"}`;
+  }
+  const days = Math.floor(totalHrs / 24);
+  const hrs = totalHrs - days * 24;
+  return hrs
+    ? `${days} day${days === 1 ? "" : "s"} ${hrs} hour${hrs === 1 ? "" : "s"}`
+    : `${days} day${days === 1 ? "" : "s"}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,220 +226,220 @@ function formatRemaining(expiresAt: number): string {
 // no individual call site needs to change.
 //
 // Coverage:
-// • sendMessage / sendPhoto / sendDocument / sendVideo / sendAnimation
-// → translates \`text\` and \`caption\` body, plus inline keyboard buttons.
-// • editMessageText / editMessageCaption / editMessageMedia
-// → same as above, including caption inside \`media\`.
-// • editMessageReplyMarkup → translates inline keyboard button labels even
-// when only the markup changes (no text edit).
-// • answerCallbackQuery → translates the alert/toast \`text\` field.
+//   • sendMessage / sendPhoto / sendDocument / sendVideo / sendAnimation
+//     → translates `text` and `caption` body, plus inline keyboard buttons.
+//   • editMessageText / editMessageCaption / editMessageMedia
+//     → same as above, including caption inside `media`.
+//   • editMessageReplyMarkup → translates inline keyboard button labels even
+//     when only the markup changes (no text edit).
+//   • answerCallbackQuery → translates the alert/toast `text` field.
 //
 // Language resolution priority (to support every grammy call style):
-// 1\. payload.chat\_id when it is a number (or a numeric string).
-// 2\. AsyncLocalStorage user-id captured by the per-update middleware below.
-// This is what lets answerCallbackQuery (which has no chat\_id) and any
-// other non-chat-bound method still pick up the right user language.
+//   1. payload.chat_id when it is a number (or a numeric string).
+//   2. AsyncLocalStorage user-id captured by the per-update middleware below.
+//      This is what lets answerCallbackQuery (which has no chat_id) and any
+//      other non-chat-bound method still pick up the right user language.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Per-update store of the active user's Telegram ID. Set by \`bot.use\` below,
-// read by the api transformer when no chat\_id is available on the payload.
-const updateUserCtx = new AsyncLocalStorage();
+// Per-update store of the active user's Telegram ID. Set by `bot.use` below,
+// read by the api transformer when no chat_id is available on the payload.
+const updateUserCtx = new AsyncLocalStorage<number>();
 
-const TRANSLATABLE\_METHODS = new Set(\[\
- "sendMessage",\
- "editMessageText",\
- "editMessageCaption",\
- "editMessageMedia",\
- "editMessageReplyMarkup",\
- "sendPhoto",\
- "sendDocument",\
- "sendVideo",\
- "sendAnimation",\
- "answerCallbackQuery",\
-\]);
+const TRANSLATABLE_METHODS = new Set([
+  "sendMessage",
+  "editMessageText",
+  "editMessageCaption",
+  "editMessageMedia",
+  "editMessageReplyMarkup",
+  "sendPhoto",
+  "sendDocument",
+  "sendVideo",
+  "sendAnimation",
+  "answerCallbackQuery",
+]);
 
 function resolveLangFromPayload(payload: any): Language {
- const chatId = payload?.chat\_id;
- if (typeof chatId === "number") return getUserLang(chatId);
- if (typeof chatId === "string") {
- const n = Number(chatId);
- if (Number.isFinite(n)) return getUserLang(n);
- }
- // Fallback: use the user-id captured by the per-update middleware.
- const uid = updateUserCtx.getStore();
- if (typeof uid === "number") return getUserLang(uid);
- return "default";
+  const chatId = payload?.chat_id;
+  if (typeof chatId === "number") return getUserLang(chatId);
+  if (typeof chatId === "string") {
+    const n = Number(chatId);
+    if (Number.isFinite(n)) return getUserLang(n);
+  }
+  // Fallback: use the user-id captured by the per-update middleware.
+  const uid = updateUserCtx.getStore();
+  if (typeof uid === "number") return getUserLang(uid);
+  return "default";
 }
 
 bot.api.config.use(async (prev, method, payload, signal) => {
- try {
- if (!TRANSLATABLE\_METHODS.has(method)) {
- // Still strip the no-translate marker if present, even when we don't translate.
- if (payload && typeof (payload as any).text === "string" && isNotr((payload as any).text)) {
- const newPayload: any = { ...payload, text: stripNotr((payload as any).text) };
- return prev(method, newPayload, signal);
- }
- return prev(method, payload, signal);
- }
+  try {
+    if (!TRANSLATABLE_METHODS.has(method)) {
+      // Still strip the no-translate marker if present, even when we don't translate.
+      if (payload && typeof (payload as any).text === "string" && isNotr((payload as any).text)) {
+        const newPayload: any = { ...payload, text: stripNotr((payload as any).text) };
+        return prev(method, newPayload, signal);
+      }
+      return prev(method, payload, signal);
+    }
 
- const lang: Language = resolveLangFromPayload(payload);
+    const lang: Language = resolveLangFromPayload(payload);
 
- // Fast path: default language → no translation overhead at all.
- if (lang === "default") {
- // Even on default, strip the no-translate marker so it never reaches Telegram.
- const text = (payload as any).text;
- const caption = (payload as any).caption;
- if ((typeof text === "string" && isNotr(text)) \|\| (typeof caption === "string" && isNotr(caption))) {
- const newPayload: any = { ...payload };
- if (typeof text === "string" && isNotr(text)) newPayload.text = stripNotr(text);
- if (typeof caption === "string" && isNotr(caption)) newPayload.caption = stripNotr(caption);
- return prev(method, newPayload, signal);
- }
- return prev(method, payload, signal);
- }
+    // Fast path: default language → no translation overhead at all.
+    if (lang === "default") {
+      // Even on default, strip the no-translate marker so it never reaches Telegram.
+      const text = (payload as any).text;
+      const caption = (payload as any).caption;
+      if ((typeof text === "string" && isNotr(text)) || (typeof caption === "string" && isNotr(caption))) {
+        const newPayload: any = { ...payload };
+        if (typeof text === "string" && isNotr(text)) newPayload.text = stripNotr(text);
+        if (typeof caption === "string" && isNotr(caption)) newPayload.caption = stripNotr(caption);
+        return prev(method, newPayload, signal);
+      }
+      return prev(method, payload, signal);
+    }
 
- const newPayload: any = { ...payload };
+    const newPayload: any = { ...payload };
 
- // Translate text body (unless explicitly marked no-translate).
- // \`text\` covers sendMessage / editMessageText / answerCallbackQuery alerts.
- if (typeof newPayload.text === "string") {
- if (isNotr(newPayload.text)) {
- newPayload.text = stripNotr(newPayload.text);
- } else {
- newPayload.text = await translate(newPayload.text, lang);
- }
- }
- // \`caption\` covers sendPhoto / sendDocument / sendVideo / sendAnimation /
- // editMessageCaption.
- if (typeof newPayload.caption === "string") {
- if (isNotr(newPayload.caption)) {
- newPayload.caption = stripNotr(newPayload.caption);
- } else {
- newPayload.caption = await translate(newPayload.caption, lang);
- }
- }
- // editMessageMedia carries caption inside the \`media\` object.
- if (newPayload.media && typeof newPayload.media.caption === "string") {
- if (isNotr(newPayload.media.caption)) {
- newPayload.media = { ...newPayload.media, caption: stripNotr(newPayload.media.caption) };
- } else {
- newPayload.media = { ...newPayload.media, caption: await translate(newPayload.media.caption, lang) };
- }
- }
- // Translate inline keyboard button labels (works for both edit-text and
- // edit-only-reply-markup paths).
- if (newPayload.reply\_markup && Array.isArray(newPayload.reply\_markup.inline\_keyboard)) {
- newPayload.reply\_markup = await translateInlineKeyboard(newPayload.reply\_markup, lang);
- }
+    // Translate text body (unless explicitly marked no-translate).
+    // `text` covers sendMessage / editMessageText / answerCallbackQuery alerts.
+    if (typeof newPayload.text === "string") {
+      if (isNotr(newPayload.text)) {
+        newPayload.text = stripNotr(newPayload.text);
+      } else {
+        newPayload.text = await translate(newPayload.text, lang);
+      }
+    }
+    // `caption` covers sendPhoto / sendDocument / sendVideo / sendAnimation /
+    // editMessageCaption.
+    if (typeof newPayload.caption === "string") {
+      if (isNotr(newPayload.caption)) {
+        newPayload.caption = stripNotr(newPayload.caption);
+      } else {
+        newPayload.caption = await translate(newPayload.caption, lang);
+      }
+    }
+    // editMessageMedia carries caption inside the `media` object.
+    if (newPayload.media && typeof newPayload.media.caption === "string") {
+      if (isNotr(newPayload.media.caption)) {
+        newPayload.media = { ...newPayload.media, caption: stripNotr(newPayload.media.caption) };
+      } else {
+        newPayload.media = { ...newPayload.media, caption: await translate(newPayload.media.caption, lang) };
+      }
+    }
+    // Translate inline keyboard button labels (works for both edit-text and
+    // edit-only-reply-markup paths).
+    if (newPayload.reply_markup && Array.isArray(newPayload.reply_markup.inline_keyboard)) {
+      newPayload.reply_markup = await translateInlineKeyboard(newPayload.reply_markup, lang);
+    }
 
- return prev(method, newPayload, signal);
- } catch (err: any) {
- console.error(\`\[i18n\] transformer error on ${method}:\`, err?.message);
- return prev(method, payload, signal);
- }
+    return prev(method, newPayload, signal);
+  } catch (err: any) {
+    console.error(`[i18n] transformer error on ${method}:`, err?.message);
+    return prev(method, payload, signal);
+  }
 });
 
 // Run every incoming update inside an AsyncLocalStorage scope tagged with the
 // triggering user's ID. This lets the API transformer above resolve the right
-// language even for methods that carry no chat\_id (e.g. answerCallbackQuery)
+// language even for methods that carry no chat_id (e.g. answerCallbackQuery)
 // and for places that send messages indirectly (timers, post-await flows).
 bot.use(async (ctx, next) => {
- const userId = ctx.from?.id;
- if (typeof userId === "number") {
- // Refresh the user's "active" timestamp on every interaction (commands,
- // button presses, text messages). This is what keeps long flows like
- // group creation alive past the old aggressive cleanup, AND prevents the
- // "✅ WhatsApp connected" toast from re-appearing on every /start.
- const startedNewSession = markUserActive(userId);
- newSessionFlag.set(userId, startedNewSession);
- // If WhatsApp got disconnected (idle timer or process restart) but the
- // user has a saved Mongo session, kick off a silent restore in the
- // background so it's ready by the time they tap a feature button.
- void ensureWhatsAppRestored(userId);
+  const userId = ctx.from?.id;
+  if (typeof userId === "number") {
+    // Refresh the user's "active" timestamp on every interaction (commands,
+    // button presses, text messages). This is what keeps long flows like
+    // group creation alive past the old aggressive cleanup, AND prevents the
+    // "✅ WhatsApp connected" toast from re-appearing on every /start.
+    const startedNewSession = markUserActive(userId);
+    newSessionFlag.set(userId, startedNewSession);
+    // If WhatsApp got disconnected (idle timer or process restart) but the
+    // user has a saved Mongo session, kick off a silent restore in the
+    // background so it's ready by the time they tap a feature button.
+    void ensureWhatsAppRestored(userId);
 
- // Auto-reconnect-and-resume when a feature button is tapped while
- // WhatsApp is disconnected (typical 30-min idle case). We edit the
- // message in-place to a "🔄 Reconnecting..." status, silently wait
- // for the background restore (already kicked off above) to finish,
- // and then let the original handler run normally — so the user does
- // NOT have to re-tap the button. Connect / menu / language /
- // force-sub callbacks are exempted because they handle the
- // disconnected state on purpose. We deliberately do NOT pre-answer
- // the callback query — the handler will answer it itself once it
- // runs. Telegram keeps the per-button spinner visible until then,
- // which is exactly the loading feedback we want.
- const cbData = ctx.callbackQuery?.data;
- const skipReconnect = !cbData
- \|\| cbData === "connect\_wa"
- \|\| cbData === "main\_menu"
- \|\| cbData.startsWith("connect\_")
- \|\| cbData.startsWith("disconnect\_")
- \|\| cbData.startsWith("logout\_")
- \|\| cbData.startsWith("lang\_")
- \|\| cbData.startsWith("force\_sub\_");
- if (cbData && !skipReconnect && !isConnected(String(userId))) {
- let hasStored = false;
- try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
- if (hasStored) {
- // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
- // does not fire and cause a silent "nothing happens" drop.
- // The spinner stops here; the reconnect message below gives feedback.
- try { await ctx.answerCallbackQuery(); } catch {}
+    // Auto-reconnect-and-resume when a feature button is tapped while
+    // WhatsApp is disconnected (typical 30-min idle case). We edit the
+    // message in-place to a "🔄 Reconnecting..." status, silently wait
+    // for the background restore (already kicked off above) to finish,
+    // and then let the original handler run normally — so the user does
+    // NOT have to re-tap the button. Connect / menu / language /
+    // force-sub callbacks are exempted because they handle the
+    // disconnected state on purpose. We deliberately do NOT pre-answer
+    // the callback query — the handler will answer it itself once it
+    // runs. Telegram keeps the per-button spinner visible until then,
+    // which is exactly the loading feedback we want.
+    const cbData = ctx.callbackQuery?.data;
+    const skipReconnect = !cbData
+      || cbData === "connect_wa"
+      || cbData === "main_menu"
+      || cbData.startsWith("connect_")
+      || cbData.startsWith("disconnect_")
+      || cbData.startsWith("logout_")
+      || cbData.startsWith("lang_")
+      || cbData.startsWith("force_sub_");
+    if (cbData && !skipReconnect && !isConnected(String(userId))) {
+      let hasStored = false;
+      try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
+      if (hasStored) {
+        // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
+        // does not fire and cause a silent "nothing happens" drop.
+        // The spinner stops here; the reconnect message below gives feedback.
+        try { await ctx.answerCallbackQuery(); } catch {}
 
- try {
- await ctx.editMessageText(
- \`🔄 **WhatsApp reconnecting...**\\n\\n\` +
- \` _Your session was idle and got disconnected. \` +_
-_\`It will reconnect automatically in 5–15 seconds._ \`,
- { parse\_mode: "HTML" }
- );
- } catch {}
+        try {
+          await ctx.editMessageText(
+            `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
+            `<i>Your session was idle and got disconnected. ` +
+            `It will reconnect automatically in 5–15 seconds.</i>`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
 
- let connected = false;
- try {
- connected = await waitForWhatsAppConnected(String(userId), {
- timeoutMs: 20\_000,
- pollMs: 500,
- });
- } catch {}
+        let connected = false;
+        try {
+          connected = await waitForWhatsAppConnected(String(userId), {
+            timeoutMs: 20_000,
+            pollMs: 500,
+          });
+        } catch {}
 
- if (!connected) {
- try {
- await ctx.editMessageText(
- \`❌ **WhatsApp disconnected**\\n\\n\` +
- \`Your WhatsApp session has been disconnected.\\n\\n\` +
- \`Please connect a fresh session from the menu:\\n\` +
- \`📱 Menu → **Connect WhatsApp** → QR or Pairing Code\`,
- { parse\_mode: "HTML" }
- );
- } catch {
- try {
- await ctx.reply(
- \`❌ **WhatsApp disconnected**\\n\\n\` +
- \`Your WhatsApp session has been disconnected.\\n\\n\` +
- \`Please connect a fresh session from the menu:\\n\` +
- \`📱 Menu → **Connect WhatsApp** → QR or Pairing Code\`,
- { parse\_mode: "HTML" }
- );
- } catch {}
- }
- return;
- }
- // Connected — fall through. Since we already answered the callback
- // query above, patch answerCallbackQuery to a silent no-op so the
- // downstream handler does not double-answer and throw an error.
- (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
- }
- }
+        if (!connected) {
+          try {
+            await ctx.editMessageText(
+              `❌ <b>WhatsApp disconnected</b>\n\n` +
+              `Your WhatsApp session has been disconnected.\n\n` +
+              `Please connect a fresh session from the menu:\n` +
+              `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
+              { parse_mode: "HTML" }
+            );
+          } catch {
+            try {
+              await ctx.reply(
+                `❌ <b>WhatsApp disconnected</b>\n\n` +
+                `Your WhatsApp session has been disconnected.\n\n` +
+                `Please connect a fresh session from the menu:\n` +
+                `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
+                { parse_mode: "HTML" }
+              );
+            } catch {}
+          }
+          return;
+        }
+        // Connected — fall through. Since we already answered the callback
+        // query above, patch answerCallbackQuery to a silent no-op so the
+        // downstream handler does not double-answer and throw an error.
+        (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
+      }
+    }
 
- try {
- await updateUserCtx.run(userId, next);
- } finally {
- newSessionFlag.delete(userId);
- }
- } else {
- await next();
- }
+    try {
+      await updateUserCtx.run(userId, next);
+    } finally {
+      newSessionFlag.delete(userId);
+    }
+  } else {
+    await next();
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -452,220 +452,220 @@ _\`It will reconnect automatically in 5–15 seconds._ \`,
 // can always pick a language and confirm the channel join even if their
 // trial has just expired.
 // ─────────────────────────────────────────────────────────────────────────────
-const REFER\_GATE\_EXEMPT\_PREFIXES = \["lang\_", "force\_sub\_"\];
-const REFER\_GATE\_EXEMPT\_EXACT = new Set(\["check\_joined"\]);
+const REFER_GATE_EXEMPT_PREFIXES = ["lang_", "force_sub_"];
+const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
 function isReferGateExempt(cbData: string): boolean {
- if (REFER\_GATE\_EXEMPT\_EXACT.has(cbData)) return true;
- return REFER\_GATE\_EXEMPT\_PREFIXES.some((p) => cbData.startsWith(p));
+  if (REFER_GATE_EXEMPT_EXACT.has(cbData)) return true;
+  return REFER_GATE_EXEMPT_PREFIXES.some((p) => cbData.startsWith(p));
 }
 
 bot.use(async (ctx, next) => {
- const cbData = ctx.callbackQuery?.data;
- if (!cbData) return next();
- const userId = ctx.from?.id;
- if (typeof userId !== "number") return next();
- if (isAdmin(userId)) return next();
- if (isReferGateExempt(cbData)) return next();
+  const cbData = ctx.callbackQuery?.data;
+  if (!cbData) return next();
+  const userId = ctx.from?.id;
+  if (typeof userId !== "number") return next();
+  if (isAdmin(userId)) return next();
+  if (isReferGateExempt(cbData)) return next();
 
- // Fail-open: if MongoDB is unavailable, let the handler run rather than
- // silently dropping the update (which causes "nothing happens" for the user).
- let data: Awaited>;
- try { data = await loadBotData(); } catch { return next(); }
- if (!data.referMode) return next();
+  // Fail-open: if MongoDB is unavailable, let the handler run rather than
+  // silently dropping the update (which causes "nothing happens" for the user).
+  let data: Awaited<ReturnType<typeof loadBotData>>;
+  try { data = await loadBotData(); } catch { return next(); }
+  if (!data.referMode) return next();
 
- let state: Awaited>;
- try { state = await getAccessState(userId); } catch { return next(); }
- if (state.kind !== "none") return next();
+  let state: Awaited<ReturnType<typeof getAccessState>>;
+  try { state = await getAccessState(userId); } catch { return next(); }
+  if (state.kind !== "none") return next();
 
- // Out of access — block the button and surface the refer-required UI.
- // show\_alert: true makes the popup clearly visible (not a brief invisible toast).
- try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show\_alert: true }); } catch {}
- try {
- const { text, keyboard } = await buildReferRequiredMessage(userId);
- try {
- await ctx.editMessageText(text, { parse\_mode: "HTML", reply\_markup: keyboard });
- } catch {
- try {
- await ctx.reply(text, { parse\_mode: "HTML", reply\_markup: keyboard });
- } catch {}
- }
- } catch {}
- // Stop here — do NOT call next(), the original handler must not run.
+  // Out of access — block the button and surface the refer-required UI.
+  // show_alert: true makes the popup clearly visible (not a brief invisible toast).
+  try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: true }); } catch {}
+  try {
+    const { text, keyboard } = await buildReferRequiredMessage(userId);
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+    } catch {
+      try {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+      } catch {}
+    }
+  } catch {}
+  // Stop here — do NOT call next(), the original handler must not run.
 });
 
-type TelegramButtonStyle = "primary" \| "success" \| "danger";
+type TelegramButtonStyle = "primary" | "success" | "danger";
 
 function getButtonStyle(text: string, callbackData?: string): TelegramButtonStyle {
- const value = \`${text} ${callbackData \|\| ""}\`.toLowerCase();
+  const value = `${text} ${callbackData || ""}`.toLowerCase();
 
- if (
- value.includes("cancel") \|\|
- value.includes("delete") \|\|
- value.includes("remove") \|\|
- value.includes("leave") \|\|
- value.includes("disconnect") \|\|
- value.includes("ban") \|\|
- value.includes("reject") \|\|
- value.includes("clear") \|\|
- value.includes("stop") \|\|
- value.includes("❌") \|\|
- value.includes("🗑")
- ) {
- return "danger";
- }
+  if (
+    value.includes("cancel") ||
+    value.includes("delete") ||
+    value.includes("remove") ||
+    value.includes("leave") ||
+    value.includes("disconnect") ||
+    value.includes("ban") ||
+    value.includes("reject") ||
+    value.includes("clear") ||
+    value.includes("stop") ||
+    value.includes("❌") ||
+    value.includes("🗑")
+  ) {
+    return "danger";
+  }
 
- if (
- value.includes("confirm") \|\|
- value.includes("create") \|\|
- value.includes("join") \|\|
- value.includes("connect") \|\|
- value.includes("approve") \|\|
- value.includes("add") \|\|
- value.includes("select") \|\|
- value.includes("save") \|\|
- value.includes("done") \|\|
- value.includes("start") \|\|
- value.includes("continue") \|\|
- value.includes("retry") \|\|
- value.includes("proceed") \|\|
- value.includes("copy") \|\|
- value.includes("yes") \|\|
- value.includes("✅") \|\|
- value.includes("☑️") \|\|
- value.includes("💾") \|\|
- value.includes("➕")
- ) {
- return "success";
- }
+  if (
+    value.includes("confirm") ||
+    value.includes("create") ||
+    value.includes("join") ||
+    value.includes("connect") ||
+    value.includes("approve") ||
+    value.includes("add") ||
+    value.includes("select") ||
+    value.includes("save") ||
+    value.includes("done") ||
+    value.includes("start") ||
+    value.includes("continue") ||
+    value.includes("retry") ||
+    value.includes("proceed") ||
+    value.includes("copy") ||
+    value.includes("yes") ||
+    value.includes("✅") ||
+    value.includes("☑️") ||
+    value.includes("💾") ||
+    value.includes("➕")
+  ) {
+    return "success";
+  }
 
- return "primary";
+  return "primary";
 }
 
 function setLatestButtonStyle(keyboard: InlineKeyboard, style: TelegramButtonStyle): void {
- const markup = keyboard as unknown as { inline\_keyboard?: Array>\> };
- const rows = markup.inline\_keyboard;
- const latestRow = rows?.\[rows.length - 1\];
- const latestButton = latestRow?.\[latestRow.length - 1\];
- if (latestButton && !latestButton.style) {
- latestButton.style = style;
- }
+  const markup = keyboard as unknown as { inline_keyboard?: Array<Array<Record<string, unknown>>> };
+  const rows = markup.inline_keyboard;
+  const latestRow = rows?.[rows.length - 1];
+  const latestButton = latestRow?.[latestRow.length - 1];
+  if (latestButton && !latestButton.style) {
+    latestButton.style = style;
+  }
 }
 
 const originalInlineText = InlineKeyboard.prototype.text;
 const originalInlineUrl = InlineKeyboard.prototype.url;
 
-(InlineKeyboard.prototype as any).text = function (this: InlineKeyboard, ...args: any\[\]) {
- const result = (originalInlineText as any).apply(this, args);
- if (typeof args\[0\] === "string") {
- setLatestButtonStyle(this, getButtonStyle(args\[0\], typeof args\[1\] === "string" ? args\[1\] : undefined));
- }
- return result;
+(InlineKeyboard.prototype as any).text = function (this: InlineKeyboard, ...args: any[]) {
+  const result = (originalInlineText as any).apply(this, args);
+  if (typeof args[0] === "string") {
+    setLatestButtonStyle(this, getButtonStyle(args[0], typeof args[1] === "string" ? args[1] : undefined));
+  }
+  return result;
 };
 
-(InlineKeyboard.prototype as any).url = function (this: InlineKeyboard, ...args: any\[\]) {
- const result = (originalInlineUrl as any).apply(this, args);
- if (typeof args\[0\] === "string") {
- setLatestButtonStyle(this, "primary");
- }
- return result;
+(InlineKeyboard.prototype as any).url = function (this: InlineKeyboard, ...args: any[]) {
+  const result = (originalInlineUrl as any).apply(this, args);
+  if (typeof args[0] === "string") {
+    setLatestButtonStyle(this, "primary");
+  }
+  return result;
 };
 
 function esc(text: string): string {
- return text.replace(/&/g, "&").replace(//g, ">");
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function connectedStatusText(userId: number): string {
- const mainConnected = isConnected(String(userId));
- const autoConnected = isAutoConnected(String(userId));
- let text = "";
+  const mainConnected = isConnected(String(userId));
+  const autoConnected = isAutoConnected(String(userId));
+  let text = "";
 
- if (!mainConnected) {
- text += "📱 **Status:** WhatsApp not connected\\n";
- } else {
- const number = getConnectedWhatsAppNumber(String(userId));
- text += "✅ **Status:** WhatsApp connected\\n" +
- (number ? \`📞 **Connected Number:**`${esc(number)}`\\n\` : "📞 **Connected Number:** Detecting from session\\n");
- }
+  if (!mainConnected) {
+    text += "📱 <b>Status:</b> WhatsApp not connected\n";
+  } else {
+    const number = getConnectedWhatsAppNumber(String(userId));
+    text += "✅ <b>Status:</b> WhatsApp connected\n" +
+      (number ? `📞 <b>Connected Number:</b> <code>${esc(number)}</code>\n` : "📞 <b>Connected Number:</b> Detecting from session\n");
+  }
 
- if (autoConnected) {
- const autoNumber = getAutoConnectedNumber(String(userId));
- text += "🤖 **Auto Chat WA:** Connected\\n" +
- (autoNumber ? \`📞 **Auto Number:**`${esc(autoNumber)}`\\n\` : "");
- }
+  if (autoConnected) {
+    const autoNumber = getAutoConnectedNumber(String(userId));
+    text += "🤖 <b>Auto Chat WA:</b> Connected\n" +
+      (autoNumber ? `📞 <b>Auto Number:</b> <code>${esc(autoNumber)}</code>\n` : "");
+  }
 
- return text;
+  return text;
 }
 
-function mainMenuText(userId: number, mode: "welcome" \| "menu" = "menu"): string {
- const greeting = mode === "welcome" ? "👋 **Welcome!**" : "✨ **Main Menu**";
- return (
- \`🤖 **${BOT\_DISPLAY\_NAME}**\\n\\n\` +
- \`${greeting}\\n\` +
- connectedStatusText(userId) +
- "\\nChoose an option below:"
- );
+function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu"): string {
+  const greeting = mode === "welcome" ? "👋 <b>Welcome!</b>" : "✨ <b>Main Menu</b>";
+  return (
+    `🤖 <b>${BOT_DISPLAY_NAME}</b>\n\n` +
+    `${greeting}\n` +
+    connectedStatusText(userId) +
+    "\nChoose an option below:"
+  );
 }
 
 function whatsappConnectedText(userId: number, detail: string): string {
- return (
- \`🤖 **${BOT\_DISPLAY\_NAME}**\\n\\n\` +
- \`✅ **WhatsApp Connected!**\\n\` +
- connectedStatusText(userId) +
- \`\\n${detail}\`
- );
+  return (
+    `🤖 <b>${BOT_DISPLAY_NAME}</b>\n\n` +
+    `✅ <b>WhatsApp Connected!</b>\n` +
+    connectedStatusText(userId) +
+    `\n${detail}`
+  );
 }
 
-function generateGroupNames(baseName: string, count: number): string\[\] {
- if (count === 1) return \[baseName\];
- const match = baseName.match(/^(.\*?)(\\s\*)(\\d+)$/);
- if (match) {
- const prefix = match\[1\];
- const sep = match\[2\] \|\| " ";
- const startNum = parseInt(match\[3\]);
- return Array.from({ length: count }, (\_, i) => \`${prefix}${sep}${startNum + i}\`);
- }
- return Array.from({ length: count }, (\_, i) => \`${baseName} ${i + 1}\`);
+function generateGroupNames(baseName: string, count: number): string[] {
+  if (count === 1) return [baseName];
+  const match = baseName.match(/^(.*?)(\s*)(\d+)$/);
+  if (match) {
+    const prefix = match[1];
+    const sep = match[2] || " ";
+    const startNum = parseInt(match[3]);
+    return Array.from({ length: count }, (_, i) => `${prefix}${sep}${startNum + i}`);
+  }
+  return Array.from({ length: count }, (_, i) => `${baseName} ${i + 1}`);
 }
 
 function cleanWALink(raw: string): string {
- const trimmed = raw.trim();
- const withoutQuery = trimmed.split("?")\[0\].replace(/\\/$/, "");
- return withoutQuery
- .replace("https://chat.whatsapp.com/", "")
- .replace("http://chat.whatsapp.com/", "")
- .trim();
+  const trimmed = raw.trim();
+  const withoutQuery = trimmed.split("?")[0].replace(/\/$/, "");
+  return withoutQuery
+    .replace("https://chat.whatsapp.com/", "")
+    .replace("http://chat.whatsapp.com/", "")
+    .trim();
 }
 
 function buildCleanLink(raw: string): string {
- return \`https://chat.whatsapp.com/${cleanWALink(raw)}\`;
+  return `https://chat.whatsapp.com/${cleanWALink(raw)}`;
 }
 
-function extractLinksFromText(text: string): string\[\] {
- // Normalize links that are split across two lines by Telegram rendering:
- // "https://chat.whatsapp.com\\n/CODE" → "https://chat.whatsapp.com/CODE"
- const normalized = text
- .replace(/(chat\\.whatsapp\\.com)\\s\*\\r?\\n\\s\*\\//g, "$1/")
- .replace(/(https?:\\/\\/chat\\.whatsapp\\.com)\\s+(\[A-Za-z0-9\]{10,})/g, "$1/$2");
- const regex = /https?:\\/\\/chat\\.whatsapp\\.com\\/\[A-Za-z0-9\]+/gi;
- const matches = normalized.match(regex);
- if (!matches) return \[\];
- return \[...new Set(matches.map(buildCleanLink))\];
+function extractLinksFromText(text: string): string[] {
+  // Normalize links that are split across two lines by Telegram rendering:
+  //   "https://chat.whatsapp.com\n/CODE" → "https://chat.whatsapp.com/CODE"
+  const normalized = text
+    .replace(/(chat\.whatsapp\.com)\s*\r?\n\s*\//g, "$1/")
+    .replace(/(https?:\/\/chat\.whatsapp\.com)\s+([A-Za-z0-9]{10,})/g, "$1/$2");
+  const regex = /https?:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]+/gi;
+  const matches = normalized.match(regex);
+  if (!matches) return [];
+  return [...new Set(matches.map(buildCleanLink))];
 }
 
 function isAdmin(userId: number): boolean {
- return userId === ADMIN\_USER\_ID;
+  return userId === ADMIN_USER_ID;
 }
 
-async function isBanned(userId: number): Promise {
- return isUserBanned(userId);
+async function isBanned(userId: number): Promise<boolean> {
+  return isUserBanned(userId);
 }
 
-async function hasAccess(userId: number): Promise {
- return hasUserAccess(userId, ADMIN\_USER\_ID);
+async function hasAccess(userId: number): Promise<boolean> {
+  return hasUserAccess(userId, ADMIN_USER_ID);
 }
 
-async function getAccessState(userId: number): Promise {
- return getUserAccessState(userId, ADMIN\_USER\_ID);
+async function getAccessState(userId: number): Promise<AccessState> {
+  return getUserAccessState(userId, ADMIN_USER_ID);
 }
 
 // Build the "your free time is over — refer or buy premium" reply that is
@@ -673,57 +673,57 @@ async function getAccessState(userId: number): Promise {
 // have both expired. The message includes the user's personal referral
 // deep link so they can share it directly. All copy is in English.
 async function buildReferRequiredMessage(userId: number): Promise<{
- text: string;
- keyboard: InlineKeyboard;
-}\> {
- const username = await getBotUsername();
- const link = username ? buildReferLink(userId, username) : "";
- const stats = await getReferralStats(userId);
- const referredText = stats.totalReferred > 0
- ? \`\\n👥 **Total people referred so far:** ${stats.totalReferred}\`
- : "";
+  text: string;
+  keyboard: InlineKeyboard;
+}> {
+  const username = await getBotUsername();
+  const link = username ? buildReferLink(userId, username) : "";
+  const stats = await getReferralStats(userId);
+  const referredText = stats.totalReferred > 0
+    ? `\n👥 <b>Total people referred so far:</b> ${stats.totalReferred}`
+    : "";
 
- const text =
- \`🔒 **Your free access has ended.**\\n\\n\` +
- \`To keep using the bot you have two options:\\n\\n\` +
- \`1️⃣ **Refer a friend** — every new person who starts the bot through your link gives you **1 day of free access**.\\n\` +
- \`2️⃣ **Don't want to refer?** Message ${OWNER\_USERNAME} on Telegram to buy premium access.\\n\\n\` +
- \`🔗 **Your personal referral link:**\\n\` +
- (link ? \``${esc(link)}`\` : \` _(link unavailable, please try again later)_ \`) +
- \`${referredText}\\n\\n\` +
- \`Share this link with friends — as soon as someone starts the bot through it, you'll get a notification and 1 extra day will be added to your access.\`;
+  const text =
+    `🔒 <b>Your free access has ended.</b>\n\n` +
+    `To keep using the bot you have two options:\n\n` +
+    `1️⃣ <b>Refer a friend</b> — every new person who starts the bot through your link gives you <b>1 day of free access</b>.\n` +
+    `2️⃣ <b>Don't want to refer?</b> Message ${OWNER_USERNAME} on Telegram to buy premium access.\n\n` +
+    `🔗 <b>Your personal referral link:</b>\n` +
+    (link ? `<code>${esc(link)}</code>` : `<i>(link unavailable, please try again later)</i>`) +
+    `${referredText}\n\n` +
+    `Share this link with friends — as soon as someone starts the bot through it, you'll get a notification and 1 extra day will be added to your access.`;
 
- const kb = new InlineKeyboard();
- if (link) {
- const shareText = encodeURIComponent(
- \`Try this Telegram bot — start through my link to get a 24-hour free trial:\`
- );
- kb.url("📤 Share My Referral Link", \`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}\`).row();
- }
- kb.url(\`💎 Buy Premium (${OWNER\_USERNAME})\`, \`https://t.me/${OWNER\_USERNAME.replace(/^@/, "")}\`);
- return { text, keyboard: kb };
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  return { text, keyboard: kb };
 }
 
 // Send the refer-required message as a fresh reply (used for /start and
 // other text commands).
-async function sendReferRequired(ctx: any, userId: number): Promise {
- const { text, keyboard } = await buildReferRequiredMessage(userId);
- try {
- await ctx.reply(text, { parse\_mode: "HTML", reply\_markup: keyboard });
- } catch (err: any) {
- console.error("\[REFER\] sendReferRequired failed:", err?.message);
- }
+async function sendReferRequired(ctx: any, userId: number): Promise<void> {
+  const { text, keyboard } = await buildReferRequiredMessage(userId);
+  try {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch (err: any) {
+    console.error("[REFER] sendReferRequired failed:", err?.message);
+  }
 }
 
 // Build the friendly "trial just started" notification used by /start
 // when refer mode is ON and we just created a 24h window for the user.
 function trialStartedMessage(expiresAt: number): string {
- return (
- \`🎁 **Welcome! You've unlocked a 24-hour free trial.**\\n\\n\` +
- \`For the next 24 hours you can enjoy free access to the bot.\\n\\n\` +
- \`⏰ **Trial ends in:** ${formatRemaining(expiresAt)}\\n\\n\` +
- \`When the trial ends, you can either refer a friend (1 referral = 1 day free) or buy premium from ${OWNER\_USERNAME}.\`
- );
+  return (
+    `🎁 <b>Welcome! You've unlocked a 24-hour free trial.</b>\n\n` +
+    `For the next 24 hours you can enjoy free access to the bot.\n\n` +
+    `⏰ <b>Trial ends in:</b> ${formatRemaining(expiresAt)}\n\n` +
+    `When the trial ends, you can either refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`
+  );
 }
 
 // Build the "your trial ends in 30 minutes" reminder. Includes the user's
@@ -731,31 +731,31 @@ function trialStartedMessage(expiresAt: number): string {
 // immediately without having to wait for the trial to expire. All copy in
 // English.
 async function buildTrialEndingMessage(userId: number, expiresAt: number): Promise<{
- text: string;
- keyboard: InlineKeyboard;
-}\> {
- const username = await getBotUsername();
- const link = username ? buildReferLink(userId, username) : "";
- const text =
- \`⏰ **Heads up — your free trial is ending soon.**\\n\\n\` +
- \`Your 24-hour free trial will end in about **${formatRemaining(expiresAt)}**.\\n\\n\` +
- \`To keep using the bot without a break, you can:\\n\\n\` +
- \`1️⃣ **Refer a friend now** — every new person who starts the bot through your link gives you **1 extra day** of free access.\\n\` +
- \`2️⃣ **Don't want to refer?** Message ${OWNER\_USERNAME} on Telegram to buy premium access.\\n\\n\` +
- (link
- ? \`🔗 **Your personal referral link:**\\n`${esc(link)}`\\n\\n\`
- : \`\`) +
- \`If you do nothing, the bot will stop responding to your buttons once the trial ends.\`;
+  text: string;
+  keyboard: InlineKeyboard;
+}> {
+  const username = await getBotUsername();
+  const link = username ? buildReferLink(userId, username) : "";
+  const text =
+    `⏰ <b>Heads up — your free trial is ending soon.</b>\n\n` +
+    `Your 24-hour free trial will end in about <b>${formatRemaining(expiresAt)}</b>.\n\n` +
+    `To keep using the bot without a break, you can:\n\n` +
+    `1️⃣ <b>Refer a friend now</b> — every new person who starts the bot through your link gives you <b>1 extra day</b> of free access.\n` +
+    `2️⃣ <b>Don't want to refer?</b> Message ${OWNER_USERNAME} on Telegram to buy premium access.\n\n` +
+    (link
+      ? `🔗 <b>Your personal referral link:</b>\n<code>${esc(link)}</code>\n\n`
+      : ``) +
+    `If you do nothing, the bot will stop responding to your buttons once the trial ends.`;
 
- const kb = new InlineKeyboard();
- if (link) {
- const shareText = encodeURIComponent(
- \`Try this Telegram bot — start through my link to get a 24-hour free trial:\`
- );
- kb.url("📤 Share My Referral Link", \`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}\`).row();
- }
- kb.url(\`💎 Buy Premium (${OWNER\_USERNAME})\`, \`https://t.me/${OWNER\_USERNAME.replace(/^@/, "")}\`);
- return { text, keyboard: kb };
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  return { text, keyboard: kb };
 }
 
 // Background scheduler: every minute, scan for trials ending within the
@@ -764,524 +764,524 @@ async function buildTrialEndingMessage(userId: number, expiresAt: number): Promi
 // findAndMarkTrialsToWarn() so the same user is never double-pinged
 // even if multiple ticks overlap or the process restarts mid-window.
 setInterval(async () => {
- try {
- const due = await findAndMarkTrialsToWarn(TRIAL\_WARNING\_BEFORE\_MS);
- for (const { userId, expiresAt } of due) {
- try {
- // Skip the warning if the user already has access that outlasts
- // the trial (admin grant, referral days). Their trial expiring
- // is irrelevant to them.
- const state = await getUserAccessState(userId, ADMIN\_USER\_ID);
- if (state.kind !== "trial") continue;
+  try {
+    const due = await findAndMarkTrialsToWarn(TRIAL_WARNING_BEFORE_MS);
+    for (const { userId, expiresAt } of due) {
+      try {
+        // Skip the warning if the user already has access that outlasts
+        // the trial (admin grant, referral days). Their trial expiring
+        // is irrelevant to them.
+        const state = await getUserAccessState(userId, ADMIN_USER_ID);
+        if (state.kind !== "trial") continue;
 
- const { text, keyboard } = await buildTrialEndingMessage(userId, expiresAt);
- await bot.api.sendMessage(userId, text, {
- parse\_mode: "HTML",
- reply\_markup: keyboard,
- });
- } catch (err: any) {
- // Most likely the user blocked the bot — nothing useful to do.
- console.error(\`\[TRIAL-WARN\] notify ${userId} failed:\`, err?.message);
- }
- }
- } catch (err: any) {
- console.error("\[TRIAL-WARN\] scheduler tick failed:", err?.message);
- }
-}, TRIAL\_WARNING\_INTERVAL\_MS);
+        const { text, keyboard } = await buildTrialEndingMessage(userId, expiresAt);
+        await bot.api.sendMessage(userId, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      } catch (err: any) {
+        // Most likely the user blocked the bot — nothing useful to do.
+        console.error(`[TRIAL-WARN] notify ${userId} failed:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error("[TRIAL-WARN] scheduler tick failed:", err?.message);
+  }
+}, TRIAL_WARNING_INTERVAL_MS);
 
-async function trackUser(userId: number): Promise {
- return trackUserMongo(userId);
+async function trackUser(userId: number): Promise<void> {
+  return trackUserMongo(userId);
 }
 
-function sleep(ms: number): Promise {
- return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function broadcastProgressText(total: number, sent: number, failed: number): string {
- const processed = sent + failed;
- const percent = total > 0 ? Math.floor((processed / total) \* 100) : 0;
- return (
- "📢 **Broadcast in Progress**\\n\\n" +
- \`👥 **Total Users:** ${total}\\n\` +
- \`✅ **Sent:** ${sent}\\n\` +
- \`❌ **Failed:** ${failed}\\n\` +
- \`⏳ **Processed:** ${processed}/${total} (${percent}%)\\n\\n\` +
- "Please wait..."
- );
+  const processed = sent + failed;
+  const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+  return (
+    "📢 <b>Broadcast in Progress</b>\n\n" +
+    `👥 <b>Total Users:</b> ${total}\n` +
+    `✅ <b>Sent:</b> ${sent}\n` +
+    `❌ <b>Failed:</b> ${failed}\n` +
+    `⏳ <b>Processed:</b> ${processed}/${total} (${percent}%)\n\n` +
+    "Please wait..."
+  );
 }
 
-function broadcastFinalText(total: number, sent: number, failed: number, failedUsers: number\[\]): string {
- const failedPreview = failedUsers.length
- ? "\\n\\n **Failed User IDs:**\\n" + failedUsers.slice(0, 20).map((id) => \`• `${id}`\`).join("\\n") + (failedUsers.length > 20 ? \`\\n...and ${failedUsers.length - 20} more\` : "")
- : "";
- return (
- "✅ **Broadcast Completed**\\n\\n" +
- \`👥 **Total Users:** ${total}\\n\` +
- \`✅ **Successfully Sent:** ${sent}\\n\` +
- \`❌ **Failed:** ${failed}\\n\\n\` +
- "The broadcast message has been sent to all reachable users." +
- failedPreview
- );
+function broadcastFinalText(total: number, sent: number, failed: number, failedUsers: number[]): string {
+  const failedPreview = failedUsers.length
+    ? "\n\n<b>Failed User IDs:</b>\n" + failedUsers.slice(0, 20).map((id) => `• <code>${id}</code>`).join("\n") + (failedUsers.length > 20 ? `\n...and ${failedUsers.length - 20} more` : "")
+    : "";
+  return (
+    "✅ <b>Broadcast Completed</b>\n\n" +
+    `👥 <b>Total Users:</b> ${total}\n` +
+    `✅ <b>Successfully Sent:</b> ${sent}\n` +
+    `❌ <b>Failed:</b> ${failed}\n\n` +
+    "The broadcast message has been sent to all reachable users." +
+    failedPreview
+  );
 }
 
-async function sendBroadcastToUsers(adminId: number, progressMessageId: number, users: number\[\], message: string): Promise {
- let sent = 0;
- let failed = 0;
- const failedUsers: number\[\] = \[\];
- const chunks = splitMessage(message, 4000);
+async function sendBroadcastToUsers(adminId: number, progressMessageId: number, users: number[], message: string): Promise<void> {
+  let sent = 0;
+  let failed = 0;
+  const failedUsers: number[] = [];
+  const chunks = splitMessage(message, 4000);
 
- await bot.api.editMessageText(adminId, progressMessageId, broadcastProgressText(users.length, sent, failed), { parse\_mode: "HTML" }).catch(() => {});
+  await bot.api.editMessageText(adminId, progressMessageId, broadcastProgressText(users.length, sent, failed), { parse_mode: "HTML" }).catch(() => {});
 
- for (let i = 0; i < users.length; i++) {
- const userId = users\[i\];
- try {
- for (const chunk of chunks) {
- await bot.api.sendMessage(userId, chunk);
- }
- sent++;
- } catch (err: any) {
- failed++;
- failedUsers.push(userId);
- console.error(\`\[BROADCAST\] Failed for ${userId}:\`, err?.message);
- }
+  for (let i = 0; i < users.length; i++) {
+    const userId = users[i];
+    try {
+      for (const chunk of chunks) {
+        await bot.api.sendMessage(userId, chunk);
+      }
+      sent++;
+    } catch (err: any) {
+      failed++;
+      failedUsers.push(userId);
+      console.error(`[BROADCAST] Failed for ${userId}:`, err?.message);
+    }
 
- if ((i + 1) % 5 === 0 \|\| i === users.length - 1) {
- await bot.api.editMessageText(adminId, progressMessageId, broadcastProgressText(users.length, sent, failed), { parse\_mode: "HTML" }).catch(() => {});
- }
- await sleep(50);
- }
+    if ((i + 1) % 5 === 0 || i === users.length - 1) {
+      await bot.api.editMessageText(adminId, progressMessageId, broadcastProgressText(users.length, sent, failed), { parse_mode: "HTML" }).catch(() => {});
+    }
+    await sleep(50);
+  }
 
- const finalText = broadcastFinalText(users.length, sent, failed, failedUsers);
- await bot.api.editMessageText(adminId, progressMessageId, finalText, {
- parse\_mode: "HTML",
- reply\_markup: new InlineKeyboard().text("🏠 Menu", "main\_menu"),
- }).catch(async () => {
- await bot.api.sendMessage(adminId, finalText, { parse\_mode: "HTML" }).catch(() => {});
- });
+  const finalText = broadcastFinalText(users.length, sent, failed, failedUsers);
+  await bot.api.editMessageText(adminId, progressMessageId, finalText, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu"),
+  }).catch(async () => {
+    await bot.api.sendMessage(adminId, finalText, { parse_mode: "HTML" }).catch(() => {});
+  });
 }
 
-async function checkForceSub(ctx: any): Promise {
- if (!FORCE\_SUB\_CHANNEL) return true;
- const userId = ctx.from?.id;
- if (!userId) return false;
- if (isAdmin(userId)) return true;
+async function checkForceSub(ctx: any): Promise<boolean> {
+  if (!FORCE_SUB_CHANNEL) return true;
+  const userId = ctx.from?.id;
+  if (!userId) return false;
+  if (isAdmin(userId)) return true;
 
- try {
- const member = await bot.api.getChatMember(FORCE\_SUB\_CHANNEL, userId);
- if (\["member", "administrator", "creator"\].includes(member.status)) return true;
- } catch (err: any) {
- console.error("\[FORCE\_SUB\] Check error:", err?.message);
- }
+  try {
+    const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
+    if (["member", "administrator", "creator"].includes(member.status)) return true;
+  } catch (err: any) {
+    console.error("[FORCE_SUB] Check error:", err?.message);
+  }
 
- const channelName = FORCE\_SUB\_CHANNEL.replace(/^@/, "");
- const kb = new InlineKeyboard()
- .url("📢 Join Channel", \`https://t.me/${channelName}\`).text("✅ I Joined", "check\_joined");
- try {
- await ctx.reply(
- "⛔ **Channel Subscription Required!**\\n\\n" +
- \`📢 Join our channel to use this bot!\\n\\nChannel: @${esc(channelName)}\\n\\n\` +
- "After joining click **✅ I Joined**",
- { parse\_mode: "HTML", reply\_markup: kb }
- );
- } catch {
- try {
- await ctx.editMessageText(
- "⛔ **Channel Subscription Required!**\\n\\n" +
- \`📢 Join our channel to use this bot!\\n\\nChannel: @${esc(channelName)}\\n\\n\` +
- "After joining click **✅ I Joined**",
- { parse\_mode: "HTML", reply\_markup: kb }
- );
- } catch {}
- }
- return false;
+  const channelName = FORCE_SUB_CHANNEL.replace(/^@/, "");
+  const kb = new InlineKeyboard()
+    .url("📢 Join Channel", `https://t.me/${channelName}`).text("✅ I Joined", "check_joined");
+  try {
+    await ctx.reply(
+      "⛔ <b>Channel Subscription Required!</b>\n\n" +
+      `📢 Join our channel to use this bot!\n\nChannel: @${esc(channelName)}\n\n` +
+      "After joining click <b>✅ I Joined</b>",
+      { parse_mode: "HTML", reply_markup: kb }
+    );
+  } catch {
+    try {
+      await ctx.editMessageText(
+        "⛔ <b>Channel Subscription Required!</b>\n\n" +
+        `📢 Join our channel to use this bot!\n\nChannel: @${esc(channelName)}\n\n` +
+        "After joining click <b>✅ I Joined</b>",
+        { parse_mode: "HTML", reply_markup: kb }
+      );
+    } catch {}
+  }
+  return false;
 }
 
 interface GroupSettings {
- name: string;
- description: string;
- count: number;
- finalNames: string\[\];
- namingMode: "auto" \| "custom";
- dpBuffers: Buffer\[\];
- editGroupInfo: boolean;
- sendMessages: boolean;
- addMembers: boolean;
- approveJoin: boolean;
- disappearingMessages: number;
- friendNumbers: string\[\];
- makeFriendAdmin: boolean;
+  name: string;
+  description: string;
+  count: number;
+  finalNames: string[];
+  namingMode: "auto" | "custom";
+  dpBuffers: Buffer[];
+  editGroupInfo: boolean;
+  sendMessages: boolean;
+  addMembers: boolean;
+  approveJoin: boolean;
+  disappearingMessages: number;
+  friendNumbers: string[];
+  makeFriendAdmin: boolean;
 }
 
 interface CtcPair {
- link: string;
- vcfContacts: Array<{ name: string; phone: string; vcfFileName: string }>;
+  link: string;
+  vcfContacts: Array<{ name: string; phone: string; vcfFileName: string }>;
 }
 
 interface SimilarGroup {
- base: string;
- groups: Array<{ id: string; subject: string }>;
+  base: string;
+  groups: Array<{ id: string; subject: string }>;
 }
 
 interface UserState {
- step: string;
- groupSettings?: GroupSettings;
- groupCreationCancel?: boolean;
- // True while the cancel-confirmation dialog ("Are you sure?") is shown to
- // the user. The background creation loop must NOT edit the message while
- // this flag is on, otherwise the dialog gets overwritten by the next
- // progress update and the user can never tap "Yes, Cancel".
- groupCreationCancelPending?: boolean;
- ctcData?: {
- groupLinks: string\[\];
- pairs: CtcPair\[\];
- currentPairIndex: number;
- };
- joinData?: { links: string\[\] };
- leaveData?: {
- groups: Array<{ id: string; subject: string; isAdmin: boolean }>;
- mode: "member" \| "admin" \| "all";
- patterns?: SimilarGroup\[\];
- selectedGroups?: Array<{ id: string; subject: string; isAdmin: boolean }>;
- selectedIndices?: Set;
- page?: number;
- };
- arData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page: number;
- };
- removeData?: {
- allGroups: Array<{ id: string; subject: string }>;
- selectedIndices: Set;
- page: number;
- };
- removeExcludeData?: {
- selectedGroups: Array<{ id: string; subject: string }>;
- excludeNumbers: Set;
- excludePrefixes: Set;
- };
- similarData?: {
- patterns: SimilarGroup\[\];
- allGroups: Array<{ id: string; subject: string }>;
- };
- glData?: {
- groupsPool: Array<{ id: string; subject: string }>;
- selectedIndices: Set;
- page: number;
- mode: "similar" \| "all";
- patternBase?: string;
- patterns: SimilarGroup\[\];
- allGroups: Array<{ id: string; subject: string }>;
- };
- rlLinkBuffer?: string\[\];
- pendingListData?: {
- patterns: SimilarGroup\[\];
- allPending: Array<{ groupId: string; groupName: string; pendingCount: number }>;
- selectedIndices?: Set;
- page?: number;
- };
- makeAdminData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page?: number;
- };
- resetLinkData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page: number;
- patternPage?: number;
- };
- demoteAdminData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page: number;
- mode?: "all" \| "numbers";
- phoneNumbers?: string\[\];
- };
- approvalData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page?: number;
- // Admin Approval flow extension:
- mode?: "all" \| "admin\_specific";
- targetPhones?: string\[\];
- makeAdminAfter?: boolean;
- };
- addMembersData?: {
- groupLink: string;
- groupId: string;
- groupName: string;
- groups: Array<{ link: string; id: string; name: string }>;
- multiGroup: boolean;
- friendNumbers: string\[\];
- adminContacts: Array<{ name: string; phone: string }>;
- navyContacts: Array<{ name: string; phone: string }>;
- memberContacts: Array<{ name: string; phone: string }>;
- totalToAdd: number;
- mode: "one\_by\_one" \| "together" \| "custom" \| "";
- delaySeconds: number;
- cancelled: boolean;
- customBatchFriend?: number;
- customBatchAdmin?: number;
- customBatchNavy?: number;
- customBatchMember?: number;
- customStep?: "friend" \| "admin" \| "navy" \| "member" \| "done";
- };
- editSettingsData?: {
- allGroups: Array<{ id: string; subject: string }>;
- patterns: SimilarGroup\[\];
- selectedIndices: Set;
- page: number;
- settings: GroupSettings;
- cancelled: boolean;
- };
- broadcastData?: {
- message: string;
- users: number\[\];
- };
- chatInGroupData?: {
- allGroups: Array<{ id: string; subject: string }>;
- selectedIndices: Set;
- page: number;
- message: string;
- delaySeconds: number;
- cancelled: boolean;
- botMode?: "single" \| "both";
- autoChatDurationMs?: number;
- };
- autoConnectStep?: string;
- // ── Change Group Name feature ────────────────────────────────────────────
- // Two sub-flows share this state:
- // "manual" → user picks groups, then types names (auto-numbered or custom)
- // "auto" → user picks pending-only groups, uploads one VCF per group,
- // bot matches each VCF to the group whose pending list contains
- // it, then user chooses "same as VCF name" or "custom prefix"
- changeGroupNameData?: {
- mode: "manual" \| "auto";
- // Manual: pool of admin groups the user is selecting from
- allGroups?: Array<{ id: string; subject: string }>;
- patterns?: SimilarGroup\[\];
- // Manual: which subset is currently being shown (similar pattern or all)
- selectionPool?: Array<{ id: string; subject: string }>;
- selectionPoolLabel?: string;
- // Insertion-ordered selection (so the user sees 1️⃣, 2️⃣, …)
- selectedGroupIds?: string\[\];
- page?: number;
- // Manual naming
- namingMode?: "auto" \| "custom";
- baseName?: string;
- finalNames?: string\[\];
- // Auto: pool of groups that have pending requests
- pendingPool?: Array<{ groupId: string; groupName: string; pendingCount: number }>;
- pendingSelectedIds?: string\[\];
- pendingPage?: number;
- // Auto: collected VCF files (one per selected group, in upload order)
- vcfFiles?: Array<{ fileName: string; phones: string\[\] }>;
- // Auto naming
- autoNameMode?: "same\_vcf" \| "custom\_vcf";
- customPrefix?: string;
- // Final review: list of {groupId, oldName, newName, vcfFileName?}
- renamePlan?: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }>;
- // Cancel signal for the background rename loop
- cancel?: boolean;
- };
+  step: string;
+  groupSettings?: GroupSettings;
+  groupCreationCancel?: boolean;
+  // True while the cancel-confirmation dialog ("Are you sure?") is shown to
+  // the user. The background creation loop must NOT edit the message while
+  // this flag is on, otherwise the dialog gets overwritten by the next
+  // progress update and the user can never tap "Yes, Cancel".
+  groupCreationCancelPending?: boolean;
+  ctcData?: {
+    groupLinks: string[];
+    pairs: CtcPair[];
+    currentPairIndex: number;
+  };
+  joinData?: { links: string[] };
+  leaveData?: {
+    groups: Array<{ id: string; subject: string; isAdmin: boolean }>;
+    mode: "member" | "admin" | "all";
+    patterns?: SimilarGroup[];
+    selectedGroups?: Array<{ id: string; subject: string; isAdmin: boolean }>;
+    selectedIndices?: Set<number>;
+    page?: number;
+  };
+  arData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+  };
+  removeData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    selectedIndices: Set<number>;
+    page: number;
+  };
+  removeExcludeData?: {
+    selectedGroups: Array<{ id: string; subject: string }>;
+    excludeNumbers: Set<string>;
+    excludePrefixes: Set<string>;
+  };
+  similarData?: {
+    patterns: SimilarGroup[];
+    allGroups: Array<{ id: string; subject: string }>;
+  };
+  glData?: {
+    groupsPool: Array<{ id: string; subject: string }>;
+    selectedIndices: Set<number>;
+    page: number;
+    mode: "similar" | "all";
+    patternBase?: string;
+    patterns: SimilarGroup[];
+    allGroups: Array<{ id: string; subject: string }>;
+  };
+  rlLinkBuffer?: string[];
+  pendingListData?: {
+    patterns: SimilarGroup[];
+    allPending: Array<{ groupId: string; groupName: string; pendingCount: number }>;
+    selectedIndices?: Set<number>;
+    page?: number;
+  };
+  makeAdminData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page?: number;
+  };
+  resetLinkData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    patternPage?: number;
+  };
+  demoteAdminData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    mode?: "all" | "numbers";
+    phoneNumbers?: string[];
+  };
+  approvalData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page?: number;
+    // Admin Approval flow extension:
+    mode?: "all" | "admin_specific";
+    targetPhones?: string[];
+    makeAdminAfter?: boolean;
+  };
+  addMembersData?: {
+    groupLink: string;
+    groupId: string;
+    groupName: string;
+    groups: Array<{ link: string; id: string; name: string }>;
+    multiGroup: boolean;
+    friendNumbers: string[];
+    adminContacts: Array<{ name: string; phone: string }>;
+    navyContacts: Array<{ name: string; phone: string }>;
+    memberContacts: Array<{ name: string; phone: string }>;
+    totalToAdd: number;
+    mode: "one_by_one" | "together" | "custom" | "";
+    delaySeconds: number;
+    cancelled: boolean;
+    customBatchFriend?: number;
+    customBatchAdmin?: number;
+    customBatchNavy?: number;
+    customBatchMember?: number;
+    customStep?: "friend" | "admin" | "navy" | "member" | "done";
+  };
+  editSettingsData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    settings: GroupSettings;
+    cancelled: boolean;
+  };
+  broadcastData?: {
+    message: string;
+    users: number[];
+  };
+  chatInGroupData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    selectedIndices: Set<number>;
+    page: number;
+    message: string;
+    delaySeconds: number;
+    cancelled: boolean;
+    botMode?: "single" | "both";
+    autoChatDurationMs?: number;
+  };
+  autoConnectStep?: string;
+  // ── Change Group Name feature ────────────────────────────────────────────
+  // Two sub-flows share this state:
+  //   "manual"  → user picks groups, then types names (auto-numbered or custom)
+  //   "auto"    → user picks pending-only groups, uploads one VCF per group,
+  //               bot matches each VCF to the group whose pending list contains
+  //               it, then user chooses "same as VCF name" or "custom prefix"
+  changeGroupNameData?: {
+    mode: "manual" | "auto";
+    // Manual: pool of admin groups the user is selecting from
+    allGroups?: Array<{ id: string; subject: string }>;
+    patterns?: SimilarGroup[];
+    // Manual: which subset is currently being shown (similar pattern or all)
+    selectionPool?: Array<{ id: string; subject: string }>;
+    selectionPoolLabel?: string;
+    // Insertion-ordered selection (so the user sees 1️⃣, 2️⃣, …)
+    selectedGroupIds?: string[];
+    page?: number;
+    // Manual naming
+    namingMode?: "auto" | "custom";
+    baseName?: string;
+    finalNames?: string[];
+    // Auto: pool of groups that have pending requests
+    pendingPool?: Array<{ groupId: string; groupName: string; pendingCount: number }>;
+    pendingSelectedIds?: string[];
+    pendingPage?: number;
+    // Auto: collected VCF files (one per selected group, in upload order)
+    vcfFiles?: Array<{ fileName: string; phones: string[] }>;
+    // Auto naming
+    autoNameMode?: "same_vcf" | "custom_vcf";
+    customPrefix?: string;
+    // Final review: list of {groupId, oldName, newName, vcfFileName?}
+    renamePlan?: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }>;
+    // Cancel signal for the background rename loop
+    cancel?: boolean;
+  };
 }
 
 interface AutoChatSession {
- running: boolean;
- cancelled: boolean;
- chatId: number;
- msgId: number;
- groups: Array<{ id: string; subject: string }>;
- message: string;
- delaySeconds: number;
- repeatCount: number;
- sent: number;
- failed: number;
- currentRound: number;
- rotationIndex: number;
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  groups: Array<{ id: string; subject: string }>;
+  message: string;
+  delaySeconds: number;
+  repeatCount: number;
+  sent: number;
+  failed: number;
+  currentRound: number;
+  rotationIndex: number;
 }
 
 interface CigSession {
- running: boolean;
- cancelled: boolean;
- chatId: number;
- msgId: number;
- groups: Array<{ id: string; subject: string }>;
- message: string;
- sent: number;
- failed: number;
- sentByAccount1: number;
- sentByAccount2: number;
- botMode: "single" \| "both";
- currentGroupIndex: number;
- cycle: number;
- nextDelayMs: number;
- rotationIndex: number;
- autoChatExpiresAt?: number;
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  groups: Array<{ id: string; subject: string }>;
+  message: string;
+  sent: number;
+  failed: number;
+  sentByAccount1: number;
+  sentByAccount2: number;
+  botMode: "single" | "both";
+  currentGroupIndex: number;
+  cycle: number;
+  nextDelayMs: number;
+  rotationIndex: number;
+  autoChatExpiresAt?: number;
 }
 
 interface AcfSession {
- running: boolean;
- cancelled: boolean;
- chatId: number;
- msgId: number;
- primaryJid: string;
- autoJid: string;
- sent: number;
- failed: number;
- currentPair: number;
- totalPairs: number;
- cycle: number;
- nextDelayMs: number;
- rotationIndex: number;
- autoChatExpiresAt?: number;
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  primaryJid: string;
+  autoJid: string;
+  sent: number;
+  failed: number;
+  currentPair: number;
+  totalPairs: number;
+  cycle: number;
+  nextDelayMs: number;
+  rotationIndex: number;
+  autoChatExpiresAt?: number;
 }
 
-const CHAT\_FRIEND\_PAIRS: \[string, string\]\[\] = \[\
- \["Yaar, kal ka test tha kaisa gaya?", "Bilkul bekar 😭 Tu bata?"\],\
- \["Main sab bhool gaya tha 😂", "Hahaha mujhe bhi! Chalo saath mein rone wale hain 😂"\],\
- \["Kal physics padh le yaar seriously", "Haan yaar, aaj raat 11 baje call karte hain group mein"\],\
- \["Bhai tune notes liye the class mein?", "Nahi yaar main so gaya tha 🙈 Tu de de please"\],\
- \["Assignment submit ho gaya tera?", "Abhi nahi yaar, 2 ghante bacha hai deadline mein 😰"\],\
- \["Canteen ka khana aaj kaisa tha?", "Ekdum bekar! Ghar ka khana yaad aa gaya 😭"\],\
- \["Weekend pe kya plan hai?", "Bas ghar pe padhai... ya shayad nahi bhi 😄"\],\
- \["Bhai exam me kitna aaya?", "Puchh mat yaar... dard hota hai yaad karke 😂"\],\
- \["Tu serious kyun rehta hai har waqt?", "Serious nahi hoon yaar, bas aaj neend nahi aayi 😪"\],\
- \["Chal coffee peete hain baad mein?", "Haan bilkul! 3 baje canteen chalte hain ✅"\],\
- \["Bhai teacher ne aaj class mein kya padha?", "Pata nahi yaar, main phone pe tha 😬"\],\
- \["Tera homework hua kya?", "Homework? Wo toh kal subah 5 baje karenge jaise hamesha 😅"\],\
- \["Yaar kitna bada syllabus hai is baar!", "Haan bhai, rona aa raha hai dekh ke 😭"\],\
- \["Bhai galti se teacher ki aankhon mein dekh liya!", "Phir? Sun li lecture wali sirf tujhe hi? 😂"\],\
- \["Kal result aane wala hai yaar...", "Main toh kal school nahi aaunga 😂 Chhup jaunga ghar pe"\],\
- \["Yaar mera pen kho gaya phir se!", "Tera pen kho gaya ya tune diya kisi ko aur bhool gaya? 😏"\],\
- \["Physics ka formula yaad nahi ho raha", "Tension mat le, exam mein bhi nahi hoga yaad 😂"\],\
- \["Bhai library mein padhai hoti hai kya?", "Hoti toh hai... mujhe toh neend aati hai wahan 😴"\],\
- \["Yaar group project mein mera koi kaam nahi kiya!", "Welcome to team work 😂"\],\
- \["Teacher ne merit list nikaali, tera naam nahi tha!", "Iska matlab mujhe vacation ki zaroorat hai 😂"\],\
- \["Bhai aaj phir bunk maara tune?", "Yaar attendance ki fikr mat kar, marks bhi nahi aate toh bhi 😂"\],\
- \["Exam ke baad kya plan hai?", "Bhool ja sab aur so jaao teen din tak 😴"\],\
- \["Yaar notes share kar na please!", "Mere notes? Main khud copy karta hoon tere notes se 😂"\],\
- \["Bhai iss baar padhna hai seriously", "Haan same last baar bhi kaha tha, aur usse pehle bhi 😂"\],\
- \["Canteen mein aaj noodles the kaafi acche!", "Tu canteen gaya? Mujhe bata toh deta yaar 😤"\],\
- \["Yaar maths class mein so gaya tha", "Acha toh uss waqt main akela nahi tha 😴"\],\
- \["Teacher ne mujhe pakad liya mobile pe!", "Mujhe bhi kal hi pakda... solidarity yaar 😂"\],\
- \["Yaar padhai mein man nahi lagta", "Man kisi ka bhi nahi lagta, phir bhi karte hain 😅"\],\
- \["Bhai principal office mein kyon bula rahe hain?", "Pray kar yaar aur sach mat bolna 😂"\],\
- \["Teri girlfriend hai kya school mein?", "Haan, merī books... unse hi pyaar hai 😂"\],\
- \["Yaar kal presentation hai, ready hai tu?", "Presentation? Kaun sa topic tha yaar 😅"\],\
- \["Bhai aaj phir baarish mein bheega?", "Haan yaar, umbrella ghar pe hi reh gaya jaisa hamesha 😭"\],\
- \["Yaar tere marks kitne aaye iss baar?", "Itne kam ki calculator se bhi nahi ginne 😂"\],\
- \["Bhai chemistry experiment mein kuch jalaya tune!", "Sirf thoda sa... science toh yahi hota hai na 😂"\],\
-\];
+const CHAT_FRIEND_PAIRS: [string, string][] = [
+  ["Yaar, kal ka test tha kaisa gaya?", "Bilkul bekar 😭 Tu bata?"],
+  ["Main sab bhool gaya tha 😂", "Hahaha mujhe bhi! Chalo saath mein rone wale hain 😂"],
+  ["Kal physics padh le yaar seriously", "Haan yaar, aaj raat 11 baje call karte hain group mein"],
+  ["Bhai tune notes liye the class mein?", "Nahi yaar main so gaya tha 🙈 Tu de de please"],
+  ["Assignment submit ho gaya tera?", "Abhi nahi yaar, 2 ghante bacha hai deadline mein 😰"],
+  ["Canteen ka khana aaj kaisa tha?", "Ekdum bekar! Ghar ka khana yaad aa gaya 😭"],
+  ["Weekend pe kya plan hai?", "Bas ghar pe padhai... ya shayad nahi bhi 😄"],
+  ["Bhai exam me kitna aaya?", "Puchh mat yaar... dard hota hai yaad karke 😂"],
+  ["Tu serious kyun rehta hai har waqt?", "Serious nahi hoon yaar, bas aaj neend nahi aayi 😪"],
+  ["Chal coffee peete hain baad mein?", "Haan bilkul! 3 baje canteen chalte hain ✅"],
+  ["Bhai teacher ne aaj class mein kya padha?", "Pata nahi yaar, main phone pe tha 😬"],
+  ["Tera homework hua kya?", "Homework? Wo toh kal subah 5 baje karenge jaise hamesha 😅"],
+  ["Yaar kitna bada syllabus hai is baar!", "Haan bhai, rona aa raha hai dekh ke 😭"],
+  ["Bhai galti se teacher ki aankhon mein dekh liya!", "Phir? Sun li lecture wali sirf tujhe hi? 😂"],
+  ["Kal result aane wala hai yaar...", "Main toh kal school nahi aaunga 😂 Chhup jaunga ghar pe"],
+  ["Yaar mera pen kho gaya phir se!", "Tera pen kho gaya ya tune diya kisi ko aur bhool gaya? 😏"],
+  ["Physics ka formula yaad nahi ho raha", "Tension mat le, exam mein bhi nahi hoga yaad 😂"],
+  ["Bhai library mein padhai hoti hai kya?", "Hoti toh hai... mujhe toh neend aati hai wahan 😴"],
+  ["Yaar group project mein mera koi kaam nahi kiya!", "Welcome to team work 😂"],
+  ["Teacher ne merit list nikaali, tera naam nahi tha!", "Iska matlab mujhe vacation ki zaroorat hai 😂"],
+  ["Bhai aaj phir bunk maara tune?", "Yaar attendance ki fikr mat kar, marks bhi nahi aate toh bhi 😂"],
+  ["Exam ke baad kya plan hai?", "Bhool ja sab aur so jaao teen din tak 😴"],
+  ["Yaar notes share kar na please!", "Mere notes? Main khud copy karta hoon tere notes se 😂"],
+  ["Bhai iss baar padhna hai seriously", "Haan same last baar bhi kaha tha, aur usse pehle bhi 😂"],
+  ["Canteen mein aaj noodles the kaafi acche!", "Tu canteen gaya? Mujhe bata toh deta yaar 😤"],
+  ["Yaar maths class mein so gaya tha", "Acha toh uss waqt main akela nahi tha 😴"],
+  ["Teacher ne mujhe pakad liya mobile pe!", "Mujhe bhi kal hi pakda... solidarity yaar 😂"],
+  ["Yaar padhai mein man nahi lagta", "Man kisi ka bhi nahi lagta, phir bhi karte hain 😅"],
+  ["Bhai principal office mein kyon bula rahe hain?", "Pray kar yaar aur sach mat bolna 😂"],
+  ["Teri girlfriend hai kya school mein?", "Haan, merī books... unse hi pyaar hai 😂"],
+  ["Yaar kal presentation hai, ready hai tu?", "Presentation? Kaun sa topic tha yaar 😅"],
+  ["Bhai aaj phir baarish mein bheega?", "Haan yaar, umbrella ghar pe hi reh gaya jaisa hamesha 😭"],
+  ["Yaar tere marks kitne aaye iss baar?", "Itne kam ki calculator se bhi nahi ginne 😂"],
+  ["Bhai chemistry experiment mein kuch jalaya tune!", "Sirf thoda sa... science toh yahi hota hai na 😂"],
+];
 
 // Sequential delay rotation: 1min → 2min → 3min → 4min → 5min → repeat
-const CHAT\_DELAY\_ROTATION\_MS = \[\
- 1 \* 60 \* 1000,\
- 2 \* 60 \* 1000,\
- 3 \* 60 \* 1000,\
- 4 \* 60 \* 1000,\
- 5 \* 60 \* 1000,\
-\];
+const CHAT_DELAY_ROTATION_MS = [
+  1 * 60 * 1000,
+  2 * 60 * 1000,
+  3 * 60 * 1000,
+  4 * 60 * 1000,
+  5 * 60 * 1000,
+];
 
 // Fixed delays for Chat In Group dual-account rotation:
-// 1 min between account1 and account2 sending in the SAME group
-// 2 min before rotating to the NEXT group
-const CIG\_WITHIN\_GROUP\_DELAY\_MS = 1 \* 60 \* 1000;
-const CIG\_BETWEEN\_GROUP\_DELAY\_MS = 2 \* 60 \* 1000;
+//   1 min between account1 and account2 sending in the SAME group
+//   2 min before rotating to the NEXT group
+const CIG_WITHIN_GROUP_DELAY_MS = 1 * 60 * 1000;
+const CIG_BETWEEN_GROUP_DELAY_MS = 2 * 60 * 1000;
 
-const AUTO\_GROUP\_MESSAGES = CHAT\_FRIEND\_PAIRS.flat();
+const AUTO_GROUP_MESSAGES = CHAT_FRIEND_PAIRS.flat();
 
 function getSequentialDelayMs(rotationIndex: number): number {
- return CHAT\_DELAY\_ROTATION\_MS\[rotationIndex % CHAT\_DELAY\_ROTATION\_MS.length\];
+  return CHAT_DELAY_ROTATION_MS[rotationIndex % CHAT_DELAY_ROTATION_MS.length];
 }
 
 // Auto chat duration options (in ms). 0 = unlimited (admin only).
-const AUTO\_CHAT\_DURATION\_OPTIONS: Array<{ label: string; ms: number; cb: string }> = \[\
- { label: "1 Day", ms: 1 \* 24 \* 60 \* 60 \* 1000, cb: "achat\_dur\_1d" },\
- { label: "4 Days", ms: 4 \* 24 \* 60 \* 60 \* 1000, cb: "achat\_dur\_4d" },\
- { label: "8 Days", ms: 8 \* 24 \* 60 \* 60 \* 1000, cb: "achat\_dur\_8d" },\
- { label: "10 Days", ms: 10 \* 24 \* 60 \* 60 \* 1000, cb: "achat\_dur\_10d" },\
-\];
+const AUTO_CHAT_DURATION_OPTIONS: Array<{ label: string; ms: number; cb: string }> = [
+  { label: "1 Day", ms: 1 * 24 * 60 * 60 * 1000, cb: "achat_dur_1d" },
+  { label: "4 Days", ms: 4 * 24 * 60 * 60 * 1000, cb: "achat_dur_4d" },
+  { label: "8 Days", ms: 8 * 24 * 60 * 60 * 1000, cb: "achat_dur_8d" },
+  { label: "10 Days", ms: 10 * 24 * 60 * 60 * 1000, cb: "achat_dur_10d" },
+];
 
 function buildDurationKeyboard(userId: number, confirmCb: string): InlineKeyboard {
- const kb = new InlineKeyboard();
- for (const opt of AUTO\_CHAT\_DURATION\_OPTIONS) {
- kb.text(\`⏱️ ${opt.label}\`, \`${confirmCb}:${opt.ms}\`).row();
- }
- if (isAdmin(userId)) {
- kb.text("♾️ No Limit (Admin)", \`${confirmCb}:0\`).row();
- }
- kb.text("❌ Cancel", "auto\_chat\_menu");
- return kb;
+  const kb = new InlineKeyboard();
+  for (const opt of AUTO_CHAT_DURATION_OPTIONS) {
+    kb.text(`⏱️ ${opt.label}`, `${confirmCb}:${opt.ms}`).row();
+  }
+  if (isAdmin(userId)) {
+    kb.text("♾️ No Limit (Admin)", `${confirmCb}:0`).row();
+  }
+  kb.text("❌ Cancel", "auto_chat_menu");
+  return kb;
 }
 
 function formatDelay(ms: number): string {
- if (ms < 60 \* 1000) return \`${Math.round(ms / 1000)} sec\`;
- if (ms < 60 \* 60 \* 1000) return \`${Math.round(ms / (60 \* 1000))} min\`;
- const hours = ms / (60 \* 60 \* 1000);
- return \`${Number.isInteger(hours) ? hours : hours.toFixed(1)} hour${hours === 1 ? "" : "s"}\`;
+  if (ms < 60 * 1000) return `${Math.round(ms / 1000)} sec`;
+  if (ms < 60 * 60 * 1000) return `${Math.round(ms / (60 * 1000))} min`;
+  const hours = ms / (60 * 60 * 1000);
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} hour${hours === 1 ? "" : "s"}`;
 }
 
 function isSessionActive(session: { cancelled: boolean; running: boolean }): boolean {
- return !session.cancelled && session.running;
+  return !session.cancelled && session.running;
 }
 
-async function waitWithCancel(session: { cancelled: boolean; running: boolean }, delayMs: number): Promise {
- const stepMs = 5000;
- let waited = 0;
- while (!session.cancelled && session.running && waited < delayMs) {
- const remaining = delayMs - waited;
- const next = Math.min(stepMs, remaining);
- await sleep(next);
- waited += next;
- }
+async function waitWithCancel(session: { cancelled: boolean; running: boolean }, delayMs: number): Promise<void> {
+  const stepMs = 5000;
+  let waited = 0;
+  while (!session.cancelled && session.running && waited < delayMs) {
+    const remaining = delayMs - waited;
+    const next = Math.min(stepMs, remaining);
+    await sleep(next);
+    waited += next;
+  }
 }
 
-const autoChatSessions: Map = new Map();
-const cigSessions: Map = new Map();
-const acfSessions: Map = new Map();
-const userStates: Map = new Map();
+const autoChatSessions: Map<number, AutoChatSession> = new Map();
+const cigSessions: Map<number, CigSession> = new Map();
+const acfSessions: Map<number, AcfSession> = new Map();
+const userStates: Map<number, UserState> = new Map();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // User-activity tracking (in-memory). Drives three behaviours:
-// 1\. The "✅ WhatsApp connected +XXX" celebration message on /start is only
-// shown the first time per session window (i.e. when the user has been
-// idle for >= USER\_IDLE\_DISCONNECT\_MS, or has never used the bot since
-// the process started). On subsequent /start calls within the active
-// window, the menu appears without the connection toast.
-// 2\. Any button press or text message refreshes lastActivityAt — the user
-// is "active" for another 30 minutes from that point.
-// 3\. A background timer disconnects WhatsApp for users idle >=
-// USER\_IDLE\_DISCONNECT\_MS and remembers that we did so (idleDisconnected
-// flag). On the next interaction, the connection is restored silently
-// from the stored Mongo session if available.
+//   1. The "✅ WhatsApp connected +XXX" celebration message on /start is only
+//      shown the first time per session window (i.e. when the user has been
+//      idle for >= USER_IDLE_DISCONNECT_MS, or has never used the bot since
+//      the process started). On subsequent /start calls within the active
+//      window, the menu appears without the connection toast.
+//   2. Any button press or text message refreshes lastActivityAt — the user
+//      is "active" for another 30 minutes from that point.
+//   3. A background timer disconnects WhatsApp for users idle >=
+//      USER_IDLE_DISCONNECT_MS and remembers that we did so (idleDisconnected
+//      flag). On the next interaction, the connection is restored silently
+//      from the stored Mongo session if available.
 // ─────────────────────────────────────────────────────────────────────────────
-const USER\_IDLE\_DISCONNECT\_MS = Number(
- process.env.USER\_IDLE\_DISCONNECT\_MS \|\| String(30 \* 60 \* 1000)
+const USER_IDLE_DISCONNECT_MS = Number(
+  process.env.USER_IDLE_DISCONNECT_MS || String(30 * 60 * 1000)
 );
-const USER\_IDLE\_CHECK\_INTERVAL\_MS = Number(
- process.env.USER\_IDLE\_CHECK\_INTERVAL\_MS \|\| String(5 \* 60 \* 1000)
+const USER_IDLE_CHECK_INTERVAL_MS = Number(
+  process.env.USER_IDLE_CHECK_INTERVAL_MS || String(5 * 60 * 1000)
 );
 
 interface UserActivity {
- lastActivityAt: number;
- // Set to true after the background idle timer disconnects this user. Reset
- // to false the next time they interact with the bot.
- idleDisconnected: boolean;
+  lastActivityAt: number;
+  // Set to true after the background idle timer disconnects this user. Reset
+  // to false the next time they interact with the bot.
+  idleDisconnected: boolean;
 }
 
-const userActivity: Map = new Map();
+const userActivity: Map<number, UserActivity> = new Map();
 
 function isUserActive(userId: number): boolean {
- const a = userActivity.get(userId);
- if (!a) return false;
- return Date.now() - a.lastActivityAt < USER\_IDLE\_DISCONNECT\_MS;
+  const a = userActivity.get(userId);
+  if (!a) return false;
+  return Date.now() - a.lastActivityAt < USER_IDLE_DISCONNECT_MS;
 }
 
 // Returns true when this interaction is the first one in a new active
@@ -1290,52 +1290,52 @@ function isUserActive(userId: number): boolean {
 // "connected" toast — we only want it once per session window, not on
 // every /start tap.
 function markUserActive(userId: number): boolean {
- const now = Date.now();
- const existing = userActivity.get(userId);
- if (!existing) {
- userActivity.set(userId, { lastActivityAt: now, idleDisconnected: false });
- return true;
- }
- const wasIdle = existing.idleDisconnected \|\| (now - existing.lastActivityAt >= USER\_IDLE\_DISCONNECT\_MS);
- existing.lastActivityAt = now;
- existing.idleDisconnected = false;
- return wasIdle;
+  const now = Date.now();
+  const existing = userActivity.get(userId);
+  if (!existing) {
+    userActivity.set(userId, { lastActivityAt: now, idleDisconnected: false });
+    return true;
+  }
+  const wasIdle = existing.idleDisconnected || (now - existing.lastActivityAt >= USER_IDLE_DISCONNECT_MS);
+  existing.lastActivityAt = now;
+  existing.idleDisconnected = false;
+  return wasIdle;
 }
 
 // True if the most recent markUserActive call started a new active window.
 // We can't simply re-check on demand because the middleware updates the
 // timestamp on every update — once /start runs, the user is already
 // "active". Cache the result per-update via a tiny in-memory flag.
-const newSessionFlag: Map = new Map();
+const newSessionFlag: Map<number, boolean> = new Map();
 
 // Silent reconnect: if the user has a stored WhatsApp session but the in-memory
 // socket has been evicted (process restart, idle disconnect, etc.), trigger a
 // background reload. Returns immediately — the menu/button flow continues
 // without waiting. The connect handlers in connectWhatsApp itself will set the
 // connected flag once the socket is up.
-async function ensureWhatsAppRestored(userId: number): Promise {
- const uid = String(userId);
- if (isConnected(uid)) return;
- try {
- const stored = await hasStoredWhatsAppSession(uid);
- if (!stored) return;
- // Fire-and-forget — ensureSessionLoaded handles its own concurrency guards.
- ensureSessionLoaded(uid).catch((err) => {
- console.error(\`\[BOT\] silent restore failed for ${userId}:\`, err?.message);
- });
- } catch {}
+async function ensureWhatsAppRestored(userId: number): Promise<void> {
+  const uid = String(userId);
+  if (isConnected(uid)) return;
+  try {
+    const stored = await hasStoredWhatsAppSession(uid);
+    if (!stored) return;
+    // Fire-and-forget — ensureSessionLoaded handles its own concurrency guards.
+    ensureSessionLoaded(uid).catch((err) => {
+      console.error(`[BOT] silent restore failed for ${userId}:`, err?.message);
+    });
+  } catch {}
 }
 // ─── Join Session (batching + live progress bar) ──────────────────────────────
 interface JoinSession {
- chatId: number;
- msgId: number;
- queue: string\[\];
- done: number;
- results: string\[\];
- running: boolean;
- cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  queue: string[];
+  done: number;
+  results: string[];
+  running: boolean;
+  cancelled: boolean;
 }
-const joinSessions = new Map();
+const joinSessions = new Map<number, JoinSession>();
 
 // ─── Reset-by-Link Resolve Session ───────────────────────────────────────────
 // Allows users to send multiple batches of links while resolution is running.
@@ -1343,415 +1343,409 @@ const joinSessions = new Map();
 // in-place — no message deletion, no lost progress.
 
 interface RlResolveSession {
- chatId: number;
- msgId: number;
- queue: string\[\]; // pending links still to resolve
- resolved: Array<{ id: string; subject: string }>; // successfully resolved groups
- failed: string\[\]; // links that failed after retry
- done: number; // total processed so far
- running: boolean;
- cancelled: boolean;
- patterns: any\[\]; // carry-forward from resetLinkData
- patternPage?: number;
+  chatId: number;
+  msgId: number;
+  queue: string[];                              // pending links still to resolve
+  resolved: Array<{ id: string; subject: string }>; // successfully resolved groups
+  failed: string[];                             // links that failed after retry
+  done: number;                                 // total processed so far
+  running: boolean;
+  cancelled: boolean;
+  patterns: any[];                              // carry-forward from resetLinkData
+  patternPage?: number;
 }
 
-const rlResolveSessions = new Map();
-const rlLinkCollectMsgId = new Map();
+const rlResolveSessions = new Map<number, RlResolveSession>();
+const rlLinkCollectMsgId = new Map<number, number>();
 
 function buildRlProgressBar(done: number, total: number): string {
- const pct = total === 0 ? 0 : Math.round((done / total) \* 100);
- const filled = Math.round((done / Math.max(total, 1)) \* 20);
- return \`\[${"█".repeat(filled)}${"░".repeat(20 - filled)}\] ${pct}% (${done}/${total})\`;
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  const filled = Math.round((done / Math.max(total, 1)) * 20);
+  return `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
 }
 
 function buildRlResolveStatusText(session: RlResolveSession): string {
- const total = session.done + session.queue.length;
- const bar = buildRlProgressBar(session.done, total);
- return (
- \`🔍 **Resolving Links...**\\n\\n\` +
- \`${bar}\\n\\n\` +
- \`✅ Resolved: **${session.resolved.length}** ❌ Failed: **${session.failed.length}**\\n\` +
- (session.queue.length > 0
- ? \`⌛ **${session.queue.length}** link(s) still in queue...\`
- : \`⏳ Finishing up...\`)
- );
+  const total = session.done + session.queue.length;
+  const bar = buildRlProgressBar(session.done, total);
+  return (
+    `🔍 <b>Resolving Links...</b>\n\n` +
+    `${bar}\n\n` +
+    `✅ Resolved: <b>${session.resolved.length}</b>   ❌ Failed: <b>${session.failed.length}</b>\n` +
+    (session.queue.length > 0
+      ? `⌛ <b>${session.queue.length}</b> link(s) still in queue...`
+      : `⏳ Finishing up...`)
+  );
 }
 
-async function runRlResolveBackground(userId: number): Promise {
- const session = rlResolveSessions.get(userId);
- if (!session \|\| session.running) return;
- session.running = true;
+async function runRlResolveBackground(userId: number): Promise<void> {
+  const session = rlResolveSessions.get(userId);
+  if (!session || session.running) return;
+  session.running = true;
 
- const BATCH\_SIZE = 5;
- const INTER\_CALL\_DELAY = 300;
- const BATCH\_PAUSE = 2000;
+  const BATCH_SIZE = 5;
+  const INTER_CALL_DELAY = 300;
+  const BATCH_PAUSE = 2000;
 
- try {
- while (session.queue.length > 0 && !session.cancelled) {
- const link = session.queue.shift()!;
+  try {
+    while (session.queue.length > 0 && !session.cancelled) {
+      const link = session.queue.shift()!;
 
- // Throttle: pause after every BATCH\_SIZE items
- if (session.done > 0 && session.done % BATCH\_SIZE === 0) {
- try {
- await bot.api.editMessageText(session.chatId, session.msgId,
- buildRlResolveStatusText(session) + \`\\n\\n _Pausing briefly to avoid rate limits..._ \`,
- { parse\_mode: "HTML" }
- );
- } catch {}
- await new Promise((r) => setTimeout(r, BATCH\_PAUSE));
- } else if (session.done > 0) {
- await new Promise((r) => setTimeout(r, INTER\_CALL\_DELAY));
- }
+      // Throttle: pause after every BATCH_SIZE items
+      if (session.done > 0 && session.done % BATCH_SIZE === 0) {
+        try {
+          await bot.api.editMessageText(session.chatId, session.msgId,
+            buildRlResolveStatusText(session) + `\n\n<i>Pausing briefly to avoid rate limits...</i>`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE));
+      } else if (session.done > 0) {
+        await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
+      }
 
- const info = await getGroupIdFromLink(String(userId), link);
- if (info) {
- session.resolved.push({ id: info.id, subject: info.subject });
- } else {
- session.failed.push(link);
- }
- session.done++;
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) {
+        session.resolved.push({ id: info.id, subject: info.subject });
+      } else {
+        session.failed.push(link);
+      }
+      session.done++;
 
- // Update live progress bar after each link
- try {
- await bot.api.editMessageText(session.chatId, session.msgId,
- buildRlResolveStatusText(session),
- { parse\_mode: "HTML" }
- );
- } catch {}
- }
+      // Update live progress bar after each link
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId,
+          buildRlResolveStatusText(session),
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+    }
 
- rlResolveSessions.delete(userId);
+    rlResolveSessions.delete(userId);
 
- if (!session.resolved.length) {
- try {
- await bot.api.editMessageText(session.chatId, session.msgId,
- "❌ **Could not resolve any of the provided links.**\\n\\n" +
- "Make sure the links are valid and you are a member of those groups.",
- { parse\_mode: "HTML", reply\_markup: new InlineKeyboard().text("🏠 Main Menu", "main\_menu") }
- );
- } catch {}
- userStates.delete(userId);
- return;
- }
+    if (!session.resolved.length) {
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId,
+          "❌ <b>Could not resolve any of the provided links.</b>\n\n" +
+          "Make sure the links are valid and you are a member of those groups.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+        );
+      } catch {}
+      userStates.delete(userId);
+      return;
+    }
 
- // Transition: update user state and show the confirmation review
- const state = userStates.get(userId);
- if (!state) return;
+    // Transition: update user state and show the confirmation review
+    const state = userStates.get(userId);
+    if (!state) return;
 
- state.resetLinkData = {
- allGroups: session.resolved,
- patterns: session.patterns \|\| \[\],
- selectedIndices: new Set(session.resolved.map((\_, i) => i)),
- page: 0,
- patternPage: session.patternPage,
- };
- state.step = "reset\_link\_select";
+    state.resetLinkData = {
+      allGroups: session.resolved,
+      patterns: session.patterns || [],
+      selectedIndices: new Set(session.resolved.map((_, i) => i)),
+      page: 0,
+      patternPage: session.patternPage,
+    };
+    state.step = "reset_link_select";
 
- let reviewText =
- \`🔗 **Reset Invite Links — Confirm**\\n\\n\` +
- \`✅ **${session.resolved.length} group(s) resolved** — invite links reset ho jayenge.\\n\`;
- if (session.failed.length > 0) {
- reviewText += \`⚠️ **${session.failed.length} link(s) resolve nahi hue** (skip ho jayenge).\\n\`;
- }
- reviewText +=
- \`\\n⚠️ **Current invite links revoke ho jayenge.**\\n\` +
- \`Old link se koi join nahi kar payega.\\n\\n\` +
- \`Aage badhna chahte ho?\`;
+    let reviewText =
+      `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
+      `✅ <b>${session.resolved.length} group(s) resolved</b> — invite links reset ho jayenge.\n`;
+    if (session.failed.length > 0) {
+      reviewText += `⚠️ <b>${session.failed.length} link(s) resolve nahi hue</b> (skip ho jayenge).\n`;
+    }
+    reviewText +=
+      `\n⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
+      `Old link se koi join nahi kar payega.\n\n` +
+      `Aage badhna chahte ho?`;
 
- try {
- await bot.api.editMessageText(session.chatId, session.msgId, reviewText, {
- parse\_mode: "HTML",
- reply\_markup: new InlineKeyboard()
- .text("✅ Yes, Reset Links", "rl\_proceed\_confirm")
- .text("❌ Cancel", "main\_menu"),
- });
- } catch {}
- } finally {
- session.running = false;
- }
+    try {
+      await bot.api.editMessageText(session.chatId, session.msgId, reviewText, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Yes, Reset Links", "rl_proceed_confirm")
+          .text("❌ Cancel", "main_menu"),
+      });
+    } catch {}
+  } finally {
+    session.running = false;
+  }
 }
 
 function buildJoinProgressBar(done: number, total: number): string {
- const pct = total === 0 ? 0 : Math.round((done / total) \* 100);
- const filled = Math.round((done / Math.max(total, 1)) \* 20);
- return \`\[${"█".repeat(filled)}${"░".repeat(20 - filled)}\] ${pct}% (${done}/${total})\`;
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  const filled = Math.round((done / Math.max(total, 1)) * 20);
+  return `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
 }
 
 function buildJoinStatusText(session: JoinSession): string {
- const total = session.done + session.queue.length;
- const bar = buildJoinProgressBar(session.done, total);
- const last = session.results.slice(-10);
- const more = session.results.length > 10 ? \`\\n... +${session.results.length - 10} earlier results\\n\` : "";
- return (
- \`⏳ **Joining Groups: ${session.done}/${total}**\\n\\n${bar}\\n\\n\` +
- (session.results.length > 0 ? more + last.join("\\n") + "\\n\\n" : "") +
- (session.queue.length > 0 ? \`⌛ **${session.queue.length}** link(s) still in queue...\` : "")
- );
+  const total = session.done + session.queue.length;
+  const bar = buildJoinProgressBar(session.done, total);
+  const last = session.results.slice(-10);
+  const more = session.results.length > 10 ? `\n... +${session.results.length - 10} earlier results\n` : "";
+  return (
+    `⏳ <b>Joining Groups: ${session.done}/${total}</b>\n\n${bar}\n\n` +
+    (session.results.length > 0 ? more + last.join("\n") + "\n\n" : "") +
+    (session.queue.length > 0 ? `⌛ <b>${session.queue.length}</b> link(s) still in queue...` : "")
+  );
 }
 
-async function runJoinBackground(userId: number): Promise {
- const session = joinSessions.get(userId);
- if (!session \|\| session.running) return;
- session.running = true;
- try {
- while (session.queue.length > 0 && !session.cancelled) {
- if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
- const link = session.queue.shift()!;
- const res = await joinGroupWithLink(String(userId), link);
- let errMsg = res.error \|\| "Unknown";
- if (errMsg.toLowerCase().includes("conflict")) errMsg = "Server busy — please wait and try again";
- session.results.push(res.success ? \`✅ Joined: ${esc(res.groupName \|\| "Group")}\` : \`❌ Failed: ${esc(errMsg)}\`);
- session.done++;
- if (!cancelDialogActiveFor.has(userId)) {
- try {
- await bot.api.editMessageText(session.chatId, session.msgId, buildJoinStatusText(session), {
- parse\_mode: "HTML",
- reply\_markup: new InlineKeyboard().text("❌ Cancel", "join\_cancel\_request"),
- });
- } catch {}
- }
- if (session.queue.length > 0) await new Promise((r) => setTimeout(r, 1500));
- }
- joinCancelRequests.delete(userId);
- cancelDialogActiveFor.delete(userId);
- const ok = session.results.filter((r) => r.startsWith("✅")).length;
- const total = session.done;
- const header = session.cancelled
- ? \`⛔ **Joining Stopped (${ok}/${total} joined)** \`
- : \`🎉 **Done! (${ok}/${total} joined)** \`;
- const last = session.results.slice(-25);
- const more = session.results.length > 25 ? \`... +${session.results.length - 25} more\\n\\n\` : "";
- try {
- await bot.api.editMessageText(session.chatId, session.msgId, \`${header}\\n\\n${more}${last.join("\\n")}\`, {
- parse\_mode: "HTML",
- reply\_markup: new InlineKeyboard().text("🏠 Main Menu", "main\_menu"),
- });
- } catch {}
- joinSessions.delete(userId);
- } finally {
- session.running = false;
- }
+async function runJoinBackground(userId: number): Promise<void> {
+  const session = joinSessions.get(userId);
+  if (!session || session.running) return;
+  session.running = true;
+  try {
+    while (session.queue.length > 0 && !session.cancelled) {
+      if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
+      const link = session.queue.shift()!;
+      const res = await joinGroupWithLink(String(userId), link);
+      let errMsg = res.error || "Unknown";
+      if (errMsg.toLowerCase().includes("conflict")) errMsg = "Server busy — please wait and try again";
+      session.results.push(res.success ? `✅ Joined: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(errMsg)}`);
+      session.done++;
+      if (!cancelDialogActiveFor.has(userId)) {
+        try {
+          await bot.api.editMessageText(session.chatId, session.msgId, buildJoinStatusText(session), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request"),
+          });
+        } catch {}
+      }
+      if (session.queue.length > 0) await new Promise((r) => setTimeout(r, 1500));
+    }
+    joinCancelRequests.delete(userId);
+    cancelDialogActiveFor.delete(userId);
+    const ok = session.results.filter((r) => r.startsWith("✅")).length;
+    const total = session.done;
+    const header = session.cancelled
+      ? `⛔ <b>Joining Stopped (${ok}/${total} joined)</b>`
+      : `🎉 <b>Done! (${ok}/${total} joined)</b>`;
+    const last = session.results.slice(-25);
+    const more = session.results.length > 25 ? `... +${session.results.length - 25} more\n\n` : "";
+    try {
+      await bot.api.editMessageText(session.chatId, session.msgId, `${header}\n\n${more}${last.join("\n")}`, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    joinSessions.delete(userId);
+  } finally {
+    session.running = false;
+  }
 }
 
-const joinCancelRequests: Set = new Set();
-const getLinkCancelRequests: Set = new Set();
-const addMembersCancelRequests: Set = new Set();
-const removeMembersCancelRequests: Set = new Set();
-const approvalCancelRequests: Set = new Set();
-const makeAdminCancelRequests: Set = new Set();
-const resetLinkCancelRequests: Set = new Set();
-const demoteAdminCancelRequests: Set = new Set();
+const joinCancelRequests: Set<number> = new Set();
+const getLinkCancelRequests: Set<number> = new Set();
+const addMembersCancelRequests: Set<number> = new Set();
+const removeMembersCancelRequests: Set<number> = new Set();
+const approvalCancelRequests: Set<number> = new Set();
+const makeAdminCancelRequests: Set<number> = new Set();
+const resetLinkCancelRequests: Set<number> = new Set();
+const demoteAdminCancelRequests: Set<number> = new Set();
 
 // ── Cancel-dialog protection ────────────────────────────────────────────────
 // When a user taps a "❌ Cancel" button on a long-running flow, the bot shows
 // an "Are you sure?" confirmation by changing only the inline keyboard. The
 // underlying message text is still the in-progress status. Without protection
 // the next progress update from the background task would call
-// editMessageText(...) with a fresh "❌ Cancel" reply\_markup — which wipes
+// editMessageText(...) with a fresh "❌ Cancel" reply_markup — which wipes
 // the Yes/No dialog the user is staring at and makes it look like cancel
 // silently failed. This Set tracks "cancel dialog currently open for this
 // user". Background tasks check it with safeBackgroundEdit() below and skip
 // the edit until the dialog is dismissed (No) or confirmed (Yes).
-const cancelDialogActiveFor: Set = new Set();
+const cancelDialogActiveFor: Set<number> = new Set();
 
 async function safeBackgroundEdit(
- userId: number,
- chatId: number,
- msgId: number,
- text: string,
- options?: any,
-): Promise {
- if (cancelDialogActiveFor.has(userId)) return; // dialog open — don't clobber
- try {
- await bot.api.editMessageText(chatId, msgId, text, options);
- } catch {}
+  userId: number,
+  chatId: number,
+  msgId: number,
+  text: string,
+  options?: any,
+): Promise<void> {
+  if (cancelDialogActiveFor.has(userId)) return; // dialog open — don't clobber
+  try {
+    await bot.api.editMessageText(chatId, msgId, text, options);
+  } catch {}
 }
 
 let autoChatGlobalEnabled: boolean = true;
-const autoChatAccessSet: Set = new Set();
+const autoChatAccessSet: Set<number> = new Set();
 // userId → expiry timestamp in ms. Not present = unlimited.
-const autoChatAccessExpiry: Map = new Map();
+const autoChatAccessExpiry: Map<number, number> = new Map();
 
 function canUserSeeAutoChat(userId: number): boolean {
- if (isAdmin(userId)) return true;
- if (autoChatGlobalEnabled) return true;
- if (!autoChatAccessSet.has(userId)) return false;
- // If the user has a time-limited autochat grant, check expiry
- const exp = autoChatAccessExpiry.get(userId);
- if (exp !== undefined && Date.now() > exp) return false;
- return true;
+  if (isAdmin(userId)) return true;
+  if (autoChatGlobalEnabled) return true;
+  if (!autoChatAccessSet.has(userId)) return false;
+  // If the user has a time-limited autochat grant, check expiry
+  const exp = autoChatAccessExpiry.get(userId);
+  if (exp !== undefined && Date.now() > exp) return false;
+  return true;
 }
 
-async function syncAutoChatSettings(): Promise {
- try {
- const data = await loadBotData();
- autoChatGlobalEnabled = data.autoChatEnabled ?? true;
- autoChatAccessSet.clear();
- autoChatAccessExpiry.clear();
- for (const id of data.autoChatAccessList ?? \[\]) {
- autoChatAccessSet.add(id);
- }
- for (const \[k, v\] of Object.entries(data.autoChatAccessExpiry ?? {})) {
- autoChatAccessExpiry.set(Number(k), v);
- }
- } catch (err: any) {
- console.error("\[AutoChat\] syncAutoChatSettings error:", err?.message);
- }
+async function syncAutoChatSettings(): Promise<void> {
+  try {
+    const data = await loadBotData();
+    autoChatGlobalEnabled = data.autoChatEnabled ?? true;
+    autoChatAccessSet.clear();
+    autoChatAccessExpiry.clear();
+    for (const id of data.autoChatAccessList ?? []) {
+      autoChatAccessSet.add(id);
+    }
+    for (const [k, v] of Object.entries(data.autoChatAccessExpiry ?? {})) {
+      autoChatAccessExpiry.set(Number(k), v);
+    }
+  } catch (err: any) {
+    console.error("[AutoChat] syncAutoChatSettings error:", err?.message);
+  }
 }
 
-const MA\_PAGE\_SIZE = 20;
-const PL\_PAGE\_SIZE = 20;
-const AP\_PAGE\_SIZE = 20;
+const MA_PAGE_SIZE = 20;
+const PL_PAGE_SIZE = 20;
+const AP_PAGE_SIZE = 20;
 
 function pendingSumExpression(items: Array<{ pendingCount: number }>): string {
- const counts = items.map((g) => g.pendingCount).filter((count) => count > 0);
- const total = counts.reduce((sum, count) => sum + count, 0);
- return counts.length ? \`${counts.join("+")} = ${total}\` : "0";
+  const counts = items.map((g) => g.pendingCount).filter((count) => count > 0);
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  return counts.length ? `${counts.join("+")} = ${total}` : "0";
 }
 
 function pendingCopyText(title: string, items: Array<{ groupName: string; pendingCount: number }>): string {
- // Natural numeric sort so "SK 1, 2, 3, ... 14, 15" comes in correct order
- // (instead of plain alphabetic which gives "SK 1, 10, 11, 12, 14, 2, 20, 3...")
- const sorted = \[...items\].sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true, sensitivity: "base" }));
- let text = \`📋 **${esc(title)}**\\n\\n
-
-```
-`;
+  // Natural numeric sort so "SK 1, 2, 3, ... 14, 15" comes in correct order
+  // (instead of plain alphabetic which gives "SK 1, 10, 11, 12, 14, 2, 20, 3...")
+  const sorted = [...items].sort((a, b) => a.groupName.localeCompare(b.groupName, undefined, { numeric: true, sensitivity: "base" }));
+  let text = `📋 <b>${esc(title)}</b>\n\n<pre>`;
   for (const g of sorted) {
     text += `${g.groupName} ✅ ${g.pendingCount}\n`;
   }
   text += `\nTotal sum = ${pendingSumExpression(sorted)}`;
-  text += `
-```
-
-\`;
- return text;
+  text += `</pre>`;
+  return text;
 }
 
 function buildPendingListKeyboard(state: UserState): InlineKeyboard {
- const kb = new InlineKeyboard();
- const allPending = state.pendingListData!.allPending;
- const selected = state.pendingListData!.selectedIndices \|\| new Set();
- const page = state.pendingListData!.page \|\| 0;
- const totalPages = Math.max(1, Math.ceil(allPending.length / PL\_PAGE\_SIZE));
- const start = page \* PL\_PAGE\_SIZE;
- const end = Math.min(start + PL\_PAGE\_SIZE, allPending.length);
+  const kb = new InlineKeyboard();
+  const allPending = state.pendingListData!.allPending;
+  const selected = state.pendingListData!.selectedIndices || new Set<number>();
+  const page = state.pendingListData!.page || 0;
+  const totalPages = Math.max(1, Math.ceil(allPending.length / PL_PAGE_SIZE));
+  const start = page * PL_PAGE_SIZE;
+  const end = Math.min(start + PL_PAGE_SIZE, allPending.length);
 
- for (let i = start; i < end; i++) {
- const g = allPending\[i\];
- const isSelected = selected.has(i);
- kb.text(\`${isSelected ? "✅" : "☐"} ${g.groupName} (${g.pendingCount})\`, \`pl\_tog\_${i}\`).row();
- }
+  for (let i = start; i < end; i++) {
+    const g = allPending[i];
+    const isSelected = selected.has(i);
+    kb.text(`${isSelected ? "✅" : "☐"} ${g.groupName} (${g.pendingCount})`, `pl_tog_${i}`).row();
+  }
 
- {
- const prev = page > 0 ? "⬅️ Prev" : " ";
- const next = page < totalPages - 1 ? "Next ➡️" : " ";
- kb.text(prev, "pl\_prev\_page").text(\`📄 ${page + 1}/${totalPages}\`, "pl\_page\_info").text(next, "pl\_next\_page").row();
- }
+  {
+    const prev = page > 0 ? "⬅️ Prev" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "pl_prev_page").text(`📄 ${page + 1}/${totalPages}`, "pl_page_info").text(next, "pl_next_page").row();
+  }
 
- kb.text("☑️ Select All", "pl\_select\_all").text("🧹 Clear All", "pl\_clear\_all").row();
- if (selected.size > 0) kb.text(\`📋 Show Copy Format (${selected.size})\`, "pl\_proceed").row();
- kb.text("🏠 Main Menu", "main\_menu");
- return kb;
+  kb.text("☑️ Select All", "pl_select_all").text("🧹 Clear All", "pl_clear_all").row();
+  if (selected.size > 0) kb.text(`📋 Show Copy Format (${selected.size})`, "pl_proceed").row();
+  kb.text("🏠 Main Menu", "main_menu");
+  return kb;
 }
 
 interface QrPairingState {
- chatId: number;
- statusMessageId?: number;
- qrMessageId?: number;
- interval?: ReturnType;
- expired?: boolean;
- qrLocked?: boolean;
+  chatId: number;
+  statusMessageId?: number;
+  qrMessageId?: number;
+  interval?: ReturnType<typeof setInterval>;
+  expired?: boolean;
+  qrLocked?: boolean;
 }
 
-const qrPairings: Map = new Map();
+const qrPairings: Map<number, QrPairingState> = new Map();
 
 // Cleanup interval (15 min) — keeps RAM footprint tight on low-memory hosts
 // (Render free 512MB) when 500-1000 concurrent users are connected.
-const MEMORY\_CLEANUP\_INTERVAL\_MS = Number(process.env.MEMORY\_CLEANUP\_INTERVAL\_MS \|\| String(15 \* 60 \* 1000));
+const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(15 * 60 * 1000));
 
 // Snapshot of RSS at module load — used by /memory to show "growth since
 // startup" so admin can see at a glance whether RAM is creeping up over
 // uptime or staying flat. Captured here (not inside the handler) so the
 // reading is the actual baseline, not the post-warmup value.
-const STARTUP\_RSS\_MB = process.memoryUsage().rss / 1024 / 1024;
-const STARTUP\_TIMESTAMP\_MS = Date.now();
+const STARTUP_RSS_MB = process.memoryUsage().rss / 1024 / 1024;
+const STARTUP_TIMESTAMP_MS = Date.now();
 // Drop /help pagination state for users idle longer than this. Each entry
 // can hold ~10–20KB of HTML chunks; if 1000 users press /help we'd be
 // keeping 10–20MB live forever without this.
-const HELP\_PAGES\_STALE\_MS = 30 \* 60 \* 1000;
-const helpPagesLastTouched: Map = new Map();
+const HELP_PAGES_STALE_MS = 30 * 60 * 1000;
+const helpPagesLastTouched: Map<number, number> = new Map();
 setInterval(() => {
- const activeUserIds = new Set(\[\
- ...autoChatSessions.keys(),\
- ...cigSessions.keys(),\
- ...acfSessions.keys(),\
- \]);
- for (const \[userId, state\] of userStates) {
- // Keep state for users currently in a long-running session (auto chat,
- // CIG, ACF) AND for users whose last interaction was within the active
- // window. Without this, multi-step flows like "Create Groups → wait 15
- // min → enter group name" lose their step and silently drop the input.
- if (activeUserIds.has(userId) \|\| isUserActive(userId)) continue;
- // Eagerly drop any large Buffers (group DPs / edit-settings DPs) so
- // they become GC-able immediately, not at the next heap pressure.
- if (state.groupSettings) state.groupSettings.dpBuffers = \[\];
- if (state.editSettingsData) state.editSettingsData.settings.dpBuffers = \[\];
- userStates.delete(userId);
- }
- // Drop activity entries for users idle far longer than the disconnect
- // window so the map doesn't grow unbounded across days.
- const STALE\_ACTIVITY\_MS = USER\_IDLE\_DISCONNECT\_MS \* 4;
- for (const \[userId, a\] of userActivity) {
- if (Date.now() - a.lastActivityAt > STALE\_ACTIVITY\_MS) {
- userActivity.delete(userId);
- }
- }
- for (const \[userId, state\] of qrPairings) {
- if (state.expired) {
- if (state.interval) clearInterval(state.interval);
- qrPairings.delete(userId);
- }
- }
- // Drop stale /help pagination state — keeps ~10-20KB per entry from
- // accumulating forever when users open /help and never come back.
- const now = Date.now();
- for (const \[userId, touchedAt\] of helpPagesLastTouched) {
- if (now - touchedAt > HELP\_PAGES\_STALE\_MS) {
- helpPages.delete(userId);
- helpPagesLastTouched.delete(userId);
- }
- }
- // newSessionFlag is a per-update flag; if anything stuck in there from
- // dead users, drop it. It's tiny but bounded == bounded.
- if (newSessionFlag.size > 1000) newSessionFlag.clear();
- joinCancelRequests.clear();
- getLinkCancelRequests.clear();
- addMembersCancelRequests.clear();
- removeMembersCancelRequests.clear();
- // Double-pass GC with a small wait between passes. A single gc() leaves
- // partially-promoted objects in the old generation; doing a second pass
- // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
- // we've capped to 2 arenas via MALLOC\_ARENA\_MAX=2) a chance to actually
- // return freed pages to the OS — which is what makes RSS visibly drop
- // instead of climbing forever as uptime grows.
- if (typeof (global as any).gc === "function") {
- try { (global as any).gc(); } catch {}
- setTimeout(() => {
- try { (global as any).gc(); } catch {}
- }, 50);
- }
- const mem = process.memoryUsage();
- const rssMb = Math.round(mem.rss / 1024 / 1024);
- const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
- console.log(
- \`\[MEMORY\] Cleanup: rss=${rssMb}MB heap=${heapMb}MB userStates=${userStates.size} autoChat=${autoChatSessions.size} cig=${cigSessions.size} acf=${acfSessions.size} qr=${qrPairings.size} helpPages=${helpPages.size}\`
- );
-}, MEMORY\_CLEANUP\_INTERVAL\_MS);
+  const activeUserIds = new Set([
+    ...autoChatSessions.keys(),
+    ...cigSessions.keys(),
+    ...acfSessions.keys(),
+  ]);
+  for (const [userId, state] of userStates) {
+    // Keep state for users currently in a long-running session (auto chat,
+    // CIG, ACF) AND for users whose last interaction was within the active
+    // window. Without this, multi-step flows like "Create Groups → wait 15
+    // min → enter group name" lose their step and silently drop the input.
+    if (activeUserIds.has(userId) || isUserActive(userId)) continue;
+    // Eagerly drop any large Buffers (group DPs / edit-settings DPs) so
+    // they become GC-able immediately, not at the next heap pressure.
+    if (state.groupSettings) state.groupSettings.dpBuffers = [];
+    if (state.editSettingsData) state.editSettingsData.settings.dpBuffers = [];
+    userStates.delete(userId);
+  }
+  // Drop activity entries for users idle far longer than the disconnect
+  // window so the map doesn't grow unbounded across days.
+  const STALE_ACTIVITY_MS = USER_IDLE_DISCONNECT_MS * 4;
+  for (const [userId, a] of userActivity) {
+    if (Date.now() - a.lastActivityAt > STALE_ACTIVITY_MS) {
+      userActivity.delete(userId);
+    }
+  }
+  for (const [userId, state] of qrPairings) {
+    if (state.expired) {
+      if (state.interval) clearInterval(state.interval);
+      qrPairings.delete(userId);
+    }
+  }
+  // Drop stale /help pagination state — keeps ~10-20KB per entry from
+  // accumulating forever when users open /help and never come back.
+  const now = Date.now();
+  for (const [userId, touchedAt] of helpPagesLastTouched) {
+    if (now - touchedAt > HELP_PAGES_STALE_MS) {
+      helpPages.delete(userId);
+      helpPagesLastTouched.delete(userId);
+    }
+  }
+  // newSessionFlag is a per-update flag; if anything stuck in there from
+  // dead users, drop it. It's tiny but bounded == bounded.
+  if (newSessionFlag.size > 1000) newSessionFlag.clear();
+  joinCancelRequests.clear();
+  getLinkCancelRequests.clear();
+  addMembersCancelRequests.clear();
+  removeMembersCancelRequests.clear();
+  // Double-pass GC with a small wait between passes. A single gc() leaves
+  // partially-promoted objects in the old generation; doing a second pass
+  // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
+  // we've capped to 2 arenas via MALLOC_ARENA_MAX=2) a chance to actually
+  // return freed pages to the OS — which is what makes RSS visibly drop
+  // instead of climbing forever as uptime grows.
+  if (typeof (global as any).gc === "function") {
+    try { (global as any).gc(); } catch {}
+    setTimeout(() => {
+      try { (global as any).gc(); } catch {}
+    }, 50);
+  }
+  const mem = process.memoryUsage();
+  const rssMb = Math.round(mem.rss / 1024 / 1024);
+  const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
+  console.log(
+    `[MEMORY] Cleanup: rss=${rssMb}MB heap=${heapMb}MB userStates=${userStates.size} autoChat=${autoChatSessions.size} cig=${cigSessions.size} acf=${acfSessions.size} qr=${qrPairings.size} helpPages=${helpPages.size}`
+  );
+}, MEMORY_CLEANUP_INTERVAL_MS);
 
 // ── Idle-disconnect timer ─────────────────────────────────────────────────
 // Walk every connected WhatsApp session and disconnect users who have been
-// idle for >= USER\_IDLE\_DISCONNECT\_MS. Long-running flows that imply the
+// idle for >= USER_IDLE_DISCONNECT_MS. Long-running flows that imply the
 // user is still working in the background (auto chat, chat-in-group, auto
 // chat friend) are exempt — we don't want to kill a user's CIG run just
 // because they walked away from Telegram. The next time the user taps any
@@ -1759,340 +1753,340 @@ setInterval(() => {
 // session from Mongo and the connection toast appears once (showing the
 // user the freshly restored connection).
 setInterval(async () => {
- try {
- const liveSessions = getActiveSessionUserIds();
- const longRunning = new Set(\[\
- ...autoChatSessions.keys(),\
- ...cigSessions.keys(),\
- ...acfSessions.keys(),\
- \]);
- for (const uidStr of liveSessions) {
- const uid = Number(uidStr);
- if (!Number.isFinite(uid)) continue;
- if (longRunning.has(uid)) continue;
- const a = userActivity.get(uid);
- // No recorded activity OR activity older than the window → disconnect.
- const idleFor = a ? Date.now() - a.lastActivityAt : Number.POSITIVE\_INFINITY;
- if (idleFor < USER\_IDLE\_DISCONNECT\_MS) continue;
- try {
- // IMPORTANT: use idleDisconnectWhatsApp (memory-only eviction).
- // disconnectWhatsApp() would call socket.logout() — which unlinks
- // the device on WhatsApp servers — AND clear MongoDB creds, so
- // the user would have to re-pair from scratch on next interaction.
- // We only want to free RAM and let ensureSessionLoaded() silently
- // restore the socket from saved creds when the user comes back.
- await idleDisconnectWhatsApp(uidStr);
- if (a) a.idleDisconnected = true;
- else userActivity.set(uid, { lastActivityAt: Date.now() - USER\_IDLE\_DISCONNECT\_MS, idleDisconnected: true });
- console.log(\`\[BOT\] Idle disconnect for user ${uid} after ${Math.round(idleFor / 60000)} min\`);
- } catch (err: any) {
- console.error(\`\[BOT\] Idle disconnect error for ${uid}:\`, err?.message);
- }
- }
- } catch (err: any) {
- console.error(\`\[BOT\] Idle-disconnect sweep error:\`, err?.message);
- }
-}, USER\_IDLE\_CHECK\_INTERVAL\_MS);
+  try {
+    const liveSessions = getActiveSessionUserIds();
+    const longRunning = new Set<number>([
+      ...autoChatSessions.keys(),
+      ...cigSessions.keys(),
+      ...acfSessions.keys(),
+    ]);
+    for (const uidStr of liveSessions) {
+      const uid = Number(uidStr);
+      if (!Number.isFinite(uid)) continue;
+      if (longRunning.has(uid)) continue;
+      const a = userActivity.get(uid);
+      // No recorded activity OR activity older than the window → disconnect.
+      const idleFor = a ? Date.now() - a.lastActivityAt : Number.POSITIVE_INFINITY;
+      if (idleFor < USER_IDLE_DISCONNECT_MS) continue;
+      try {
+        // IMPORTANT: use idleDisconnectWhatsApp (memory-only eviction).
+        // disconnectWhatsApp() would call socket.logout() — which unlinks
+        // the device on WhatsApp servers — AND clear MongoDB creds, so
+        // the user would have to re-pair from scratch on next interaction.
+        // We only want to free RAM and let ensureSessionLoaded() silently
+        // restore the socket from saved creds when the user comes back.
+        await idleDisconnectWhatsApp(uidStr);
+        if (a) a.idleDisconnected = true;
+        else userActivity.set(uid, { lastActivityAt: Date.now() - USER_IDLE_DISCONNECT_MS, idleDisconnected: true });
+        console.log(`[BOT] Idle disconnect for user ${uid} after ${Math.round(idleFor / 60000)} min`);
+      } catch (err: any) {
+        console.error(`[BOT] Idle disconnect error for ${uid}:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[BOT] Idle-disconnect sweep error:`, err?.message);
+  }
+}, USER_IDLE_CHECK_INTERVAL_MS);
 
 // ── High-memory alert: ping admin on Telegram when RSS crosses threshold ──
-// Checks every 1 min. Sends alert when RSS >= MEMORY\_ALERT\_THRESHOLD\_PCT of
-// MEMORY\_ALERT\_LIMIT\_MB. Cooldown prevents spam — once alerted, won't alert
+// Checks every 1 min. Sends alert when RSS >= MEMORY_ALERT_THRESHOLD_PCT of
+// MEMORY_ALERT_LIMIT_MB. Cooldown prevents spam — once alerted, won't alert
 // again until either RAM drops below threshold OR cooldown expires.
-const MEMORY\_ALERT\_LIMIT\_MB = Number(process.env.MEMORY\_ALERT\_LIMIT\_MB \|\| "512");
-const MEMORY\_ALERT\_THRESHOLD\_PCT = Number(process.env.MEMORY\_ALERT\_THRESHOLD\_PCT \|\| "85");
-const MEMORY\_ALERT\_COOLDOWN\_MS = Number(process.env.MEMORY\_ALERT\_COOLDOWN\_MS \|\| String(30 \* 60 \* 1000));
+const MEMORY_ALERT_LIMIT_MB = Number(process.env.MEMORY_ALERT_LIMIT_MB || "512");
+const MEMORY_ALERT_THRESHOLD_PCT = Number(process.env.MEMORY_ALERT_THRESHOLD_PCT || "85");
+const MEMORY_ALERT_COOLDOWN_MS = Number(process.env.MEMORY_ALERT_COOLDOWN_MS || String(30 * 60 * 1000));
 let memoryAlertLastSentAt = 0;
 let memoryAlertActive = false;
 setInterval(() => {
- try {
- const mem = process.memoryUsage();
- const rssMb = mem.rss / 1024 / 1024;
- const heapUsedMb = mem.heapUsed / 1024 / 1024;
- const heapTotalMb = mem.heapTotal / 1024 / 1024;
- const rssPct = (rssMb / MEMORY\_ALERT\_LIMIT\_MB) \* 100;
- const now = Date.now();
+  try {
+    const mem = process.memoryUsage();
+    const rssMb = mem.rss / 1024 / 1024;
+    const heapUsedMb = mem.heapUsed / 1024 / 1024;
+    const heapTotalMb = mem.heapTotal / 1024 / 1024;
+    const rssPct = (rssMb / MEMORY_ALERT_LIMIT_MB) * 100;
+    const now = Date.now();
 
- if (rssPct >= MEMORY\_ALERT\_THRESHOLD\_PCT) {
- const cooldownOver = now - memoryAlertLastSentAt >= MEMORY\_ALERT\_COOLDOWN\_MS;
- // Send only on the first crossing OR after cooldown — avoids spamming
- // the admin every minute while RAM stays high.
- if (!memoryAlertActive \|\| cooldownOver) {
- memoryAlertActive = true;
- memoryAlertLastSentAt = now;
- const text =
- \`⚠️ **High RAM Alert**\\n\\n\` +
- \`📦 RSS: **${rssMb.toFixed(1)} MB** / ${MEMORY\_ALERT\_LIMIT\_MB} MB \` +
- \`( **${rssPct.toFixed(0)}%**)\\n\` +
- \`🔵 Heap: ${heapUsedMb.toFixed(1)} MB / ${heapTotalMb.toFixed(1)} MB\\n\\n\` +
- \`👥 Active Sessions:\\n\` +
- \` 📱 WhatsApp: ${getActiveSessionUserIds().size}\\n\` +
- \` 🤖 Auto Chat: ${autoChatSessions.size} / ${MAX\_CONCURRENT\_AUTOCHAT}\\n\` +
- \` 💬 Chat-In-Group: ${cigSessions.size}\\n\` +
- \` 🔁 Auto Chat Friend: ${acfSessions.size}\\n\\n\` +
- \`💡 Use /memory for full details.\`;
- bot.api.sendMessage(ADMIN\_USER\_ID, text, { parse\_mode: "HTML" }).catch((err) => {
- console.error(\`\[MEMORY\_ALERT\] Failed to notify admin:\`, err?.message);
- });
- console.log(\`\[MEMORY\_ALERT\] Triggered: rss=${rssMb.toFixed(1)}MB (${rssPct.toFixed(0)}%)\`);
- }
- } else if (memoryAlertActive && rssPct < MEMORY\_ALERT\_THRESHOLD\_PCT - 5) {
- // Reset only after RAM drops at least 5% below threshold (hysteresis) so
- // we don't flap if RSS hovers right at the boundary.
- memoryAlertActive = false;
- console.log(\`\[MEMORY\_ALERT\] Cleared: rss=${rssMb.toFixed(1)}MB (${rssPct.toFixed(0)}%)\`);
- }
- } catch (err: any) {
- console.error(\`\[MEMORY\_ALERT\] check error:\`, err?.message);
- }
-}, 60 \* 1000);
+    if (rssPct >= MEMORY_ALERT_THRESHOLD_PCT) {
+      const cooldownOver = now - memoryAlertLastSentAt >= MEMORY_ALERT_COOLDOWN_MS;
+      // Send only on the first crossing OR after cooldown — avoids spamming
+      // the admin every minute while RAM stays high.
+      if (!memoryAlertActive || cooldownOver) {
+        memoryAlertActive = true;
+        memoryAlertLastSentAt = now;
+        const text =
+          `⚠️ <b>High RAM Alert</b>\n\n` +
+          `📦 RSS: <b>${rssMb.toFixed(1)} MB</b> / ${MEMORY_ALERT_LIMIT_MB} MB ` +
+          `(<b>${rssPct.toFixed(0)}%</b>)\n` +
+          `🔵 Heap: ${heapUsedMb.toFixed(1)} MB / ${heapTotalMb.toFixed(1)} MB\n\n` +
+          `👥 Active Sessions:\n` +
+          `  📱 WhatsApp: ${getActiveSessionUserIds().size}\n` +
+          `  🤖 Auto Chat: ${autoChatSessions.size} / ${MAX_CONCURRENT_AUTOCHAT}\n` +
+          `  💬 Chat-In-Group: ${cigSessions.size}\n` +
+          `  🔁 Auto Chat Friend: ${acfSessions.size}\n\n` +
+          `💡 Use /memory for full details.`;
+        bot.api.sendMessage(ADMIN_USER_ID, text, { parse_mode: "HTML" }).catch((err) => {
+          console.error(`[MEMORY_ALERT] Failed to notify admin:`, err?.message);
+        });
+        console.log(`[MEMORY_ALERT] Triggered: rss=${rssMb.toFixed(1)}MB (${rssPct.toFixed(0)}%)`);
+      }
+    } else if (memoryAlertActive && rssPct < MEMORY_ALERT_THRESHOLD_PCT - 5) {
+      // Reset only after RAM drops at least 5% below threshold (hysteresis) so
+      // we don't flap if RSS hovers right at the boundary.
+      memoryAlertActive = false;
+      console.log(`[MEMORY_ALERT] Cleared: rss=${rssMb.toFixed(1)}MB (${rssPct.toFixed(0)}%)`);
+    }
+  } catch (err: any) {
+    console.error(`[MEMORY_ALERT] check error:`, err?.message);
+  }
+}, 60 * 1000);
 
 function qrActiveKeyboard(): InlineKeyboard {
- return new InlineKeyboard().text("❌ Cancel", "connect\_pair\_qr\_cancel").text("🔙 Back", "connect\_wa");
+  return new InlineKeyboard().text("❌ Cancel", "connect_pair_qr_cancel").text("🔙 Back", "connect_wa");
 }
 
 function qrExpiredKeyboard(): InlineKeyboard {
- return new InlineKeyboard().text("🔄 Retry", "connect\_pair\_qr\_retry").text("🔙 Back", "connect\_wa");
+  return new InlineKeyboard().text("🔄 Retry", "connect_pair_qr_retry").text("🔙 Back", "connect_wa");
 }
 
 function qrCaption(remainingSeconds: number): string {
- return (
- "📷 **Pair WhatsApp with QR**\\n\\n" +
- "1️⃣ WhatsApp open karo\\n" +
- "2️⃣ Settings → Linked Devices\\n" +
- "3️⃣ Link a Device tap karo\\n" +
- "4️⃣ Ye QR scan karo\\n\\n" +
- \`⏳ QR expires in: **${remainingSeconds}s** \`
- );
+  return (
+    "📷 <b>Pair WhatsApp with QR</b>\n\n" +
+    "1️⃣ WhatsApp open karo\n" +
+    "2️⃣ Settings → Linked Devices\n" +
+    "3️⃣ Link a Device tap karo\n" +
+    "4️⃣ Ye QR scan karo\n\n" +
+    `⏳ QR expires in: <b>${remainingSeconds}s</b>`
+  );
 }
 
 function clearQrPairing(userId: number): void {
- const existing = qrPairings.get(userId);
- if (existing?.interval) clearInterval(existing.interval);
- qrPairings.delete(userId);
+  const existing = qrPairings.get(userId);
+  if (existing?.interval) clearInterval(existing.interval);
+  qrPairings.delete(userId);
 }
 
-async function safeDeleteMessage(chatId: number, messageId?: number): Promise {
- if (!messageId) return;
- try { await bot.api.deleteMessage(chatId, messageId); } catch {}
+async function safeDeleteMessage(chatId: number, messageId?: number): Promise<void> {
+  if (!messageId) return;
+  try { await bot.api.deleteMessage(chatId, messageId); } catch {}
 }
 
-async function startQrPairing(ctx: any, userId: number): Promise {
- if (!(await checkAccessMiddleware(ctx))) return;
- if (isConnected(String(userId))) {
- await ctx.editMessageText(
- "✅ **WhatsApp already connected!**\\n\\nYou can use all features.",
- { parse\_mode: "HTML", reply\_markup: new InlineKeyboard().text("🏠 Main Menu", "main\_menu") }
- );
- return;
- }
+async function startQrPairing(ctx: any, userId: number): Promise<void> {
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    );
+    return;
+  }
 
- clearQrPairing(userId);
- userStates.delete(userId);
+  clearQrPairing(userId);
+  userStates.delete(userId);
 
- const chatId = ctx.chat?.id;
- if (!chatId) return;
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
 
- let statusMessageId = ctx.callbackQuery?.message?.message\_id;
- try {
- if (statusMessageId) {
- await ctx.editMessageText(
- "⏳ **Generating WhatsApp QR...**\\n\\nPlease wait a few seconds.",
- { parse\_mode: "HTML", reply\_markup: new InlineKeyboard().text("🔙 Back", "connect\_wa") }
- );
- } else {
- const sent = await ctx.reply(
- "⏳ **Generating WhatsApp QR...**\\n\\nPlease wait a few seconds.",
- { parse\_mode: "HTML", reply\_markup: new InlineKeyboard().text("🔙 Back", "connect\_wa") }
- );
- statusMessageId = sent.message\_id;
- }
- } catch {
- const sent = await ctx.reply(
- "⏳ **Generating WhatsApp QR...**\\n\\nPlease wait a few seconds.",
- { parse\_mode: "HTML", reply\_markup: new InlineKeyboard().text("🔙 Back", "connect\_wa") }
- );
- statusMessageId = sent.message\_id;
- }
+  let statusMessageId = ctx.callbackQuery?.message?.message_id;
+  try {
+    if (statusMessageId) {
+      await ctx.editMessageText(
+        "⏳ <b>Generating WhatsApp QR...</b>\n\nPlease wait a few seconds.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "connect_wa") }
+      );
+    } else {
+      const sent = await ctx.reply(
+        "⏳ <b>Generating WhatsApp QR...</b>\n\nPlease wait a few seconds.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "connect_wa") }
+      );
+      statusMessageId = sent.message_id;
+    }
+  } catch {
+    const sent = await ctx.reply(
+      "⏳ <b>Generating WhatsApp QR...</b>\n\nPlease wait a few seconds.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "connect_wa") }
+    );
+    statusMessageId = sent.message_id;
+  }
 
- qrPairings.set(userId, { chatId, statusMessageId });
+  qrPairings.set(userId, { chatId, statusMessageId });
 
- await connectWhatsAppQr(
- String(userId),
- async (qr, expiresAt) => {
- const active = qrPairings.get(userId);
- if (!active \|\| active.expired \|\| active.qrLocked) return;
- active.qrLocked = true;
- if (active.interval) clearInterval(active.interval);
- await safeDeleteMessage(active.chatId, active.qrMessageId);
+  await connectWhatsAppQr(
+    String(userId),
+    async (qr, expiresAt) => {
+      const active = qrPairings.get(userId);
+      if (!active || active.expired || active.qrLocked) return;
+      active.qrLocked = true;
+      if (active.interval) clearInterval(active.interval);
+      await safeDeleteMessage(active.chatId, active.qrMessageId);
 
- const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
- const buffer = await QRCode.toBuffer(qr, {
- type: "png",
- width: 420,
- margin: 2,
- errorCorrectionLevel: "M",
- });
+      const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      const buffer = await QRCode.toBuffer(qr, {
+        type: "png",
+        width: 420,
+        margin: 2,
+        errorCorrectionLevel: "M",
+      });
 
- await safeDeleteMessage(active.chatId, active.statusMessageId);
- const sent = await bot.api.sendPhoto(
- active.chatId,
- new InputFile(buffer, "whatsapp-qr.png"),
- { caption: qrCaption(remaining), parse\_mode: "HTML", reply\_markup: qrActiveKeyboard() }
- );
+      await safeDeleteMessage(active.chatId, active.statusMessageId);
+      const sent = await bot.api.sendPhoto(
+        active.chatId,
+        new InputFile(buffer, "whatsapp-qr.png"),
+        { caption: qrCaption(remaining), parse_mode: "HTML", reply_markup: qrActiveKeyboard() }
+      );
 
- active.qrMessageId = sent.message\_id;
- active.statusMessageId = undefined;
- active.interval = setInterval(async () => {
- const current = qrPairings.get(userId);
- if (!current \|\| current.qrMessageId !== sent.message\_id) return;
- const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
- if (left <= 0) {
- if (current.interval) clearInterval(current.interval);
- current.expired = true;
- if (!isConnected(String(userId))) {
- await safeDeleteMessage(current.chatId, current.qrMessageId);
- current.qrMessageId = undefined;
- await disconnectWhatsApp(String(userId));
- await bot.api.sendMessage(
- current.chatId,
- "⌛ **Your QR code has expired.**\\n\\nIf you are unable to connect via QR, please try linking with a pair code instead.\\n\\nClick **Retry** to generate a new QR code.",
- { parse\_mode: "HTML", reply\_markup: qrExpiredKeyboard() }
- );
- }
- return;
- }
- try {
- await bot.api.editMessageCaption(current.chatId, current.qrMessageId!, {
- caption: qrCaption(left),
- parse\_mode: "HTML",
- reply\_markup: qrActiveKeyboard(),
- });
- } catch {}
- }, 1000);
- },
- async () => {
- const active = qrPairings.get(userId);
- clearQrPairing(userId);
- if (active) await safeDeleteMessage(active.chatId, active.qrMessageId \|\| active.statusMessageId);
- await bot.api.sendMessage(chatId, whatsappConnectedText(userId, "🎉 QR scan successful. All features are now available."), {
- parse\_mode: "HTML",
- reply\_markup: mainMenu(userId),
- });
- },
- async (reason) => {
- const active = qrPairings.get(userId);
- clearQrPairing(userId);
- if (active) await safeDeleteMessage(active.chatId, active.qrMessageId);
- await bot.api.sendMessage(chatId, \`⚠️ **WhatsApp Disconnected**\\n\\nReason: ${esc(reason)}\\n\\n🔄 Try QR pairing again.\`, {
- parse\_mode: "HTML",
- reply\_markup: qrExpiredKeyboard(),
- });
- }
- );
+      active.qrMessageId = sent.message_id;
+      active.statusMessageId = undefined;
+      active.interval = setInterval(async () => {
+        const current = qrPairings.get(userId);
+        if (!current || current.qrMessageId !== sent.message_id) return;
+        const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        if (left <= 0) {
+          if (current.interval) clearInterval(current.interval);
+          current.expired = true;
+          if (!isConnected(String(userId))) {
+            await safeDeleteMessage(current.chatId, current.qrMessageId);
+            current.qrMessageId = undefined;
+            await disconnectWhatsApp(String(userId));
+            await bot.api.sendMessage(
+              current.chatId,
+              "⌛ <b>Your QR code has expired.</b>\n\nIf you are unable to connect via QR, please try linking with a pair code instead.\n\nClick <b>Retry</b> to generate a new QR code.",
+              { parse_mode: "HTML", reply_markup: qrExpiredKeyboard() }
+            );
+          }
+          return;
+        }
+        try {
+          await bot.api.editMessageCaption(current.chatId, current.qrMessageId!, {
+            caption: qrCaption(left),
+            parse_mode: "HTML",
+            reply_markup: qrActiveKeyboard(),
+          });
+        } catch {}
+      }, 1000);
+    },
+    async () => {
+      const active = qrPairings.get(userId);
+      clearQrPairing(userId);
+      if (active) await safeDeleteMessage(active.chatId, active.qrMessageId || active.statusMessageId);
+      await bot.api.sendMessage(chatId, whatsappConnectedText(userId, "🎉 QR scan successful. All features are now available."), {
+        parse_mode: "HTML",
+        reply_markup: mainMenu(userId),
+      });
+    },
+    async (reason) => {
+      const active = qrPairings.get(userId);
+      clearQrPairing(userId);
+      if (active) await safeDeleteMessage(active.chatId, active.qrMessageId);
+      await bot.api.sendMessage(chatId, `⚠️ <b>WhatsApp Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Try QR pairing again.`, {
+        parse_mode: "HTML",
+        reply_markup: qrExpiredKeyboard(),
+      });
+    }
+  );
 }
 
 function mainMenu(userId?: number): InlineKeyboard {
- const connected = userId !== undefined && isConnected(String(userId));
- const kb = new InlineKeyboard();
- if (!connected) {
- kb.text("📱 Connect WhatsApp", "connect\_wa").row();
- }
- kb
- .text("👥 Create Groups", "create\_groups").text("🔗 Join Groups", "join\_groups").row()
- .text("🔍 CTC Checker", "ctc\_checker").text("🔗 Get Link", "get\_link").row()
- .text("🚪 Leave Group", "leave\_group").text("🗑️ Remove Members", "remove\_members").row()
- .text("👑 Make Admin", "make\_admin").text("✅ Approval", "approval").row()
- .text("📋 Get Pending List", "pending\_list").text("➕ Add Members", "add\_members").row()
- .text("⚙️ Edit Settings", "edit\_settings").text("🏷️ Change Name", "change\_group\_name").row()
- .text("🔗 Reset Link", "reset\_link").text("👤 Demote Admin", "demote\_admin").row()
- .text("🛡️ Auto Accepter", "auto\_accepter").row();
- if (userId !== undefined && canUserSeeAutoChat(userId)) {
- kb.text("🤖 Auto Chat", "auto\_chat\_menu").row();
- }
- if (connected) {
- kb.text("🔄 Session Refresh", "session\_refresh").text("🔌 Disconnect", "disconnect\_wa");
- } else {
- kb.text("🔌 Disconnect", "disconnect\_wa");
- }
- return kb;
+  const connected = userId !== undefined && isConnected(String(userId));
+  const kb = new InlineKeyboard();
+  if (!connected) {
+    kb.text("📱 Connect WhatsApp", "connect_wa").row();
+  }
+  kb
+    .text("👥 Create Groups", "create_groups").text("🔗 Join Groups", "join_groups").row()
+    .text("🔍 CTC Checker", "ctc_checker").text("🔗 Get Link", "get_link").row()
+    .text("🚪 Leave Group", "leave_group").text("🗑️ Remove Members", "remove_members").row()
+    .text("👑 Make Admin", "make_admin").text("✅ Approval", "approval").row()
+    .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
+    .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
+    .text("🔗 Reset Link", "reset_link").text("👤 Demote Admin", "demote_admin").row()
+    .text("🛡️ Auto Accepter", "auto_accepter").row();
+  if (userId !== undefined && canUserSeeAutoChat(userId)) {
+    kb.text("🤖 Auto Chat", "auto_chat_menu").row();
+  }
+  if (connected) {
+    kb.text("🔄 Session Refresh", "session_refresh").text("🔌 Disconnect", "disconnect_wa");
+  } else {
+    kb.text("🔌 Disconnect", "disconnect_wa");
+  }
+  return kb;
 }
 
-bot.callbackQuery("check\_joined", async (ctx) => {
- await ctx.answerCallbackQuery();
- const userId = ctx.from.id;
- if (!FORCE\_SUB\_CHANNEL) {
- await ctx.editMessageText("✅ Bot is ready! Use /start to begin.");
- return;
- }
- try {
- const member = await bot.api.getChatMember(FORCE\_SUB\_CHANNEL, userId);
- if (\["member", "administrator", "creator"\].includes(member.status)) {
- const data = await loadBotData();
+bot.callbackQuery("check_joined", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!FORCE_SUB_CHANNEL) {
+    await ctx.editMessageText("✅ Bot is ready! Use /start to begin.");
+    return;
+  }
+  try {
+    const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
+    if (["member", "administrator", "creator"].includes(member.status)) {
+      const data = await loadBotData();
 
- // ── Award any pending referral now that the user has joined the
- // required channel. The referrer-id was stashed by /start when the
- // user first opened "/start ref\_" but failed the force-sub
- // guard. Awarding here means a user who joins the channel during
- // the force-sub flow still earns the referrer their +1 day —
- // previously this was silently dropped. Idempotent (recordReferral
- // dedupes), and we delete the pending entry to free the map.
- const pending = pendingReferrals.get(userId);
- if (pending) {
- pendingReferrals.delete(userId);
- await processReferralAward(userId, pending.referrerId);
- }
+      // ── Award any pending referral now that the user has joined the
+      // required channel. The referrer-id was stashed by /start when the
+      // user first opened "/start ref_<id>" but failed the force-sub
+      // guard. Awarding here means a user who joins the channel during
+      // the force-sub flow still earns the referrer their +1 day —
+      // previously this was silently dropped. Idempotent (recordReferral
+      // dedupes), and we delete the pending entry to free the map.
+      const pending = pendingReferrals.get(userId);
+      if (pending) {
+        pendingReferrals.delete(userId);
+        await processReferralAward(userId, pending.referrerId);
+      }
 
- // First-time users (no language picked yet) → show language picker.
- // Trial creation + trial banner are deferred until after language
- // selection (handled in applyLanguageSelection), matching the /start
- // flow so the trial banner never appears stacked on the language picker.
- if (!hasUserLang(userId)) {
- try { await ctx.deleteMessage(); } catch {}
- await sendLanguagePicker(ctx, true);
- return;
- }
+      // First-time users (no language picked yet) → show language picker.
+      // Trial creation + trial banner are deferred until after language
+      // selection (handled in applyLanguageSelection), matching the /start
+      // flow so the trial banner never appears stacked on the language picker.
+      if (!hasUserLang(userId)) {
+        try { await ctx.deleteMessage(); } catch {}
+        await sendLanguagePicker(ctx, true);
+        return;
+      }
 
- // Returning users (lang already set): start trial if not yet created.
- let trialJustStarted: { expiresAt: number } \| null = null;
- if (!isAdmin(userId)) {
- const trial = await ensureFreeTrial(userId, FREE\_TRIAL\_MS);
- if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
- }
+      // Returning users (lang already set): start trial if not yet created.
+      let trialJustStarted: { expiresAt: number } | null = null;
+      if (!isAdmin(userId)) {
+        const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+        if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+      }
 
- // Even in refer mode, if the user somehow has no access at all
- // (e.g. trial already expired and no referral), surface the refer
- // message instead of the menu.
- if (!(await hasAccess(userId))) {
- if (data.referMode) {
- const { text, keyboard } = await buildReferRequiredMessage(userId);
- await ctx.editMessageText(text, { parse\_mode: "HTML", reply\_markup: keyboard });
- } else {
- await ctx.editMessageText(
- \`🔒 **Subscription Required!**\\n\\n👤 Contact owner: **${OWNER\_USERNAME}** \`,
- { parse\_mode: "HTML" }
- );
- }
- return;
- }
+      // Even in refer mode, if the user somehow has no access at all
+      // (e.g. trial already expired and no referral), surface the refer
+      // message instead of the menu.
+      if (!(await hasAccess(userId))) {
+        if (data.referMode) {
+          const { text, keyboard } = await buildReferRequiredMessage(userId);
+          await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+        } else {
+          await ctx.editMessageText(
+            `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
+            { parse_mode: "HTML" }
+          );
+        }
+        return;
+      }
 
- await ctx.editMessageText(
- mainMenuText(userId, "welcome"),
- { parse\_mode: "HTML", reply\_markup: mainMenu(userId) }
- );
- if (trialJustStarted) {
- await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse\_mode: "HTML" });
- }
- return;
- }
- } catch {}
- await ctx.answerCallbackQuery({ text: "❌ You haven't joined the channel yet!", show\_alert: true });
+      await ctx.editMessageText(
+        mainMenuText(userId, "welcome"),
+        { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+      );
+      if (trialJustStarted) {
+        await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+      }
+      return;
+    }
+  } catch {}
+  await ctx.answerCallbackQuery({ text: "❌ You haven't joined the channel yet!", show_alert: true });
 });
 
-// Render a 10-segment progress bar as text: e.g. \[█████░░░░░\] 50%
+// Render a 10-segment progress bar as text: e.g. [█████░░░░░] 50%
 function renderProgressBar(pct: number): string {
- const clamped = Math.max(0, Math.min(100, Math.floor(pct)));
- const filled = Math.round(clamped / 10);
- return \`\[${"█".repeat(filled)}${"░".repeat(10 - filled)}\] ${clamped}%\`;
+  const clamped = Math.max(0, Math.min(100, Math.floor(pct)));
+  const filled = Math.round(clamped / 10);
+  return `[${"█".repeat(filled)}${"░".repeat(10 - filled)}] ${clamped}%`;
 }
 
 // On /start, if the user has a saved WhatsApp session that isn't currently
@@ -2101,258 +2095,258 @@ function renderProgressBar(pct: number): string {
 // session in the background. Once connected, the message updates to a
 // "✅ WhatsApp connected" confirmation. If restoration fails or times out,
 // it gracefully falls through so the main menu still appears.
-async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise {
- const uid = String(userId);
+async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise<void> {
+  const uid = String(userId);
 
- // Only surface the connection toast/progress bar when this /start kicks
- // off a brand-new active window (first /start of the session, or first
- // /start after a 30-min idle gap). Otherwise the user sees the same
- // "✅ WhatsApp connected +XXX" message every time they tap /start,
- // which is exactly what the user reported. If the user is mid-session,
- // the menu appears immediately with no toast.
- const isNewSession = newSessionFlag.get(userId) === true;
- if (!isNewSession) return;
+  // Only surface the connection toast/progress bar when this /start kicks
+  // off a brand-new active window (first /start of the session, or first
+  // /start after a 30-min idle gap). Otherwise the user sees the same
+  // "✅ WhatsApp connected +XXX" message every time they tap /start,
+  // which is exactly what the user reported. If the user is mid-session,
+  // the menu appears immediately with no toast.
+  const isNewSession = newSessionFlag.get(userId) === true;
+  if (!isNewSession) return;
 
- // Already live? Just show a quick confirmation, no progress bar needed.
- if (isConnected(uid)) {
- try {
- const phone = getConnectedWhatsAppNumber(uid);
- const phoneTxt = phone ? \` `+${phone}`\` : "";
- const msg = await ctx.reply(\`✅ **WhatsApp connected${phoneTxt}** \`, { parse\_mode: "HTML" });
- // Auto-delete after 5s so the chat stays clean (matches the post-
- // restore confirmation behaviour below).
- setTimeout(() => {
- ctx.api.deleteMessage(msg.chat.id, msg.message\_id).catch(() => {});
- }, 5000);
- } catch {}
- return;
- }
+  // Already live? Just show a quick confirmation, no progress bar needed.
+  if (isConnected(uid)) {
+    try {
+      const phone = getConnectedWhatsAppNumber(uid);
+      const phoneTxt = phone ? ` <code>+${phone}</code>` : "";
+      const msg = await ctx.reply(`✅ <b>WhatsApp connected${phoneTxt}</b>`, { parse_mode: "HTML" });
+      // Auto-delete after 5s so the chat stays clean (matches the post-
+      // restore confirmation behaviour below).
+      setTimeout(() => {
+        ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+      }, 5000);
+    } catch {}
+    return;
+  }
 
- // No saved session at all — nothing to wait for, the menu's "Connect
- // WhatsApp" button will handle pairing.
- let hasStored = false;
- try { hasStored = await hasStoredWhatsAppSession(uid); } catch {}
- if (!hasStored) return;
+  // No saved session at all — nothing to wait for, the menu's "Connect
+  // WhatsApp" button will handle pairing.
+  let hasStored = false;
+  try { hasStored = await hasStoredWhatsAppSession(uid); } catch {}
+  if (!hasStored) return;
 
- // Send the initial progress message; if it fails, abort silently — the
- // menu will still be shown by the caller.
- let msg: any;
- try {
- msg = await ctx.reply(
- \`⏳ **Connecting your WhatsApp...**\\n${renderProgressBar(0)}\\n\\n _This usually takes 5–15 seconds._ \`,
- { parse\_mode: "HTML" }
- );
- } catch {
- return;
- }
+  // Send the initial progress message; if it fails, abort silently — the
+  // menu will still be shown by the caller.
+  let msg: any;
+  try {
+    msg = await ctx.reply(
+      `⏳ <b>Connecting your WhatsApp...</b>\n${renderProgressBar(0)}\n\n<i>This usually takes 5–15 seconds.</i>`,
+      { parse_mode: "HTML" }
+    );
+  } catch {
+    return;
+  }
 
- const TOTAL\_MS = 30\_000;
- const TICK\_MS = 1\_500;
- const startedAt = Date.now();
- let lastPct = -1;
- let stopped = false;
+  const TOTAL_MS = 30_000;
+  const TICK_MS = 1_500;
+  const startedAt = Date.now();
+  let lastPct = -1;
+  let stopped = false;
 
- // Background ticker — edits the message every TICK\_MS until either we're
- // connected or the timeout hits. Skips edits when % hasn't changed (avoids
- // Telegram's "message is not modified" error).
- const ticker = setInterval(async () => {
- if (stopped) return;
- if (isConnected(uid)) return; // final edit handled below
- const elapsed = Date.now() - startedAt;
- // Cap visible progress at 95% until truly connected so it doesn't
- // mislead the user when something stalls.
- const pct = Math.min(95, Math.floor((elapsed / TOTAL\_MS) \* 100));
- if (pct === lastPct) return;
- lastPct = pct;
- try {
- await ctx.api.editMessageText(
- msg.chat.id,
- msg.message\_id,
- \`⏳ **Connecting your WhatsApp...**\\n${renderProgressBar(pct)}\\n\\n _This usually takes 5–15 seconds._ \`,
- { parse\_mode: "HTML" }
- );
- } catch {}
- }, TICK\_MS);
+  // Background ticker — edits the message every TICK_MS until either we're
+  // connected or the timeout hits. Skips edits when % hasn't changed (avoids
+  // Telegram's "message is not modified" error).
+  const ticker = setInterval(async () => {
+    if (stopped) return;
+    if (isConnected(uid)) return; // final edit handled below
+    const elapsed = Date.now() - startedAt;
+    // Cap visible progress at 95% until truly connected so it doesn't
+    // mislead the user when something stalls.
+    const pct = Math.min(95, Math.floor((elapsed / TOTAL_MS) * 100));
+    if (pct === lastPct) return;
+    lastPct = pct;
+    try {
+      await ctx.api.editMessageText(
+        msg.chat.id,
+        msg.message_id,
+        `⏳ <b>Connecting your WhatsApp...</b>\n${renderProgressBar(pct)}\n\n<i>This usually takes 5–15 seconds.</i>`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+  }, TICK_MS);
 
- let connected = false;
- try {
- connected = await waitForWhatsAppConnected(uid, { timeoutMs: TOTAL\_MS, pollMs: 500 });
- } catch {}
- stopped = true;
- clearInterval(ticker);
+  let connected = false;
+  try {
+    connected = await waitForWhatsAppConnected(uid, { timeoutMs: TOTAL_MS, pollMs: 500 });
+  } catch {}
+  stopped = true;
+  clearInterval(ticker);
 
- // Final message: success or graceful fallback.
- try {
- if (connected) {
- const phone = getConnectedWhatsAppNumber(uid);
- const phoneTxt = phone ? \` `+${phone}`\` : "";
- await ctx.api.editMessageText(
- msg.chat.id,
- msg.message\_id,
- \`✅ **WhatsApp connected${phoneTxt}**\\n${renderProgressBar(100)}\`,
- { parse\_mode: "HTML" }
- );
- // Auto-delete the success message after 5s so the chat stays clean —
- // user already sees the menu right below it.
- setTimeout(() => {
- ctx.api.deleteMessage(msg.chat.id, msg.message\_id).catch(() => {});
- }, 5000);
- } else {
- await ctx.api.editMessageText(
- msg.chat.id,
- msg.message\_id,
- \`⚠️ **WhatsApp not connected yet.**\\n\\n\` +
- \`It might still be reconnecting in the background, or you may need \` +
- \`to reconnect manually from the menu.\`,
- { parse\_mode: "HTML" }
- );
- }
- } catch {}
+  // Final message: success or graceful fallback.
+  try {
+    if (connected) {
+      const phone = getConnectedWhatsAppNumber(uid);
+      const phoneTxt = phone ? ` <code>+${phone}</code>` : "";
+      await ctx.api.editMessageText(
+        msg.chat.id,
+        msg.message_id,
+        `✅ <b>WhatsApp connected${phoneTxt}</b>\n${renderProgressBar(100)}`,
+        { parse_mode: "HTML" }
+      );
+      // Auto-delete the success message after 5s so the chat stays clean —
+      // user already sees the menu right below it.
+      setTimeout(() => {
+        ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
+      }, 5000);
+    } else {
+      await ctx.api.editMessageText(
+        msg.chat.id,
+        msg.message_id,
+        `⚠️ <b>WhatsApp not connected yet.</b>\n\n` +
+        `It might still be reconnecting in the background, or you may need ` +
+        `to reconnect manually from the menu.`,
+        { parse_mode: "HTML" }
+      );
+    }
+  } catch {}
 }
 
 // Parse /start payload — supports plain "/start" and deep links such as
-// "/start ref\_12345" used by the referral system.
-function parseStartPayload(text: string \| undefined): string {
- if (!text) return "";
- const m = text.match(/^\\/start(?:@\\w+)?(?:\\s+(.+))?$/i);
- return (m?.\[1\] \|\| "").trim();
+// "/start ref_12345" used by the referral system.
+function parseStartPayload(text: string | undefined): string {
+  if (!text) return "";
+  const m = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
+  return (m?.[1] || "").trim();
 }
 
 bot.command("start", async (ctx) => {
- const userId = ctx.from!.id;
- await trackUser(userId);
- if (await isBanned(userId)) {
- await ctx.reply("🚫 You are banned from using this bot.");
- return;
- }
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) {
+    await ctx.reply("🚫 You are banned from using this bot.");
+    return;
+  }
 
- // ── Parse referral payload FIRST (before the force-sub guard) ─────────
- // We need the referrer-id captured even if checkForceSub returns false,
- // otherwise users who join the channel via the force-sub flow lose the
- // referral credit (the original /start ref\_ message is not available
- // inside the check\_joined callback). If force-sub fails below, we stash
- // it in pendingReferrals; check\_joined consumes it after a successful
- // join. If force-sub passes (already joined), we award immediately so
- // the existing fast-path behaviour is preserved.
- const payload = parseStartPayload(ctx.message?.text);
- const refMatch = payload.match(/^ref\_(\\d+)$/i);
- const referrerId = refMatch ? Number(refMatch\[1\]) : 0;
+  // ── Parse referral payload FIRST (before the force-sub guard) ─────────
+  // We need the referrer-id captured even if checkForceSub returns false,
+  // otherwise users who join the channel via the force-sub flow lose the
+  // referral credit (the original /start ref_<id> message is not available
+  // inside the check_joined callback). If force-sub fails below, we stash
+  // it in pendingReferrals; check_joined consumes it after a successful
+  // join. If force-sub passes (already joined), we award immediately so
+  // the existing fast-path behaviour is preserved.
+  const payload = parseStartPayload(ctx.message?.text);
+  const refMatch = payload.match(/^ref_(\d+)$/i);
+  const referrerId = refMatch ? Number(refMatch[1]) : 0;
 
- if (!(await checkForceSub(ctx))) {
- // User is being asked to join the channel. Remember the referrer so
- // we can credit it once they tap "✅ I Joined".
- if (referrerId && Number.isFinite(referrerId) && referrerId !== userId) {
- pendingReferrals.set(userId, { referrerId, createdAt: Date.now() });
- }
- return;
- }
+  if (!(await checkForceSub(ctx))) {
+    // User is being asked to join the channel. Remember the referrer so
+    // we can credit it once they tap "✅ I Joined".
+    if (referrerId && Number.isFinite(referrerId) && referrerId !== userId) {
+      pendingReferrals.set(userId, { referrerId, createdAt: Date.now() });
+    }
+    return;
+  }
 
- // ── Referral award (channel-already-joined fast path) ─────────────────
- // User is already a channel member, so award the referral right now.
- if (referrerId && Number.isFinite(referrerId)) {
- await processReferralAward(userId, referrerId);
- }
+  // ── Referral award (channel-already-joined fast path) ─────────────────
+  // User is already a channel member, so award the referral right now.
+  if (referrerId && Number.isFinite(referrerId)) {
+    await processReferralAward(userId, referrerId);
+  }
 
- // ── First-time users (no language set yet) → language picker FIRST.
- // We deliberately do NOT start the free trial or show the trial message
- // here. The trial is created right after the user picks a language in
- // applyLanguageSelection(), so the trial countdown only starts once the
- // user has actually entered the bot and the trial banner appears AFTER
- // the language is set (not bundled with the language picker).
- //
- // No access gate here. Per UX request, /start always shows the user the
- // language picker (and then the menu). The "your free access has ended"
- // / "subscription required" gate is enforced inside each feature handler
- // — so a user without access will see all the buttons, but tapping any
- // feature button will show the gate inside that feature. This avoids
- // the confusing case where a user with an ACTIVE trial saw the
- // access-ended message just because of a stale check on /start.
- if (!hasUserLang(userId)) {
- userStates.delete(userId);
- await sendLanguagePicker(ctx, true);
- return;
- }
+  // ── First-time users (no language set yet) → language picker FIRST.
+  // We deliberately do NOT start the free trial or show the trial message
+  // here. The trial is created right after the user picks a language in
+  // applyLanguageSelection(), so the trial countdown only starts once the
+  // user has actually entered the bot and the trial banner appears AFTER
+  // the language is set (not bundled with the language picker).
+  //
+  // No access gate here. Per UX request, /start always shows the user the
+  // language picker (and then the menu). The "your free access has ended"
+  // / "subscription required" gate is enforced inside each feature handler
+  // — so a user without access will see all the buttons, but tapping any
+  // feature button will show the gate inside that feature. This avoids
+  // the confusing case where a user with an ACTIVE trial saw the
+  // access-ended message just because of a stale check on /start.
+  if (!hasUserLang(userId)) {
+    userStates.delete(userId);
+    await sendLanguagePicker(ctx, true);
+    return;
+  }
 
- // ── Returning users (language already set).
- // Start their one-and-only 24h free trial if they don't have one yet.
- // The trial entry is permanent in MongoDB (\`freeTrials\` map keyed by
- // userId) so the same user can never receive a second free trial.
- // Admin is skipped — admin already has unlimited access, the trial UI
- // would be misleading for them.
- let trialJustStarted: { expiresAt: number } \| null = null;
- if (!isAdmin(userId)) {
- const trial = await ensureFreeTrial(userId, FREE\_TRIAL\_MS);
- if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
- }
+  // ── Returning users (language already set).
+  // Start their one-and-only 24h free trial if they don't have one yet.
+  // The trial entry is permanent in MongoDB (`freeTrials` map keyed by
+  // userId) so the same user can never receive a second free trial.
+  // Admin is skipped — admin already has unlimited access, the trial UI
+  // would be misleading for them.
+  let trialJustStarted: { expiresAt: number } | null = null;
+  if (!isAdmin(userId)) {
+    const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+    if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+  }
 
- // No access gate here either. The gate lives inside each feature
- // handler (see hasAccess() / sendReferRequired() call sites). This
- // means /start always shows the menu with all buttons — even for
- // users whose trial has expired. They see the gate only when they
- // actually try to USE a feature.
- userStates.delete(userId);
+  // No access gate here either. The gate lives inside each feature
+  // handler (see hasAccess() / sendReferRequired() call sites). This
+  // means /start always shows the menu with all buttons — even for
+  // users whose trial has expired. They see the gate only when they
+  // actually try to USE a feature.
+  userStates.delete(userId);
 
- // Show live "connecting WhatsApp" progress bar before the menu, so
- // users immediately see the status of their saved WhatsApp session.
- // Skip this for users who have no access — for them WhatsApp is
- // unusable until they renew, so spending time/RAM on a connection
- // attempt is wasteful and could trigger needless reconnects.
- const userHasAccess = isAdmin(userId) \|\| (await hasAccess(userId));
- if (userHasAccess) {
- await showWhatsAppConnectingProgress(ctx, userId);
- }
- if (trialJustStarted) {
- await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse\_mode: "HTML" });
- }
- await ctx.reply(
- mainMenuText(userId, "welcome"),
- { parse\_mode: "HTML", reply\_markup: mainMenu(userId) }
- );
+  // Show live "connecting WhatsApp" progress bar before the menu, so
+  // users immediately see the status of their saved WhatsApp session.
+  // Skip this for users who have no access — for them WhatsApp is
+  // unusable until they renew, so spending time/RAM on a connection
+  // attempt is wasteful and could trigger needless reconnects.
+  const userHasAccess = isAdmin(userId) || (await hasAccess(userId));
+  if (userHasAccess) {
+    await showWhatsAppConnectingProgress(ctx, userId);
+  }
+  if (trialJustStarted) {
+    await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+  }
+  await ctx.reply(
+    mainMenuText(userId, "welcome"),
+    { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /language command — pick UI language. Shows 5 options:
-// 1\. Default (current Hindi+English mix, no translation)
-// 2\. English
-// 3\. हिन्दी (Hindi)
-// 4\. Bahasa Indonesia
-// 5\. 中文 (Chinese)
+//   1. Default (current Hindi+English mix, no translation)
+//   2. English
+//   3. हिन्दी (Hindi)
+//   4. Bahasa Indonesia
+//   5. 中文 (Chinese)
 // The picker UI itself is wrapped in notr() so its text/buttons are never
 // translated — language names should always show in their native scripts.
 // ─────────────────────────────────────────────────────────────────────────────
 function languagePickerKeyboard(): InlineKeyboard {
- const kb = new InlineKeyboard();
- kb.text(notr("🌐 Default (Hindi + English)"), "lang\_set\_default").row();
- kb.text(notr(\`${LANGUAGES.en.flag} ${LANGUAGES.en.nativeName}\`), "lang\_set\_en").row();
- kb.text(notr(\`${LANGUAGES.hi.flag} ${LANGUAGES.hi.nativeName}\`), "lang\_set\_hi").row();
- kb.text(notr(\`${LANGUAGES.id.flag} ${LANGUAGES.id.nativeName}\`), "lang\_set\_id").row();
- kb.text(notr(\`${LANGUAGES.zh.flag} ${LANGUAGES.zh.nativeName}\`), "lang\_set\_zh").row();
- return kb;
+  const kb = new InlineKeyboard();
+  kb.text(notr("🌐 Default (Hindi + English)"), "lang_set_default").row();
+  kb.text(notr(`${LANGUAGES.en.flag} ${LANGUAGES.en.nativeName}`), "lang_set_en").row();
+  kb.text(notr(`${LANGUAGES.hi.flag} ${LANGUAGES.hi.nativeName}`), "lang_set_hi").row();
+  kb.text(notr(`${LANGUAGES.id.flag} ${LANGUAGES.id.nativeName}`), "lang_set_id").row();
+  kb.text(notr(`${LANGUAGES.zh.flag} ${LANGUAGES.zh.nativeName}`), "lang_set_zh").row();
+  return kb;
 }
 
-async function sendLanguagePicker(ctx: any, isFirstRun: boolean): Promise {
- const heading = isFirstRun
- ? "👋 **Welcome!**\\n\\n🌐 **Choose your language** / भाषा चुनें / Pilih bahasa / 选择语言"
- : "🌐 **Choose your language** / भाषा चुनें / Pilih bahasa / 选择语言";
- const body =
- \`${heading}\\n\\n\` +
- \`• **Default** — Hindi + English (current)\\n\` +
- \`• **English** — full English UI\\n\` +
- \`• **हिन्दी** — pure Hindi UI\\n\` +
- \`• **Bahasa Indonesia** — Indonesian UI\\n\` +
- \`• **中文** — Chinese UI\\n\\n\` +
- \` _Tip: you can change this anytime with /language_ \`;
- await ctx.reply(notr(body), {
- parse\_mode: "HTML",
- reply\_markup: languagePickerKeyboard(),
- });
+async function sendLanguagePicker(ctx: any, isFirstRun: boolean): Promise<void> {
+  const heading = isFirstRun
+    ? "👋 <b>Welcome!</b>\n\n🌐 <b>Choose your language</b> / भाषा चुनें / Pilih bahasa / 选择语言"
+    : "🌐 <b>Choose your language</b> / भाषा चुनें / Pilih bahasa / 选择语言";
+  const body =
+    `${heading}\n\n` +
+    `• <b>Default</b> — Hindi + English (current)\n` +
+    `• <b>English</b> — full English UI\n` +
+    `• <b>हिन्दी</b> — pure Hindi UI\n` +
+    `• <b>Bahasa Indonesia</b> — Indonesian UI\n` +
+    `• <b>中文</b> — Chinese UI\n\n` +
+    `<i>Tip: you can change this anytime with /language</i>`;
+  await ctx.reply(notr(body), {
+    parse_mode: "HTML",
+    reply_markup: languagePickerKeyboard(),
+  });
 }
 
 bot.command("language", async (ctx) => {
- const userId = ctx.from!.id;
- await trackUser(userId);
- if (await isBanned(userId)) return;
- await sendLanguagePicker(ctx, false);
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) return;
+  await sendLanguagePicker(ctx, false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2363,378 +2357,375 @@ bot.command("language", async (ctx) => {
 // refer mode is on. Admin sees a special "unlimited access" line.
 // ─────────────────────────────────────────────────────────────────────────────
 bot.command("myaccess", async (ctx) => {
- const userId = ctx.from!.id;
- await trackUser(userId);
- if (await isBanned(userId)) {
- await ctx.reply("🚫 You are banned from using this bot.");
- return;
- }
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) {
+    await ctx.reply("🚫 You are banned from using this bot.");
+    return;
+  }
 
- const data = await loadBotData();
- const state = await getUserAccessState(userId, ADMIN\_USER\_ID);
- const stats = await getReferralStats(userId);
- const username = await getBotUsername();
- const link = username && !isAdmin(userId) ? buildReferLink(userId, username) : "";
+  const data = await loadBotData();
+  const state = await getUserAccessState(userId, ADMIN_USER_ID);
+  const stats = await getReferralStats(userId);
+  const username = await getBotUsername();
+  const link = username && !isAdmin(userId) ? buildReferLink(userId, username) : "";
 
- let header = "";
- switch (state.kind) {
- case "admin":
- header = \`👑 **Admin** — unlimited access.\`;
- break;
- case "admin\_grant":
- header =
- \`💎 **Premium access (granted by admin)**\\n\` +
- \`⏰ Time left: **${formatRemaining(state.expiresAt!)}**\\n\` +
- \`📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}\`;
- break;
- case "trial":
- header =
- \`🎁 **Free 24-hour trial**\\n\` +
- \`⏰ Time left: **${formatRemaining(state.expiresAt!)}**\\n\` +
- \`📅 Ends (UTC): ${new Date(state.expiresAt!).toUTCString()}\`;
- break;
- case "referral":
- header =
- \`🤝 **Referral access**\\n\` +
- \`⏰ Time left: **${formatRemaining(state.expiresAt!)}**\\n\` +
- \`📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}\`;
- break;
- case "subscription\_open":
- header = \`🆓 **Free for everyone right now** — the bot is open to all users.\`;
- break;
- case "none":
- header =
- \`🔒 **No active access.**\\n\` +
- \`Refer a friend (1 referral = 1 day free) or buy premium from ${OWNER\_USERNAME}.\`;
- break;
- }
+  let header = "";
+  switch (state.kind) {
+    case "admin":
+      header = `👑 <b>Admin</b> — unlimited access.`;
+      break;
+    case "admin_grant":
+      header =
+        `💎 <b>Premium access (granted by admin)</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "trial":
+      header =
+        `🎁 <b>Free 24-hour trial</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Ends (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "referral":
+      header =
+        `🤝 <b>Referral access</b>\n` +
+        `⏰ Time left: <b>${formatRemaining(state.expiresAt!)}</b>\n` +
+        `📅 Expires (UTC): ${new Date(state.expiresAt!).toUTCString()}`;
+      break;
+    case "subscription_open":
+      header = `🆓 <b>Free for everyone right now</b> — the bot is open to all users.`;
+      break;
+    case "none":
+      header =
+        `🔒 <b>No active access.</b>\n` +
+        `Refer a friend (1 referral = 1 day free) or buy premium from ${OWNER_USERNAME}.`;
+      break;
+  }
 
- // Referral stats are only meaningful for non-admin users when refer
- // mode is on (or has historical data).
- let referralBlock = "";
- if (!isAdmin(userId) && (data.referMode \|\| stats.totalReferred > 0)) {
- referralBlock =
- \`\\n\\n📊 **Your referral stats**\\n\` +
- \`👥 People you've referred: **${stats.totalReferred}**\\n\` +
- (link ? \`🔗 Your referral link:\\n`${esc(link)}`\\n\` : \`\`) +
- \` _Each new person who starts the bot through your link gives you 1 extra day of free access._ \`;
- }
+  // Referral stats are only meaningful for non-admin users when refer
+  // mode is on (or has historical data).
+  let referralBlock = "";
+  if (!isAdmin(userId) && (data.referMode || stats.totalReferred > 0)) {
+    referralBlock =
+      `\n\n📊 <b>Your referral stats</b>\n` +
+      `👥 People you've referred: <b>${stats.totalReferred}</b>\n` +
+      (link ? `🔗 Your referral link:\n<code>${esc(link)}</code>\n` : ``) +
+      `<i>Each new person who starts the bot through your link gives you 1 extra day of free access.</i>`;
+  }
 
- const text = \`${header}${referralBlock}\`;
+  const text = `${header}${referralBlock}`;
 
- // Add a "Share my link" button when we have a link to share.
- const kb = new InlineKeyboard();
- if (link) {
- const shareText = encodeURIComponent(
- \`Try this Telegram bot — start through my link to get a 24-hour free trial:\`
- );
- kb.url("📤 Share My Referral Link", \`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}\`).row();
- }
- if (state.kind === "none" \|\| state.kind === "trial" \|\| state.kind === "referral") {
- kb.url(\`💎 Buy Premium (${OWNER\_USERNAME})\`, \`https://t.me/${OWNER\_USERNAME.replace(/^@/, "")}\`);
- }
+  // Add a "Share my link" button when we have a link to share.
+  const kb = new InlineKeyboard();
+  if (link) {
+    const shareText = encodeURIComponent(
+      `Try this Telegram bot — start through my link to get a 24-hour free trial:`
+    );
+    kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
+  }
+  if (state.kind === "none" || state.kind === "trial" || state.kind === "referral") {
+    kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  }
 
- await ctx.reply(text, {
- parse\_mode: "HTML",
- reply\_markup: kb,
- });
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: kb,
+  });
 });
 
-async function applyLanguageSelection(ctx: any, lang: Language): Promise {
- const userId = ctx.from.id;
- await ctx.answerCallbackQuery();
+async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
+  const userId = ctx.from.id;
+  await ctx.answerCallbackQuery();
 
- // Was this the user's very first language pick? If yes, this is the
- // moment we kick off their one-and-only 24h free trial — NOT on /start.
- // The trial banner is shown AFTER the menu so it doesn't get bundled
- // with the language picker reply.
- const isFirstPick = !hasUserLang(userId);
+  // Was this the user's very first language pick? If yes, this is the
+  // moment we kick off their one-and-only 24h free trial — NOT on /start.
+  // The trial banner is shown AFTER the menu so it doesn't get bundled
+  // with the language picker reply.
+  const isFirstPick = !hasUserLang(userId);
 
- // Persist the choice immediately so all subsequent messages use it.
- await setUserLanguage(userId, lang);
+  // Persist the choice immediately so all subsequent messages use it.
+  await setUserLanguage(userId, lang);
 
- // Create the trial right after the very first language pick (admin
- // skipped — they have unlimited access).
- let trialJustStarted: { expiresAt: number } \| null = null;
- if (isFirstPick && !isAdmin(userId)) {
- try {
- const trial = await ensureFreeTrial(userId, FREE\_TRIAL\_MS);
- if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
- } catch (err: any) {
- console.error(\`\[TRIAL\] ensureFreeTrial after lang pick failed for ${userId}:\`, err?.message);
- }
- }
+  // Create the trial right after the very first language pick (admin
+  // skipped — they have unlimited access).
+  let trialJustStarted: { expiresAt: number } | null = null;
+  if (isFirstPick && !isAdmin(userId)) {
+    try {
+      const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
+      if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+    } catch (err: any) {
+      console.error(`[TRIAL] ensureFreeTrial after lang pick failed for ${userId}:`, err?.message);
+    }
+  }
 
- // For "default" there's nothing to warm up — go straight to the menu.
- if (lang === "default") {
- try {
- await ctx.editMessageText(
- notr("✅ **Language set:** Default (Hindi + English)\\n\\nLoading menu..."),
- { parse\_mode: "HTML" }
- );
- } catch {}
- await new Promise((r) => setTimeout(r, 300));
- try {
- await ctx.editMessageText(
- mainMenuText(userId, "welcome"),
- { parse\_mode: "HTML", reply\_markup: mainMenu(userId) }
- );
- } catch {
- await ctx.reply(mainMenuText(userId, "welcome"), {
- parse\_mode: "HTML", reply\_markup: mainMenu(userId),
- });
- }
- if (trialJustStarted) {
- await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse\_mode: "HTML" });
- }
- return;
- }
+  // For "default" there's nothing to warm up — go straight to the menu.
+  if (lang === "default") {
+    try {
+      await ctx.editMessageText(
+        notr("✅ <b>Language set:</b> Default (Hindi + English)\n\nLoading menu..."),
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      await ctx.editMessageText(
+        mainMenuText(userId, "welcome"),
+        { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+      );
+    } catch {
+      await ctx.reply(mainMenuText(userId, "welcome"), {
+        parse_mode: "HTML", reply_markup: mainMenu(userId),
+      });
+    }
+    if (trialJustStarted) {
+      await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+    }
+    return;
+  }
 
- // For non-default langs: show progress bar while we warm up the cache.
- const meta = LANGUAGES\[lang as Exclude\];
- const renderBar = (done: number, total: number): string => {
- const pct = total > 0 ? Math.floor((done / total) \* 100) : 0;
- const filled = Math.floor(pct / 5);
- const bar = "█".repeat(filled) + "░".repeat(20 - filled);
- return (
- \`${meta.flag} **Switching to ${meta.nativeName}...**\\n\\n\` +
- \``[${bar}] ${pct}%`\\n\` +
- \`${done}/${total} translated\`
- );
- };
+  // For non-default langs: show progress bar while we warm up the cache.
+  const meta = LANGUAGES[lang as Exclude<Language, "default">];
+  const renderBar = (done: number, total: number): string => {
+    const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+    const filled = Math.floor(pct / 5);
+    const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+    return (
+      `${meta.flag} <b>Switching to ${meta.nativeName}...</b>\n\n` +
+      `<code>[${bar}] ${pct}%</code>\n` +
+      `${done}/${total} translated`
+    );
+  };
 
- let lastEditAt = 0;
- try {
- await ctx.editMessageText(notr(renderBar(0, 1)), { parse\_mode: "HTML" });
- } catch {}
+  let lastEditAt = 0;
+  try {
+    await ctx.editMessageText(notr(renderBar(0, 1)), { parse_mode: "HTML" });
+  } catch {}
 
- await warmUpLanguage(lang, async (done, total) => {
- // Throttle Telegram edits to avoid 429s; update every ~700ms or on completion.
- const now = Date.now();
- if (now - lastEditAt < 700 && done < total) return;
- lastEditAt = now;
- try {
- await ctx.editMessageText(notr(renderBar(done, total)), { parse\_mode: "HTML" });
- } catch {}
- });
+  await warmUpLanguage(lang, async (done, total) => {
+    // Throttle Telegram edits to avoid 429s; update every ~700ms or on completion.
+    const now = Date.now();
+    if (now - lastEditAt < 700 && done < total) return;
+    lastEditAt = now;
+    try {
+      await ctx.editMessageText(notr(renderBar(done, total)), { parse_mode: "HTML" });
+    } catch {}
+  });
 
- // Done — show the main menu in the new language. The transformer auto-translates.
- try {
- await ctx.editMessageText(
- mainMenuText(userId, "welcome"),
- { parse\_mode: "HTML", reply\_markup: mainMenu(userId) }
- );
- } catch {
- await ctx.reply(mainMenuText(userId, "welcome"), {
- parse\_mode: "HTML", reply\_markup: mainMenu(userId),
- });
- }
- if (trialJustStarted) {
- await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse\_mode: "HTML" });
- }
+  // Done — show the main menu in the new language. The transformer auto-translates.
+  try {
+    await ctx.editMessageText(
+      mainMenuText(userId, "welcome"),
+      { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+    );
+  } catch {
+    await ctx.reply(mainMenuText(userId, "welcome"), {
+      parse_mode: "HTML", reply_markup: mainMenu(userId),
+    });
+  }
+  if (trialJustStarted) {
+    await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
+  }
 }
 
-bot.callbackQuery("lang\_set\_default", (ctx) => applyLanguageSelection(ctx, "default"));
-bot.callbackQuery("lang\_set\_en", (ctx) => applyLanguageSelection(ctx, "en"));
-bot.callbackQuery("lang\_set\_hi", (ctx) => applyLanguageSelection(ctx, "hi"));
-bot.callbackQuery("lang\_set\_id", (ctx) => applyLanguageSelection(ctx, "id"));
-bot.callbackQuery("lang\_set\_zh", (ctx) => applyLanguageSelection(ctx, "zh"));
+bot.callbackQuery("lang_set_default", (ctx) => applyLanguageSelection(ctx, "default"));
+bot.callbackQuery("lang_set_en", (ctx) => applyLanguageSelection(ctx, "en"));
+bot.callbackQuery("lang_set_hi", (ctx) => applyLanguageSelection(ctx, "hi"));
+bot.callbackQuery("lang_set_id", (ctx) => applyLanguageSelection(ctx, "id"));
+bot.callbackQuery("lang_set_zh", (ctx) => applyLanguageSelection(ctx, "zh"));
 
 bot.command("help", async (ctx) => {
- const userId = ctx.from!.id;
- await trackUser(userId);
- if (await isBanned(userId)) return;
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) return;
 
- const codeBlock =
- \`🤖 WhatsApp Bot Manager — Help Guide\\n\\n\` +
+  const codeBlock =
+    `🤖 WhatsApp Bot Manager — Help Guide\n\n` +
 
- \`━━━━━━━━━━━━━━━━━━\\n\\n\` +
- \`📌 All Features:\\n\\n\` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `📌 All Features:\n\n` +
 
- \`📱 1\. Connect WhatsApp\\n\` +
- \`• Bot se apna WhatsApp link karo\\n\` +
- \`• Phone number do → Pairing code milega (koi bhi format chalega, jaise +91 9999-999999)\\n\` +
- \`• WhatsApp → Linked Devices → Link with phone number → code daalo\\n\` +
- \`• Ek baar connect hone ke baad sab features use karo\\n\\n\` +
+    `📱 1. Connect WhatsApp\n` +
+    `• Bot se apna WhatsApp link karo\n` +
+    `• Phone number do → Pairing code milega (koi bhi format chalega, jaise +91 9999-999999)\n` +
+    `• WhatsApp → Linked Devices → Link with phone number → code daalo\n` +
+    `• Ek baar connect hone ke baad sab features use karo\n\n` +
 
- \`🏗️ 2\. Create Groups\\n\` +
- \`• Ek saath kaafi saare WhatsApp groups banao\\n\` +
- \`• Custom ya auto-numbered names (e.g. Group 1, Group 2...)\\n\` +
- \`• Group description set kar sakte ho\\n\` +
- \`• 🖼️ Multiple Group DPs (max 50): 1 DP do to sab groups mein same lagega.\\n\` +
- \` Multiple DPs do to 1st DP→1st group, 2nd DP→2nd group...\\n\` +
- \` Groups DPs se zyada hue to DPs rotate ho jayenge.\\n\` +
- \`• Permissions: kaun message, kaun add kar sakta hai, approval mode\\n\` +
- \`• ⏳ Disappearing Messages: 24 Hours / 7 Days / 90 Days / Off\\n\` +
- \`• 👫 Friends Add: Group bante waqt seedha friends ko add karo\\n\` +
- \` (koi bhi number format — +919999999999, +91 9999-999999, 919999999999)\\n\` +
- \`• Live progress dikhta hai jaise groups bante hain\\n\\n\` +
+    `🏗️ 2. Create Groups\n` +
+    `• Ek saath kaafi saare WhatsApp groups banao\n` +
+    `• Custom ya auto-numbered names (e.g. Group 1, Group 2...)\n` +
+    `• Group description set kar sakte ho\n` +
+    `• 🖼️ Multiple Group DPs (max 50): 1 DP do to sab groups mein same lagega.\n` +
+    `  Multiple DPs do to 1st DP→1st group, 2nd DP→2nd group...\n` +
+    `  Groups DPs se zyada hue to DPs rotate ho jayenge.\n` +
+    `• Permissions: kaun message, kaun add kar sakta hai, approval mode\n` +
+    `• ⏳ Disappearing Messages: 24 Hours / 7 Days / 90 Days / Off\n` +
+    `• 👫 Friends Add: Group bante waqt seedha friends ko add karo\n` +
+    `  (koi bhi number format — +919999999999, +91 9999-999999, 919999999999)\n` +
+    `• Live progress dikhta hai jaise groups bante hain\n\n` +
 
- \`🔗 3\. Get Group Links\\n\` +
- \`• Apne sabhi WhatsApp groups ke invite links lo\\n\` +
- \`• Sabhi ya similar name ke groups filter karke\\n\` +
- \`• Links copy karke kahin bhi paste kar sakte ho\\n\\n\` +
+    `🔗 3. Get Group Links\n` +
+    `• Apne sabhi WhatsApp groups ke invite links lo\n` +
+    `• Sabhi ya similar name ke groups filter karke\n` +
+    `• Links copy karke kahin bhi paste kar sakte ho\n\n` +
 
- \`🔗 4\. Join Groups\\n\` +
- \`• Multiple invite links paste karo\\n\` +
- \`• Bot automatically sabhi groups join kar leta hai\\n\` +
- \`• Live progress dikhta hai\\n\\n\` +
+    `🔗 4. Join Groups\n` +
+    `• Multiple invite links paste karo\n` +
+    `• Bot automatically sabhi groups join kar leta hai\n` +
+    `• Live progress dikhta hai\n\n` +
 
- \`🚪 5\. Leave Groups\\n\` +
- \`• Sirf member wale, sirf admin wale, ya sabhi ek saath\\n\` +
- \`• Similar name wale groups batch mein leave\\n\\n\` +
+    `🚪 5. Leave Groups\n` +
+    `• Sirf member wale, sirf admin wale, ya sabhi ek saath\n` +
+    `• Similar name wale groups batch mein leave\n\n` +
 
- \`📊 6\. CTC Checker\\n\` +
- \`• Group links do → VCF files do → bot check karta hai:\\n\` +
- \` ✅ Pehle se group mein hai\\n\` +
- \` ⏳ Pending approval mein hai\\n\` +
- \` ❌ Group mein nahi mila\\n\` +
- \` ⚠️ Wrong add — group mein hai par VCF mein nahi\\n\` +
- \` 🔁 Duplicate pending — ek contact multiple groups mein\\n\` +
- \`• Multiple VCF files ek saath bhej sakte ho\\n\\n\` +
+    `📊 6. CTC Checker\n` +
+    `• Group links do → VCF files do → bot check karta hai:\n` +
+    `  ✅ Pehle se group mein hai\n` +
+    `  ⏳ Pending approval mein hai\n` +
+    `  ❌ Group mein nahi mila\n` +
+    `  ⚠️ Wrong add — group mein hai par VCF mein nahi\n` +
+    `  🔁 Duplicate pending — ek contact multiple groups mein\n` +
+    `• Multiple VCF files ek saath bhej sakte ho\n\n` +
 
- \`🗑️ 7\. Remove Members\\n\` +
- \`• Ek ya zyada groups select karo\\n\` +
- \`• Optionally kuch numbers exclude karo\\n\` +
- \`• Baki sabhi non-admin members remove ho jayenge\\n\\n\` +
+    `🗑️ 7. Remove Members\n` +
+    `• Ek ya zyada groups select karo\n` +
+    `• Optionally kuch numbers exclude karo\n` +
+    `• Baki sabhi non-admin members remove ho jayenge\n\n` +
 
- \`👑 8\. Make Admin\\n\` +
- \`• Admin groups select karo\\n\` +
- \`• Phone numbers bhejo\\n\` +
- \`• Bot dhundhke unhe admin promote kar dega\\n\\n\` +
+    `👑 8. Make Admin\n` +
+    `• Admin groups select karo\n` +
+    `• Phone numbers bhejo\n` +
+    `• Bot dhundhke unhe admin promote kar dega\n\n` +
 
- \`✅ 9\. Approval\\n\` +
- \`• Admin groups select karo → pending members approve karo:\\n\` +
- \` ☝️ 1 by 1: Har pending member individually approve\\n\` +
- \` 👥 Together: Approval OFF phir ON — sabhi ek saath approve\\n\` +
- \`• Similar name wale groups ek saath select kar sakte ho\\n\\n\` +
+    `✅ 9. Approval\n` +
+    `• Admin groups select karo → pending members approve karo:\n` +
+    `  ☝️ 1 by 1: Har pending member individually approve\n` +
+    `  👥 Together: Approval OFF phir ON — sabhi ek saath approve\n` +
+    `• Similar name wale groups ek saath select kar sakte ho\n\n` +
 
- \`📋 10\. Get Pending List\\n\` +
- \`• Sabhi admin groups ka pending members count dikhata hai\\n\` +
- \`• Similar name wale groups grouped dikhate hain\\n\` +
- \`• Pata chal jata hai kaun se group mein kitne log pending\\n\\n\` +
+    `📋 10. Get Pending List\n` +
+    `• Sabhi admin groups ka pending members count dikhata hai\n` +
+    `• Similar name wale groups grouped dikhate hain\n` +
+    `• Pata chal jata hai kaun se group mein kitne log pending\n\n` +
 
- \`➕ 11\. Add Members\\n\` +
- \`• Single group: Link do → Friend numbers + Admin/Navy/Member VCF do\\n\` +
- \`• Multiple groups: Ek se zyada links ek per line do → sirf Friend numbers bhejo\\n\` +
- \` → Sabhi groups mein ek saath add ho jayenge\\n\` +
- \`• 3 modes:\\n\` +
- \` 👆 Add 1 by 1 (safe, with delay)\\n\` +
- \` 👥 Add Together (fast, ek baar mein)\\n\` +
- \` 🎯 Custom — har category ke liye apni pace (1-1, 2-2, 3-3, 4-4, 5-5, 6-6, 7-7, 8-8, 9-9, 10-10, 15-15, 20-20 ya All)\\n\` +
- \`• Sirf wahi categories show hoti hain jinka VCF ya numbers diya ho\\n\` +
- \` (e.g. Admin VCF nahi diya to Admin option nahi dikhega)\\n\` +
- \`• Fail hone par specific reason dikhta hai:\\n\` +
- \` • Privacy block / invite required\\n\` +
- \` • Number not on WhatsApp\\n\` +
- \` • Already in group / Recently left\\n\` +
- \` • Rate limit hit\\n\` +
- \` • WhatsApp ban / restricted\\n\` +
- \` • Group/account limit reached\\n\` +
- \`• Live progress dikhta hai, beech mein cancel kar sakte ho\\n\\n\` +
+    `➕ 11. Add Members\n` +
+    `• Single group: Link do → Friend numbers + Admin/Navy/Member VCF do\n` +
+    `• Multiple groups: Ek se zyada links ek per line do → sirf Friend numbers bhejo\n` +
+    `  → Sabhi groups mein ek saath add ho jayenge\n` +
+    `• 3 modes:\n` +
+    `   👆 Add 1 by 1 (safe, with delay)\n` +
+    `   👥 Add Together (fast, ek baar mein)\n` +
+    `   🎯 Custom — har category ke liye apni pace (1-1, 2-2, 3-3, 4-4, 5-5, 6-6, 7-7, 8-8, 9-9, 10-10, 15-15, 20-20 ya All)\n` +
+    `• Sirf wahi categories show hoti hain jinka VCF ya numbers diya ho\n` +
+    `  (e.g. Admin VCF nahi diya to Admin option nahi dikhega)\n` +
+    `• Fail hone par specific reason dikhta hai:\n` +
+    `   • Privacy block / invite required\n` +
+    `   • Number not on WhatsApp\n` +
+    `   • Already in group / Recently left\n` +
+    `   • Rate limit hit\n` +
+    `   • WhatsApp ban / restricted\n` +
+    `   • Group/account limit reached\n` +
+    `• Live progress dikhta hai, beech mein cancel kar sakte ho\n\n` +
 
- \`⚙️ 12\. Edit Settings\\n\` +
- \`• Admin groups scan hote hain → Similar Groups ya All Groups choose karo\\n\` +
- \`• Multiple groups ek saath select karo (pagination + Select All)\\n\` +
- \`• Permissions toggle karo (message, add members, approval mode)\\n\` +
- \`• ⏳ Disappearing Messages set karo: 24h / 7 Days / 90 Days / Off\\n\` +
- \`• Group DP change karo ya skip karo\\n\` +
- \`• Description update karo ya skip karo\\n\` +
- \`• Review karke Apply — har group ka live progress dikhega\\n\` +
- \`• Beech mein cancel bhi kar sakte ho\\n\\n\` +
+    `⚙️ 12. Edit Settings\n` +
+    `• Admin groups scan hote hain → Similar Groups ya All Groups choose karo\n` +
+    `• Multiple groups ek saath select karo (pagination + Select All)\n` +
+    `• Permissions toggle karo (message, add members, approval mode)\n` +
+    `• ⏳ Disappearing Messages set karo: 24h / 7 Days / 90 Days / Off\n` +
+    `• Group DP change karo ya skip karo\n` +
+    `• Description update karo ya skip karo\n` +
+    `• Review karke Apply — har group ka live progress dikhega\n` +
+    `• Beech mein cancel bhi kar sakte ho\n\n` +
 
- \`🔗 13\. Reset Link\\n\` +
- \`• Two modes available:\\n\` +
- \` 📋 Select Groups: choose Similar Groups or All Groups → tap groups to select → confirm\\n\` +
- \` \- Similar Groups list supports Previous/Next pagination\\n\` +
- \` 🔗 Reset by Group Link: paste group invite links (one per line) → bot resolves & shows review → confirm\\n\` +
- \` \- You can paste multiple links at once\\n\` +
- \` \- Bot shows group names for review before resetting\\n\` +
- \`• Bot revokes current invite links and generates new ones\\n\` +
- \`• ⚠️ Old links will stop working immediately\\n\` +
- \`• Rate limit errors are automatically retried (waits and retries once)\\n\` +
- \`• Successful new links are shown first, failed groups listed at the end\\n\` +
- \`• Live progress shows current group being processed\\n\` +
- \`• Cancel button to stop at any time\\n\\n\` +
+    `🔗 13. Reset Link\n` +
+    `• Two modes available:\n` +
+    `   📋 Select Groups: choose Similar Groups or All Groups → tap groups to select → confirm\n` +
+    `      - Similar Groups list supports Previous/Next pagination\n` +
+    `   🔗 Reset by Group Link: paste group invite links (one per line) → bot resolves & shows review → confirm\n` +
+    `      - You can paste multiple links at once\n` +
+    `      - Bot shows group names for review before resetting\n` +
+    `• Bot revokes current invite links and generates new ones\n` +
+    `• ⚠️ Old links will stop working immediately\n` +
+    `• Rate limit errors are automatically retried (waits and retries once)\n` +
+    `• Successful new links are shown first, failed groups listed at the end\n` +
+    `• Live progress shows current group being processed\n` +
+    `• Cancel button to stop at any time\n\n` +
 
- \`🏷️ 14\. Change Group Name\\n\` +
- \`• Rename multiple groups in one go. Two modes:\\n\` +
- \` ✏️ Manual (by name):\\n\` +
- \` • Pick Similar Groups or All Groups (like Get Link)\\n\` +
- \` • Tap groups to select — buttons show 1, 2, 3… in tap order\\n\` +
- \` • Choose Auto-numbered (e.g. "Spidy 1, Spidy 2…") or Custom Names (one per line)\\n\` +
- \` • Review and confirm — bot renames in your tap order with live progress + Cancel\\n\` +
- \` 📁 Auto (VCF + name):\\n\` +
- \` • Only groups with pending requests are shown (like Pending List)\\n\` +
- \` • Select groups, then upload one VCF file per selected group (any order)\\n\` +
- \` • Bot matches each VCF to a group by checking pending phone numbers\\n\` +
- \` • Choose name source:\\n\` +
- \` ◦ Same as VCF name → group name = VCF filename without .vcf\\n\` +
- \` (e.g. "SPIDY 酒店回饋活動FL\_61.vcf" → "SPIDY 酒店回饋活動FL\_61")\\n\` +
- \` ◦ Customize name → you give a prefix template; bot keeps the trailing number from the VCF\\n\` +
- \` (e.g. prefix "SPIDY 酒店EMPIRE動FL\_" + VCF "...\_61.vcf" → "SPIDY 酒店EMPIRE動FL\_61")\\n\` +
- \` • Review and confirm — live progress + Cancel\\n\\n\` +
+    `🏷️ 14. Change Group Name\n` +
+    `• Rename multiple groups in one go. Two modes:\n` +
+    `  ✏️ Manual (by name):\n` +
+    `   • Pick Similar Groups or All Groups (like Get Link)\n` +
+    `   • Tap groups to select — buttons show 1, 2, 3… in tap order\n` +
+    `   • Choose Auto-numbered (e.g. "Spidy 1, Spidy 2…") or Custom Names (one per line)\n` +
+    `   • Review and confirm — bot renames in your tap order with live progress + Cancel\n` +
+    `  📁 Auto (VCF + name):\n` +
+    `   • Only groups with pending requests are shown (like Pending List)\n` +
+    `   • Select groups, then upload one VCF file per selected group (any order)\n` +
+    `   • Bot matches each VCF to a group by checking pending phone numbers\n` +
+    `   • Choose name source:\n` +
+    `      ◦ Same as VCF name → group name = VCF filename without .vcf\n` +
+    `        (e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61")\n` +
+    `      ◦ Customize name → you give a prefix template; bot keeps the trailing number from the VCF\n` +
+    `        (e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61")\n` +
+    `   • Review and confirm — live progress + Cancel\n\n` +
 
- \`👤 15\. Demote Admin\\n\` +
- \`• Select admin groups — choose Similar Groups or All Groups\\n\` +
- \`• Choose demote mode:\\n\` +
- \` 🔴 Demote All Admins: removes admin from every non-owner admin in selected groups\\n\` +
- \` 📱 Demote Selected Numbers: send numbers (one per line) → only those admins get demoted\\n\` +
- \`• Confirm before starting in both modes\\n\` +
- \`• Live progress shows each group and number being processed\\n\` +
- \`• Cancel button to stop at any time\\n\` +
- \`• Group owners (super-admins) are never demoted\\n\\n\` +
+    `👤 15. Demote Admin\n` +
+    `• Select admin groups — choose Similar Groups or All Groups\n` +
+    `• Choose demote mode:\n` +
+    `   🔴 Demote All Admins: removes admin from every non-owner admin in selected groups\n` +
+    `   📱 Demote Selected Numbers: send numbers (one per line) → only those admins get demoted\n` +
+    `• Confirm before starting in both modes\n` +
+    `• Live progress shows each group and number being processed\n` +
+    `• Cancel button to stop at any time\n` +
+    `• Group owners (super-admins) are never demoted\n\n` +
 
- (canUserSeeAutoChat(userId) ?
- \`🤖 16\. Auto Chat ⭐ Paid Service\\n\` +
- \`• Auto Chat ke liye 2nd WhatsApp connect karo\\n\` +
- \`• Chat Friend: funny/study messages auto send hote rahenge jab tak Stop na dabao\\n\` +
- \`• Chat In Group: selected common groups mein funny/study messages rotate hote rahenge\\n\` +
- \`• Messages fast-fast nahi jaate; random delay rotation use hota hai\\n\` +
- \`• Delay rotation: 10 sec, 1 min, 10 min, 20 min, 30 min, 1 hour, 2 hours\\n\` +
- \`• Live status, sent/failed count, refresh aur stop controls milte hain\\n\\n\`
- :
- \`🤖 16\. Auto Chat ⭐ Paid Service\\n\` +
- \`• Automatically send messages to friends or groups on WhatsApp\\n\` +
- \`• Random delay rotation keeps it natural and safe\\n\` +
- \`• To buy Auto Chat access, message ${OWNER\_USERNAME} on Telegram\\n\\n\`) +
+    (canUserSeeAutoChat(userId) ?
+    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
+    `• Auto Chat ke liye 2nd WhatsApp connect karo\n` +
+    `• Chat Friend: funny/study messages auto send hote rahenge jab tak Stop na dabao\n` +
+    `• Chat In Group: selected common groups mein funny/study messages rotate hote rahenge\n` +
+    `• Messages fast-fast nahi jaate; random delay rotation use hota hai\n` +
+    `• Delay rotation: 10 sec, 1 min, 10 min, 20 min, 30 min, 1 hour, 2 hours\n` +
+    `• Live status, sent/failed count, refresh aur stop controls milte hain\n\n`
+    :
+    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
+    `• Automatically send messages to friends or groups on WhatsApp\n` +
+    `• Random delay rotation keeps it natural and safe\n` +
+    `• To buy Auto Chat access, message ${OWNER_USERNAME} on Telegram\n\n`) +
 
- \`🛡️ 17\. Auto Request Accepter\\n\` +
- \`• Automatically accept pending join requests in selected groups\\n\` +
- \`• Only accepts users who joined via invite link (NOT direct admin-adds)\\n\` +
- \`• How to use:\\n\` +
- \` 1\. Tap "Auto Accepter" in main menu\\n\` +
- \` 2\. Select groups — choose Similar Groups or All Groups\\n\` +
- \` 3\. Pick duration: 15 min, 30 min, 1 hr, or 2 hrs\\n\` +
- \` 4\. Review selected groups and confirm to start\\n\` +
- \` 5\. Bot will poll every 10 seconds and auto-accept invite-link joiners\\n\` +
- \` 6\. Tap "Cancel" button to stop early at any time\\n\` +
- \`• When the timer ends, you get a notification\\n\` +
- \`• Group must have "Approval required" mode ON\\n\` +
- \`• You must be admin in the group\\n\\n\` +
+    `🛡️ 17. Auto Request Accepter\n` +
+    `• Automatically accept pending join requests in selected groups\n` +
+    `• Only accepts users who joined via invite link (NOT direct admin-adds)\n` +
+    `• How to use:\n` +
+    `   1. Tap "Auto Accepter" in main menu\n` +
+    `   2. Select groups — choose Similar Groups or All Groups\n` +
+    `   3. Pick duration: 15 min, 30 min, 1 hr, or 2 hrs\n` +
+    `   4. Review selected groups and confirm to start\n` +
+    `   5. Bot will poll every 10 seconds and auto-accept invite-link joiners\n` +
+    `   6. Tap "Cancel" button to stop early at any time\n` +
+    `• When the timer ends, you get a notification\n` +
+    `• Group must have "Approval required" mode ON\n` +
+    `• You must be admin in the group\n\n` +
 
- \`━━━━━━━━━━━━━━━━━━\\n\\n\` +
- \`💬 Commands:\\n\` +
- \`/start — Bot start karo & main menu dekho\\n\` +
- \`/help — Yeh help message dekho\\n\\n\` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `💬 Commands:\n` +
+    `/start — Bot start karo & main menu dekho\n` +
+    `/help  — Yeh help message dekho\n\n` +
 
- \`━━━━━━━━━━━━━━━━━━\\n\\n\` +
- \`⚠️ Important Notes:\\n\` +
- \`• CTC Pending ke liye aap group admin hone chahiye\\n\` +
- \`• Group mein "Approval required" mode ON hona chahiye\\n\` +
- \`• 1 by 1 Approval ke liye bhi admin hona zaroori hai\\n\` +
- \`• Connect WhatsApp mein number kisi bhi format mein de sakte ho\\n\` +
- \` (+91 9999-999999, +919999999999 — sab chalega)\\n\` +
- \`• 🔌 Agar aapka WhatsApp disconnect ho jaye to aapko ek alert message milega\\n\` +
- \` (English mein, aapke WhatsApp number ke saath)\`;
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ Important Notes:\n` +
+    `• CTC Pending ke liye aap group admin hone chahiye\n` +
+    `• Group mein "Approval required" mode ON hona chahiye\n` +
+    `• 1 by 1 Approval ke liye bhi admin hona zaroori hai\n` +
+    `• Connect WhatsApp mein number kisi bhi format mein de sakte ho\n` +
+    `  (+91 9999-999999, +919999999999 — sab chalega)\n` +
+    `• 🔌 Agar aapka WhatsApp disconnect ho jaye to aapko ek alert message milega\n` +
+    `  (English mein, aapke WhatsApp number ke saath)`;
 
- // Telegram has a 4096-character limit per message. The full help guide
- // exceeds that when wrapped in
-
-```
-, so we split it into chunks on
+  // Telegram has a 4096-character limit per message. The full help guide
+  // exceeds that when wrapped in <pre>, so we split it into chunks on
   // section boundaries (double newlines) and show one page at a time
-  // with Next / Previous buttons. Content stays in  (copy-code) format.
+  // with Next / Previous buttons. Content stays in <pre> (copy-code) format.
   const chunks = splitHelpIntoChunks(codeBlock);
   helpPages.set(userId, chunks);
   helpPagesLastTouched.set(userId, Date.now());
@@ -2745,7 +2736,7 @@ bot.command("help", async (ctx) => {
 });
 
 // ─── Help pagination ──────────────────────────────────────────────────────────
-const helpPages: Map = new Map();
+const helpPages: Map<number, string[]> = new Map();
 const HELP_MAX_CHUNK = 3500; // safe budget under Telegram's 4096-char limit
 
 function splitHelpIntoChunks(codeBlock: string): string[] {
@@ -2766,10 +2757,9 @@ function splitHelpIntoChunks(codeBlock: string): string[] {
 }
 
 function renderHelpPage(chunks: string[], page: number): string {
-  const ownerLine = `👤 Owner: ${OWNER_USERNAME}`;
-  const pageInfo = `📄 Page ${page + 1} / ${chunks.length}`;
-  return `${ownerLine}\n${pageInfo}\n\n${chunks[page]}
-`;
+  const ownerLine = `👤 <b>Owner:</b> ${OWNER_USERNAME}`;
+  const pageInfo = `📄 <b>Page ${page + 1} / ${chunks.length}</b>`;
+  return `${ownerLine}\n${pageInfo}\n\n<pre>${chunks[page]}</pre>`;
 }
 
 function buildHelpKeyboard(page: number, total: number): InlineKeyboard {
@@ -2801,7 +2791,7 @@ bot.callbackQuery(/^help_pg_(\d+)$/, async (ctx) => {
   } catch {}
 });
 
-async function checkAccessMiddleware(ctx: any): Promise {
+async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   const userId = ctx.from?.id;
   if (!userId) return false;
   if (await isBanned(userId)) {
@@ -2818,7 +2808,7 @@ async function checkAccessMiddleware(ctx: any): Promise {
         show_alert: true,
       });
     } catch {
-      await ctx.reply(`🔒 Subscription Required!\n\nContact owner: ${OWNER_USERNAME}`, { parse_mode: "HTML" });
+      await ctx.reply(`🔒 <b>Subscription Required!</b>\n\nContact owner: ${OWNER_USERNAME}`, { parse_mode: "HTML" });
     }
     return false;
   }
@@ -2856,7 +2846,7 @@ bot.callbackQuery("pending_list", async (ctx) => {
     });
     return;
   }
-  await ctx.editMessageText("⏳ Fetching pending requests for all admin groups...\n\nPlease wait...", { parse_mode: "HTML" });
+  await ctx.editMessageText("⏳ <b>Fetching pending requests for all admin groups...</b>\n\nPlease wait...", { parse_mode: "HTML" });
 
   const list = await getGroupPendingList(String(userId));
 
@@ -2864,7 +2854,7 @@ bot.callbackQuery("pending_list", async (ctx) => {
 
   if (!pendingOnly.length) {
     await ctx.editMessageText(
-      "📋 Pending List\n\nNo pending requests found in any group.",
+      "📋 <b>Pending List</b>\n\nNo pending requests found in any group.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -2883,7 +2873,7 @@ bot.callbackQuery("pending_list", async (ctx) => {
   });
 
   await ctx.editMessageText(
-    `📋 Pending List\n\n` +
+    `📋 <b>Pending List</b>\n\n` +
     `📊 Groups with pending: ${pendingOnly.length}\n` +
     `⏳ Total Pending: ${pendingOnly.reduce((s, g) => s + g.pendingCount, 0)}\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
@@ -2902,7 +2892,7 @@ bot.callbackQuery(/^pl_tog_(\d+)$/, async (ctx) => {
   if (state.pendingListData.selectedIndices.has(idx)) state.pendingListData.selectedIndices.delete(idx);
   else state.pendingListData.selectedIndices.add(idx);
   await ctx.editMessageText(
-    `📋 Pending List\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n${state.pendingListData.selectedIndices.size || "None"} selected`,
+    `📋 <b>Pending List</b>\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n<i>${state.pendingListData.selectedIndices.size || "None"} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildPendingListKeyboard(state) }
   );
 });
@@ -2914,7 +2904,7 @@ bot.callbackQuery("pl_prev_page", async (ctx) => {
   if (!state?.pendingListData) return;
   if ((state.pendingListData.page || 0) > 0) state.pendingListData.page = (state.pendingListData.page || 0) - 1;
   await ctx.editMessageText(
-    `📋 Pending List\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n${state.pendingListData.selectedIndices?.size || "None"} selected`,
+    `📋 <b>Pending List</b>\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n<i>${state.pendingListData.selectedIndices?.size || "None"} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildPendingListKeyboard(state) }
   );
 });
@@ -2927,7 +2917,7 @@ bot.callbackQuery("pl_next_page", async (ctx) => {
   const totalPages = Math.ceil(state.pendingListData.allPending.length / PL_PAGE_SIZE);
   if ((state.pendingListData.page || 0) < totalPages - 1) state.pendingListData.page = (state.pendingListData.page || 0) + 1;
   await ctx.editMessageText(
-    `📋 Pending List\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n${state.pendingListData.selectedIndices?.size || "None"} selected`,
+    `📋 <b>Pending List</b>\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n<i>${state.pendingListData.selectedIndices?.size || "None"} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildPendingListKeyboard(state) }
   );
 });
@@ -2943,7 +2933,7 @@ bot.callbackQuery("pl_select_all", async (ctx) => {
   if (!state?.pendingListData?.selectedIndices) return;
   for (let i = 0; i < state.pendingListData.allPending.length; i++) state.pendingListData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `📋 Pending List\n\n✅ All ${state.pendingListData.allPending.length} groups selected.`,
+    `📋 <b>Pending List</b>\n\n✅ All <b>${state.pendingListData.allPending.length}</b> groups selected.`,
     { parse_mode: "HTML", reply_markup: buildPendingListKeyboard(state) }
   );
 });
@@ -2955,7 +2945,7 @@ bot.callbackQuery("pl_clear_all", async (ctx) => {
   if (!state?.pendingListData?.selectedIndices) return;
   state.pendingListData.selectedIndices.clear();
   await ctx.editMessageText(
-    `📋 Pending List\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\nNone selected`,
+    `📋 <b>Pending List</b>\n\n📊 Groups with pending: ${state.pendingListData.allPending.length}\n\n📌 Select groups to show copy-format pending list:\n<i>None selected</i>`,
     { parse_mode: "HTML", reply_markup: buildPendingListKeyboard(state) }
   );
 });
@@ -3008,7 +2998,7 @@ bot.callbackQuery("pl_similar", async (ctx) => {
   kb.text("🔙 Back", "pending_list").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to see pending count:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to see pending count:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -3071,34 +3061,34 @@ bot.callbackQuery("pl_all", async (ctx) => {
 bot.command("admin", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   await ctx.reply(
-    "🛡️ Admin Panel\n\n" +
-    "📋 Access Commands:\n" +
-    "🟢 /access on — Enable subscription mode\n" +
-    "🔴 /access off — Disable subscription mode\n" +
-    "✅ /access [id] [days] — Give user access\n" +
-    "❌ /revoke [id] — Revoke user access\n" +
-    "🚫 /ban [id] — Ban a user\n" +
-    "✅ /unban [id] — Unban a user\n" +
-    "📢 /broadcast [message] — Send message to all users\n" +
-    "📊 /status — View bot statistics\n" +
-    "📱 /sessions — WhatsApp sessions list\n" +
-    "🧠 /memory — Server RAM usage\n" +
-    "🧽 /cleanram — Force-clear all caches and free RAM now\n" +
-    "🧹 /cleansessions [num] — Delete session by number\n\n" +
-    "🎁 Refer Mode:\n" +
-    "🟢 /refermode on — Enable refer mode (24h trial + referrals)\n" +
-    "🔴 /refermode off — Disable refer mode (back to normal)\n\n" +
-    "🤖 Auto Chat Controls:\n" +
-    "🟢 /autochat on — Auto Chat ON for all users\n" +
-    "🔴 /autochat off — Auto Chat OFF for all users\n" +
-    "✅ /accessautochat [id] — Grant unlimited Auto Chat access\n" +
-    "✅ /accessautochat [id] [days] — Grant time-limited Auto Chat access\n" +
-    "❌ /revokeautochat [id] — Revoke Auto Chat access\n\n" +
-    "🎫 Redeem Codes:\n" +
-    "➕ /redeem CODE DAYS MAXUSERS — Create a redeem code\n" +
-    "📊 /redeem CODE — View code stats (who redeemed, remaining uses)\n" +
-    "📋 /redeem list — List all codes with live status\n" +
-    "🗑️ /redeem delete CODE — Delete a redeem code",
+    "🛡️ <b>Admin Panel</b>\n\n" +
+    "📋 <b>Access Commands:</b>\n" +
+    "🟢 <code>/access on</code> — Enable subscription mode\n" +
+    "🔴 <code>/access off</code> — Disable subscription mode\n" +
+    "✅ <code>/access [id] [days]</code> — Give user access\n" +
+    "❌ <code>/revoke [id]</code> — Revoke user access\n" +
+    "🚫 <code>/ban [id]</code> — Ban a user\n" +
+    "✅ <code>/unban [id]</code> — Unban a user\n" +
+    "📢 <code>/broadcast [message]</code> — Send message to all users\n" +
+    "📊 <code>/status</code> — View bot statistics\n" +
+    "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
+    "🧠 <code>/memory</code> — Server RAM usage\n" +
+    "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
+    "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
+    "🎁 <b>Refer Mode:</b>\n" +
+    "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
+    "🔴 <code>/refermode off</code> — Disable refer mode (back to normal)\n\n" +
+    "🤖 <b>Auto Chat Controls:</b>\n" +
+    "🟢 <code>/autochat on</code> — Auto Chat ON for all users\n" +
+    "🔴 <code>/autochat off</code> — Auto Chat OFF for all users\n" +
+    "✅ <code>/accessautochat [id]</code> — Grant unlimited Auto Chat access\n" +
+    "✅ <code>/accessautochat [id] [days]</code> — Grant time-limited Auto Chat access\n" +
+    "❌ <code>/revokeautochat [id]</code> — Revoke Auto Chat access\n\n" +
+    "🎫 <b>Redeem Codes:</b>\n" +
+    "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
+    "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
+    "📋 <code>/redeem list</code> — List all codes with live status\n" +
+    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
 
     { parse_mode: "HTML" }
   );
@@ -3121,16 +3111,16 @@ bot.command("refermode", async (ctx) => {
   if (arg !== "on" && arg !== "off") {
     const data = await loadBotData();
     await ctx.reply(
-      `🎁 Refer Mode: ${data.referMode ? "ON 🟢" : "OFF 🔴"}\n\n` +
-      `❓ Usage:\n` +
-      `/refermode on — Enable 24h trial + referral system\n` +
-      `/refermode off — Disable referrals (free for all again)\n\n` +
-      `How it works when ON:\n` +
+      `🎁 <b>Refer Mode: ${data.referMode ? "ON 🟢" : "OFF 🔴"}</b>\n\n` +
+      `❓ <b>Usage:</b>\n` +
+      `<code>/refermode on</code> — Enable 24h trial + referral system\n` +
+      `<code>/refermode off</code> — Disable referrals (free for all again)\n\n` +
+      `<b>How it works when ON:</b>\n` +
       `• New users get a 24-hour free trial after joining the channel\n` +
       `• Auto Chat is still admin-controlled (unchanged)\n` +
       `• When trial ends, users must refer friends (1 referral = 1 day) or buy premium from ${OWNER_USERNAME}\n` +
       `• Each user can only be referred once (stored in MongoDB)\n` +
-      `• Users you grant access to with /access [id] [days] do NOT need to refer`,
+      `• Users you grant access to with <code>/access [id] [days]</code> do NOT need to refer`,
       { parse_mode: "HTML" }
     );
     return;
@@ -3138,16 +3128,16 @@ bot.command("refermode", async (ctx) => {
   await setReferMode(arg === "on");
   if (arg === "on") {
     await ctx.reply(
-      `🎁 Refer Mode: ON 🟢\n\n` +
+      `🎁 <b>Refer Mode: ON 🟢</b>\n\n` +
       `✅ New users will now get a 24-hour free trial (all features except Auto Chat).\n` +
       `✅ When the trial ends, users will be asked to refer friends (1 referral = 1 day) or buy premium from ${OWNER_USERNAME}.\n\n` +
-      `💡 Users you grant access to with /access [id] [days] are exempt from referral requirements.`,
+      `💡 Users you grant access to with <code>/access [id] [days]</code> are exempt from referral requirements.`,
       { parse_mode: "HTML" }
     );
   } else {
     await ctx.reply(
-      `🎁 Refer Mode: OFF 🔴\n\n` +
-      `✅ Referral system disabled. Bot behaves like before — all users can use every feature for free (subject to /access on subscription mode if enabled).\n\n` +
+      `🎁 <b>Refer Mode: OFF 🔴</b>\n\n` +
+      `✅ Referral system disabled. Bot behaves like before — all users can use every feature for free (subject to <code>/access on</code> subscription mode if enabled).\n\n` +
       `📦 Existing trial / referral records are kept in the database; if you turn refer mode back on, leftover days will still count.`,
       { parse_mode: "HTML" }
     );
@@ -3158,7 +3148,7 @@ bot.command("autochat", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
   if (arg !== "on" && arg !== "off") {
-    await ctx.reply("❓ Usage:\n/autochat on — Sabhi users ke liye ON\n/autochat off — Sabhi users ke liye OFF", { parse_mode: "HTML" });
+    await ctx.reply("❓ Usage:\n<code>/autochat on</code> — Sabhi users ke liye ON\n<code>/autochat off</code> — Sabhi users ke liye OFF", { parse_mode: "HTML" });
     return;
   }
   const data = await loadBotData();
@@ -3167,8 +3157,8 @@ bot.command("autochat", async (ctx) => {
   autoChatGlobalEnabled = data.autoChatEnabled;
   await ctx.reply(
     arg === "on"
-      ? "✅ Auto Chat: ON\n\n🤖 Sabhi users ko Auto Chat button dikhega."
-      : "🔴 Auto Chat: OFF\n\n🚫 Kisi bhi user ko Auto Chat button nahi dikhega.\n💡 Specific user ke liye: /accessautochat [user_id]",
+      ? "✅ <b>Auto Chat: ON</b>\n\n🤖 Sabhi users ko Auto Chat button dikhega." 
+      : "🔴 <b>Auto Chat: OFF</b>\n\n🚫 Kisi bhi user ko Auto Chat button nahi dikhega.\n💡 Specific user ke liye: <code>/accessautochat [user_id]</code>",
     { parse_mode: "HTML" }
   );
 });
@@ -3181,12 +3171,12 @@ bot.command("accessautochat", async (ctx) => {
 
   if (isNaN(id)) {
     await ctx.reply(
-      "❓ Usage:\n\n" +
-      "/accessautochat [user_id] — Unlimited Auto Chat access\n" +
-      "/accessautochat [user_id] [days] — Time-limited Auto Chat access\n\n" +
-      "Examples:\n" +
-      "/accessautochat 123456789 — Unlimited\n" +
-      "/accessautochat 123456789 7 — 7 days",
+      "❓ <b>Usage:</b>\n\n" +
+      "<code>/accessautochat [user_id]</code> — Unlimited Auto Chat access\n" +
+      "<code>/accessautochat [user_id] [days]</code> — Time-limited Auto Chat access\n\n" +
+      "<b>Examples:</b>\n" +
+      "<code>/accessautochat 123456789</code> — Unlimited\n" +
+      "<code>/accessautochat 123456789 7</code> — 7 days",
       { parse_mode: "HTML" }
     );
     return;
@@ -3215,13 +3205,13 @@ bot.command("accessautochat", async (ctx) => {
   autoChatAccessSet.add(id);
 
   const durationText = expiresAt
-    ? `⏳ Duration: ${days} day${days === 1 ? "" : "s"}\n📅 Expires: ${new Date(expiresAt).toUTCString()}`
-    : "♾️ Duration: Unlimited";
+    ? `⏳ Duration: <b>${days} day${days === 1 ? "" : "s"}</b>\n📅 Expires: <b>${new Date(expiresAt).toUTCString()}</b>`
+    : "♾️ Duration: <b>Unlimited</b>";
 
   // Confirm to admin
   await ctx.reply(
-    `✅ Auto Chat Access Granted!\n\n` +
-    `👤 User: ${id}\n` +
+    `✅ <b>Auto Chat Access Granted!</b>\n\n` +
+    `👤 User: <code>${id}</code>\n` +
     `${durationText}\n\n` +
     `🤖 This user can now access the Auto Chat feature.`,
     { parse_mode: "HTML" }
@@ -3231,13 +3221,13 @@ bot.command("accessautochat", async (ctx) => {
   try {
     await bot.api.sendMessage(
       id,
-      "🎉 Auto Chat Feature Activated!\n\n" +
-      "The admin has granted you access to the Auto Chat feature.\n\n" +
+      "🎉 <b>Auto Chat Feature Activated!</b>\n\n" +
+      "The admin has granted you access to the <b>Auto Chat</b> feature.\n\n" +
       `${durationText}\n\n` +
       "You can now use:\n" +
-      "• 👥 Chat In Group — Auto send messages in WhatsApp groups\n" +
-      "• 👫 Chat Friend — Auto conversation between two accounts\n\n" +
-      "Open the bot menu and tap 🤖 Auto Chat to get started!",
+      "• 👥 <b>Chat In Group</b> — Auto send messages in WhatsApp groups\n" +
+      "• 👫 <b>Chat Friend</b> — Auto conversation between two accounts\n\n" +
+      "Open the bot menu and tap <b>🤖 Auto Chat</b> to get started!",
       { parse_mode: "HTML" }
     );
   } catch {
@@ -3248,7 +3238,7 @@ bot.command("accessautochat", async (ctx) => {
 bot.command("revokeautochat", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const id = parseInt((ctx.message?.text || "").split(/\s+/)[1]);
-  if (isNaN(id)) { await ctx.reply("❓ Usage: /revokeautochat [user_id]", { parse_mode: "HTML" }); return; }
+  if (isNaN(id)) { await ctx.reply("❓ Usage: <code>/revokeautochat [user_id]</code>", { parse_mode: "HTML" }); return; }
   const data = await loadBotData();
   data.autoChatAccessList = data.autoChatAccessList.filter((u) => u !== id);
   delete data.autoChatAccessExpiry[String(id)];
@@ -3263,15 +3253,15 @@ bot.command("revokeautochat", async (ctx) => {
     cigSession.cancelled = true;
     try {
       await bot.api.editMessageText(cigSession.chatId, cigSession.msgId,
-        "🚫 Auto Chat Stopped by Admin!\n\n" +
+        "🚫 <b>Auto Chat Stopped by Admin!</b>\n\n" +
         "Your Auto Chat access has been revoked by the admin.\n" +
-        `📤 Sent: ${cigSession.sent}`,
+        `📤 Sent: <b>${cigSession.sent}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
     try {
       await bot.api.sendMessage(id,
-        "🚫 Auto Chat Access Revoked!\n\n" +
+        "🚫 <b>Auto Chat Access Revoked!</b>\n\n" +
         "The admin has revoked your Auto Chat access.\n" +
         "Your running Chat In Group session has been stopped immediately.",
         { parse_mode: "HTML" }
@@ -3286,15 +3276,15 @@ bot.command("revokeautochat", async (ctx) => {
     acfSession.cancelled = true;
     try {
       await bot.api.editMessageText(acfSession.chatId, acfSession.msgId,
-        "🚫 Chat Friend Stopped by Admin!\n\n" +
+        "🚫 <b>Chat Friend Stopped by Admin!</b>\n\n" +
         "Your Auto Chat access has been revoked by the admin.\n" +
-        `📤 Sent: ${acfSession.sent}`,
+        `📤 Sent: <b>${acfSession.sent}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
     try {
       await bot.api.sendMessage(id,
-        "🚫 Auto Chat Access Revoked!\n\n" +
+        "🚫 <b>Auto Chat Access Revoked!</b>\n\n" +
         "The admin has revoked your Auto Chat access.\n" +
         "Your running Chat Friend session has been stopped immediately.",
         { parse_mode: "HTML" }
@@ -3305,7 +3295,7 @@ bot.command("revokeautochat", async (ctx) => {
   const stopped = (cigSession?.running === false && cigSession?.cancelled) || (acfSession?.running === false && acfSession?.cancelled)
     ? "\n⏹️ Running session was stopped immediately." : "";
   await ctx.reply(
-    `❌ Auto Chat Access Revoked!\n\n👤 User: ${id}\n🚫 This user will no longer see the Auto Chat button.${stopped}`,
+    `❌ <b>Auto Chat Access Revoked!</b>\n\n👤 User: <code>${id}</code>\n🚫 This user will no longer see the Auto Chat button.${stopped}`,
     { parse_mode: "HTML" }
   );
 });
@@ -3317,12 +3307,12 @@ bot.command("access", async (ctx) => {
 
   if (args[0] === "on") {
     const data = await loadBotData(); data.subscriptionMode = true; await saveBotData(data);
-    await ctx.reply(`🔒 Subscription Mode: ON\n\nOnly users with access can use the bot.\n👤 Owner: ${OWNER_USERNAME}`, { parse_mode: "HTML" });
+    await ctx.reply(`🔒 <b>Subscription Mode: ON</b>\n\nOnly users with access can use the bot.\n👤 Owner: <b>${OWNER_USERNAME}</b>`, { parse_mode: "HTML" });
     return;
   }
   if (args[0] === "off") {
     const data = await loadBotData(); data.subscriptionMode = false; await saveBotData(data);
-    await ctx.reply("🔓 Subscription Mode: OFF\n\nAll users can use the bot for free.", { parse_mode: "HTML" });
+    await ctx.reply("🔓 <b>Subscription Mode: OFF</b>\n\nAll users can use the bot for free.", { parse_mode: "HTML" });
     return;
   }
   if (args.length >= 2) {
@@ -3332,7 +3322,7 @@ bot.command("access", async (ctx) => {
     data.accessList[String(targetId)] = { expiresAt: Date.now() + days * 86400000, grantedBy: ctx.from!.id };
     await saveBotData(data);
     const exp = new Date(data.accessList[String(targetId)].expiresAt).toUTCString();
-    await ctx.reply(`✅ Access Granted!\n\n👤 User: ${targetId}\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
+    await ctx.reply(`✅ <b>Access Granted!</b>\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
 
     // Notify the user that admin has granted them access. Lists every
     // feature that's unlocked so they know exactly what they got. Auto
@@ -3341,29 +3331,29 @@ bot.command("access", async (ctx) => {
     // /autochat on).
     const autoChatOn = data.autoChatEnabled === true
       || (Array.isArray(data.autoChatAccessList) && data.autoChatAccessList.includes(targetId));
-    const features = [\
-      "• ✅ Create Groups",\
-      "• ✅ Join Groups",\
-      "• ✅ CTC (Number) Checker",\
-      "• ✅ Get Group Link",\
-      "• ✅ Leave Group",\
-      "• ✅ Remove Members",\
-      "• ✅ Make Admin",\
-      "• ✅ Pending Approvals",\
-      "• ✅ Pending Members List",\
-      "• ✅ Add Members",\
-      "• ✅ Edit Group Settings",\
-      autoChatOn\
-        ? "• ✅ Auto Chat (already enabled for you)"\
-        : "• ❌ Auto Chat (admin permission required separately — contact owner)",\
+    const features = [
+      "• ✅ Create Groups",
+      "• ✅ Join Groups",
+      "• ✅ CTC (Number) Checker",
+      "• ✅ Get Group Link",
+      "• ✅ Leave Group",
+      "• ✅ Remove Members",
+      "• ✅ Make Admin",
+      "• ✅ Pending Approvals",
+      "• ✅ Pending Members List",
+      "• ✅ Add Members",
+      "• ✅ Edit Group Settings",
+      autoChatOn
+        ? "• ✅ Auto Chat (already enabled for you)"
+        : "• ❌ Auto Chat (admin permission required separately — contact owner)",
     ].join("\n");
     bot.api.sendMessage(
       targetId,
-      `🎉 Premium Access Granted!\n\n` +
+      `🎉 <b>Premium Access Granted!</b>\n\n` +
       `Admin has unlocked premium access on your account.\n\n` +
-      `📅 Duration: ${days} day${days === 1 ? "" : "s"}\n` +
-      `⏰ Expires (UTC): ${exp}\n\n` +
-      `🔓 Features unlocked:\n${features}\n\n` +
+      `📅 <b>Duration:</b> ${days} day${days === 1 ? "" : "s"}\n` +
+      `⏰ <b>Expires (UTC):</b> ${exp}\n\n` +
+      `🔓 <b>Features unlocked:</b>\n${features}\n\n` +
       `💡 You don't need to refer anyone — refer mode does not apply to you while this access is active.\n\n` +
       `Send /start to open the menu.`,
       { parse_mode: "HTML" }
@@ -3391,14 +3381,14 @@ bot.command("revoke", async (ctx) => {
     cigSession.cancelled = true;
     try {
       await bot.api.editMessageText(cigSession.chatId, cigSession.msgId,
-        "🚫 Auto Chat Stopped!\n\nYour bot access has been revoked by the admin.\n" +
-        `📤 Sent: ${cigSession.sent}`,
+        "🚫 <b>Auto Chat Stopped!</b>\n\nYour bot access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${cigSession.sent}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
     try {
       await bot.api.sendMessage(id,
-        "🚫 Bot Access Revoked!\n\n" +
+        "🚫 <b>Bot Access Revoked!</b>\n\n" +
         "The admin has revoked your access. All running Auto Chat sessions have been stopped.",
         { parse_mode: "HTML" }
       );
@@ -3412,21 +3402,21 @@ bot.command("revoke", async (ctx) => {
     acfSession.cancelled = true;
     try {
       await bot.api.editMessageText(acfSession.chatId, acfSession.msgId,
-        "🚫 Chat Friend Stopped!\n\nYour bot access has been revoked by the admin.\n" +
-        `📤 Sent: ${acfSession.sent}`,
+        "🚫 <b>Chat Friend Stopped!</b>\n\nYour bot access has been revoked by the admin.\n" +
+        `📤 Sent: <b>${acfSession.sent}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
     try {
       await bot.api.sendMessage(id,
-        "🚫 Bot Access Revoked!\n\n" +
+        "🚫 <b>Bot Access Revoked!</b>\n\n" +
         "The admin has revoked your access. All running Auto Chat sessions have been stopped.",
         { parse_mode: "HTML" }
       );
     } catch {}
   }
 
-  await ctx.reply(`❌ Access Revoked!\n\n👤 User: ${id}`, { parse_mode: "HTML" });
+  await ctx.reply(`❌ <b>Access Revoked!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
 // ─── /redeem ─────────────────────────────────────────────────────────────────
@@ -3448,19 +3438,19 @@ bot.command("redeem", async (ctx) => {
     if (args[0]?.toLowerCase() === "list") {
       const codes = await listAllRedeemCodes();
       if (!codes.length) {
-        await ctx.reply("📋 No redeem codes found.\n\nCreate one with:\n/redeem CODE DAYS MAXUSERS", { parse_mode: "HTML" });
+        await ctx.reply("📋 <b>No redeem codes found.</b>\n\nCreate one with:\n<code>/redeem CODE DAYS MAXUSERS</code>", { parse_mode: "HTML" });
         return;
       }
       const lines = codes.map((c) => {
         const remaining = c.maxUsers - c.usedBy.length;
         const status = remaining <= 0 ? "🔴 Exhausted" : "🟢 Active";
         return (
-          `${status} ${c.code}\n` +
+          `${status} <code>${c.code}</code>\n` +
           `   📅 ${c.days} day${c.days === 1 ? "" : "s"} | 👥 ${c.usedBy.length}/${c.maxUsers} used | ${remaining} remaining`
         );
       });
       await ctx.reply(
-        `📋 All Redeem Codes (${codes.length})\n\n${lines.join("\n\n")}`,
+        `📋 <b>All Redeem Codes (${codes.length})</b>\n\n${lines.join("\n\n")}`,
         { parse_mode: "HTML" }
       );
       return;
@@ -3470,9 +3460,9 @@ bot.command("redeem", async (ctx) => {
     if (args[0]?.toLowerCase() === "delete" && args[1]) {
       const result = await deleteRedeemCode(args[1]);
       if (result.success) {
-        await ctx.reply(`🗑️ Code Deleted!\n\n${args[1].toUpperCase()} has been removed.`, { parse_mode: "HTML" });
+        await ctx.reply(`🗑️ <b>Code Deleted!</b>\n\n<code>${args[1].toUpperCase()}</code> has been removed.`, { parse_mode: "HTML" });
       } else {
-        await ctx.reply(`⚠️ Code ${args[1].toUpperCase()} not found.`, { parse_mode: "HTML" });
+        await ctx.reply(`⚠️ Code <code>${args[1].toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
       }
       return;
     }
@@ -3489,15 +3479,15 @@ bot.command("redeem", async (ctx) => {
       const result = await createRedeemCode(code, days, maxUsers, userId);
       if (result.success) {
         await ctx.reply(
-          `✅ Redeem Code Created!\n\n` +
-          `🎫 Code: ${code}\n` +
-          `📅 Access: ${days} day${days === 1 ? "" : "s"}\n` +
-          `👥 Max Users: ${maxUsers}\n\n` +
-          `Users can redeem it with:\n/redeem ${code}`,
+          `✅ <b>Redeem Code Created!</b>\n\n` +
+          `🎫 <b>Code:</b> <code>${code}</code>\n` +
+          `📅 <b>Access:</b> ${days} day${days === 1 ? "" : "s"}\n` +
+          `👥 <b>Max Users:</b> ${maxUsers}\n\n` +
+          `Users can redeem it with:\n<code>/redeem ${code}</code>`,
           { parse_mode: "HTML" }
         );
       } else {
-        await ctx.reply(`⚠️ Code ${code} already exists. Delete it first with /redeem delete ${code}.`, { parse_mode: "HTML" });
+        await ctx.reply(`⚠️ Code <code>${code}</code> already exists. Delete it first with <code>/redeem delete ${code}</code>.`, { parse_mode: "HTML" });
       }
       return;
     }
@@ -3506,22 +3496,22 @@ bot.command("redeem", async (ctx) => {
     if (args.length === 1) {
       const info = await getRedeemCodeInfo(args[0]);
       if (!info) {
-        await ctx.reply(`⚠️ Code ${args[0].toUpperCase()} not found.`, { parse_mode: "HTML" });
+        await ctx.reply(`⚠️ Code <code>${args[0].toUpperCase()}</code> not found.`, { parse_mode: "HTML" });
         return;
       }
       const remaining = info.maxUsers - info.usedBy.length;
       const status = remaining <= 0 ? "🔴 Exhausted" : "🟢 Active";
       const redeemerList = info.usedBy.length
-        ? info.usedBy.map((id) => `• ${id}`).join("\n")
+        ? info.usedBy.map((id) => `• <code>${id}</code>`).join("\n")
         : "None yet";
       await ctx.reply(
-        `📊 Redeem Code Stats\n\n` +
-        `🎫 Code: ${info.code}\n` +
+        `📊 <b>Redeem Code Stats</b>\n\n` +
+        `🎫 <b>Code:</b> <code>${info.code}</code>\n` +
         `${status}\n` +
-        `📅 Access per use: ${info.days} day${info.days === 1 ? "" : "s"}\n` +
-        `👥 Used: ${info.usedBy.length}/${info.maxUsers}\n` +
-        `🔢 Remaining: ${remaining}\n\n` +
-        `👤 Redeemed by:\n${redeemerList}`,
+        `📅 <b>Access per use:</b> ${info.days} day${info.days === 1 ? "" : "s"}\n` +
+        `👥 <b>Used:</b> ${info.usedBy.length}/${info.maxUsers}\n` +
+        `🔢 <b>Remaining:</b> ${remaining}\n\n` +
+        `👤 <b>Redeemed by:</b>\n${redeemerList}`,
         { parse_mode: "HTML" }
       );
       return;
@@ -3529,11 +3519,11 @@ bot.command("redeem", async (ctx) => {
 
     // No valid admin usage matched
     await ctx.reply(
-      "❓ Admin Redeem Usage:\n\n" +
-      "➕ /redeem CODE DAYS MAXUSERS — Create a code\n" +
-      "📊 /redeem CODE — View code stats\n" +
-      "📋 /redeem list — List all codes\n" +
-      "🗑️ /redeem delete CODE — Delete a code",
+      "❓ <b>Admin Redeem Usage:</b>\n\n" +
+      "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a code\n" +
+      "📊 <code>/redeem CODE</code> — View code stats\n" +
+      "📋 <code>/redeem list</code> — List all codes\n" +
+      "🗑️ <code>/redeem delete CODE</code> — Delete a code",
       { parse_mode: "HTML" }
     );
     return;
@@ -3541,7 +3531,7 @@ bot.command("redeem", async (ctx) => {
 
   // ── User flow ───────────────────────────────────────────────────────────
   if (!args.length) {
-    await ctx.reply("🎫 How to redeem a code:\n\n/redeem YOUR_CODE", { parse_mode: "HTML" });
+    await ctx.reply("🎫 <b>How to redeem a code:</b>\n\n<code>/redeem YOUR_CODE</code>", { parse_mode: "HTML" });
     return;
   }
 
@@ -3551,9 +3541,9 @@ bot.command("redeem", async (ctx) => {
     const exp = new Date(result.expiresAt!).toUTCString();
     // Grant access notification
     await ctx.reply(
-      `🎉 Code Redeemed Successfully!\n\n` +
-      `✅ ${result.days} day${result.days === 1 ? "" : "s"} of premium access has been added to your account.\n` +
-      `⏰ Expires (UTC): ${exp}\n\n` +
+      `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
+      `✅ <b>${result.days} day${result.days === 1 ? "" : "s"}</b> of premium access has been added to your account.\n` +
+      `⏰ <b>Expires (UTC):</b> ${exp}\n\n` +
       `Send /start to open the menu and start using the bot!`,
       { parse_mode: "HTML" }
     );
@@ -3561,11 +3551,11 @@ bot.command("redeem", async (ctx) => {
   }
 
   if (result.reason === "not_found") {
-    await ctx.reply("❌ Invalid code. Please check and try again.", { parse_mode: "HTML" });
+    await ctx.reply("❌ <b>Invalid code.</b> Please check and try again.", { parse_mode: "HTML" });
   } else if (result.reason === "already_redeemed") {
-    await ctx.reply("⚠️ Already Redeemed. You have already used this code.", { parse_mode: "HTML" });
+    await ctx.reply("⚠️ <b>Already Redeemed.</b> You have already used this code.", { parse_mode: "HTML" });
   } else if (result.reason === "max_reached") {
-    await ctx.reply("🔴 Code Expired. This code has reached its maximum number of uses.", { parse_mode: "HTML" });
+    await ctx.reply("🔴 <b>Code Expired.</b> This code has reached its maximum number of uses.", { parse_mode: "HTML" });
   }
 });
 
@@ -3575,7 +3565,7 @@ bot.command("ban", async (ctx) => {
   if (isNaN(id)) { await ctx.reply("❓ Usage: /ban [user_id]"); return; }
   const data = await loadBotData();
   if (!data.bannedUsers.includes(id)) { data.bannedUsers.push(id); await saveBotData(data); }
-  await ctx.reply(`🚫 User Banned!\n\n👤 User: ${id}`, { parse_mode: "HTML" });
+  await ctx.reply(`🚫 <b>User Banned!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
 bot.command("unban", async (ctx) => {
@@ -3585,7 +3575,7 @@ bot.command("unban", async (ctx) => {
   const data = await loadBotData();
   data.bannedUsers = data.bannedUsers.filter((u) => u !== id);
   await saveBotData(data);
-  await ctx.reply(`✅ User Unbanned!\n\n👤 User: ${id}`, { parse_mode: "HTML" });
+  await ctx.reply(`✅ <b>User Unbanned!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
 bot.command("broadcast", async (ctx) => {
@@ -3596,7 +3586,7 @@ bot.command("broadcast", async (ctx) => {
   const message = rawText.replace(/^\/broadcast(?:@\w+)?\s*/i, "").trim();
   if (!message) {
     await ctx.reply(
-      "❓ Usage:\n/broadcast Hello guys\n\nSend a message after /broadcast to deliver it to all users.",
+      "❓ <b>Usage:</b>\n<code>/broadcast Hello guys</code>\n\nSend a message after /broadcast to deliver it to all users.",
       { parse_mode: "HTML" }
     );
     return;
@@ -3616,11 +3606,10 @@ bot.command("broadcast", async (ctx) => {
     .text("❌ Cancel", "broadcast_cancel");
 
   await ctx.reply(
-    "📢 Broadcast Confirmation\n\n" +
-    `👥 Total Users: ${users.length}\n\n` +
-    "Message Preview:\n" +
-    `${preview}
-\n\n` +
+    "📢 <b>Broadcast Confirmation</b>\n\n" +
+    `👥 <b>Total Users:</b> ${users.length}\n\n` +
+    "<b>Message Preview:</b>\n" +
+    `<blockquote>${preview}</blockquote>\n\n` +
     "Do you want to send this message to all users?",
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -3634,9 +3623,9 @@ bot.command("status", async (ctx) => {
   for (const [uid, info] of Object.entries(data.accessList)) {
     const rem = info.expiresAt - now;
     const dLeft = Math.ceil(rem / 86400000);
-    accessText += rem > 0 ? `  ✅ ${uid} — ${dLeft} days\n` : `  ⚠️ ${uid} — EXPIRED\n`;
+    accessText += rem > 0 ? `  ✅ <code>${uid}</code> — ${dLeft} days\n` : `  ⚠️ <code>${uid}</code> — EXPIRED\n`;
   }
-  const bannedText = data.bannedUsers.length ? data.bannedUsers.map((id) => `  🚫 ${id}`).join("\n") + "\n" : "  None\n";
+  const bannedText = data.bannedUsers.length ? data.bannedUsers.map((id) => `  🚫 <code>${id}</code>`).join("\n") + "\n" : "  None\n";
 
   const autoChatEnabled = data.autoChatEnabled ?? true;
   const autoChatAccessList = data.autoChatAccessList ?? [];
@@ -3644,44 +3633,45 @@ bot.command("status", async (ctx) => {
   let autoChatAccessText = autoChatAccessList.length
     ? autoChatAccessList.map((id) => {
         const exp = autoChatExpiry[String(id)];
-        if (!exp) return `  🤖 ${id} — ♾️ Unlimited`;
+        if (!exp) return `  🤖 <code>${id}</code> — ♾️ Unlimited`;
         const expired = Date.now() > exp;
         const label = expired
           ? `❌ Expired`
           : `✅ Expires ${new Date(exp).toUTCString()}`;
-        return `  🤖 ${id} — ${label}`;
+        return `  🤖 <code>${id}</code> — ${label}`;
       }).join("\n") + "\n"
     : "  None\n";
 
   await ctx.reply(
-    "📊 Bot Status\n\n" +
-    `🔒 Subscription Mode: ${data.subscriptionMode ? "ON 🟢" : "OFF 🔴"}\n` +
-    `🤖 Auto Chat: ${autoChatEnabled ? "ON 🟢 (All users)" : "OFF 🔴 (Selected users only)"}\n` +
-    `👑 Owner: ${OWNER_USERNAME}\n` +
-    `👥 Total Users: ${data.totalUsers.length}\n\n` +
-    `✅ Access List (${Object.keys(data.accessList).length}):\n${accessText || "  None\n"}\n` +
-    `🤖 Auto Chat Access (${autoChatAccessList.length}):\n${autoChatAccessText}\n` +
-    `🚫 Banned (${data.bannedUsers.length}):\n${bannedText}`,
+    "📊 <b>Bot Status</b>\n\n" +
+    `🔒 <b>Subscription Mode:</b> ${data.subscriptionMode ? "ON 🟢" : "OFF 🔴"}\n` +
+    `🤖 <b>Auto Chat:</b> ${autoChatEnabled ? "ON 🟢 (All users)" : "OFF 🔴 (Selected users only)"}\n` +
+    `👑 <b>Owner:</b> ${OWNER_USERNAME}\n` +
+    `👥 <b>Total Users:</b> ${data.totalUsers.length}\n\n` +
+    `✅ <b>Access List (${Object.keys(data.accessList).length}):</b>\n${accessText || "  None\n"}\n` +
+    `🤖 <b>Auto Chat Access (${autoChatAccessList.length}):</b>\n${autoChatAccessText}\n` +
+    `🚫 <b>Banned (${data.bannedUsers.length}):</b>\n${bannedText}`,
     { parse_mode: "HTML" }
   );
 });
 
+
 bot.command("sessions", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
 
-  await ctx.reply("⏳ Fetching session info...", { parse_mode: "HTML" });
+  await ctx.reply("⏳ <b>Fetching session info...</b>", { parse_mode: "HTML" });
 
   try {
     const stats = await getSessionStats();
     const activeIds = getActiveSessionUserIds();
 
     if (!stats.length) {
-      await ctx.reply("📭 No WhatsApp sessions in MongoDB.", { parse_mode: "HTML" });
+      await ctx.reply("📭 <b>No WhatsApp sessions in MongoDB.</b>", { parse_mode: "HTML" });
       return;
     }
 
     const nums = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
-    let text = `📱 WhatsApp Sessions (${stats.length})\n\n`;
+    let text = `📱 <b>WhatsApp Sessions (${stats.length})</b>\n\n`;
 
     for (let i = 0; i < stats.length; i++) {
       const s = stats[i];
@@ -3689,7 +3679,7 @@ bot.command("sessions", async (ctx) => {
       const statusIcon = isLive ? "🟢" : s.registered ? "🔴" : "⚪";
       const statusLabel = isLive ? "Live" : s.registered ? "Disconnected" : "Unpaired";
       const num = i < nums.length ? nums[i] : `[${i+1}]`;
-      text += `${num} ${statusIcon} ${esc(s.phoneNumber)}\n`;
+      text += `${num} ${statusIcon} <b>${esc(s.phoneNumber)}</b>\n`;
       text += `   Status: ${statusLabel} | Last: ${esc(s.lastSeen)}\n\n`;
     }
 
@@ -3697,8 +3687,8 @@ bot.command("sessions", async (ctx) => {
     const disconnectedCount = stats.filter(s => !activeIds.has(s.userId) && s.registered).length;
     const unpairedCount = stats.filter(s => !s.registered).length;
 
-    text += `📊 Summary: 🟢 ${liveCount} Live | 🔴 ${disconnectedCount} Off | ⚪ ${unpairedCount} Unpaired\n\n`;
-    text += `💡 /cleansessions [number] to delete a specific session`;
+    text += `📊 <b>Summary:</b> 🟢 ${liveCount} Live | 🔴 ${disconnectedCount} Off | ⚪ ${unpairedCount} Unpaired\n\n`;
+    text += `💡 <code>/cleansessions [number]</code> to delete a specific session`;
 
     await ctx.reply(text, { parse_mode: "HTML" });
   } catch (err: any) {
@@ -3714,7 +3704,7 @@ bot.command("cleansessions", async (ctx) => {
 
   // --- Delete specific session by number ---
   if (!isNaN(targetNum) && targetNum > 0) {
-    await ctx.reply(`🔍 Fetching session #${targetNum}...`, { parse_mode: "HTML" });
+    await ctx.reply(`🔍 <b>Fetching session #${targetNum}...</b>`, { parse_mode: "HTML" });
     try {
       const stats = await getSessionStats();
       if (targetNum > stats.length) {
@@ -3744,11 +3734,11 @@ bot.command("cleansessions", async (ctx) => {
       const numIcon = (targetNum - 1) < nums.length ? nums[targetNum - 1] : `#${targetNum}`;
 
       await ctx.reply(
-        `✅ Session Deleted!\n\n` +
-        `${numIcon} 📱 ${esc(session.phoneNumber)}\n` +
+        `✅ <b>Session Deleted!</b>\n\n` +
+        `${numIcon} 📱 <b>${esc(session.phoneNumber)}</b>\n` +
         `🔌 Was Live: ${wasLive ? "Yes (disconnected)" : "No"}\n` +
         `🗑 MongoDB: Cleaned\n\n` +
-        `🧠 Memory after: RSS ${rssMB} MB | Heap ${heapMB} MB`,
+        `🧠 <b>Memory after:</b> RSS ${rssMB} MB | Heap ${heapMB} MB`,
         { parse_mode: "HTML" }
       );
     } catch (err: any) {
@@ -3758,7 +3748,7 @@ bot.command("cleansessions", async (ctx) => {
   }
 
   // --- Bulk cleanup: delete stale sessions ---
-  await ctx.reply("🧹 Running bulk cleanup...\n\nDeleting sessions inactive for 7+ days...", { parse_mode: "HTML" });
+  await ctx.reply("🧹 <b>Running bulk cleanup...</b>\n\nDeleting sessions inactive for 7+ days...", { parse_mode: "HTML" });
 
   try {
     const activeIds = getActiveSessionUserIds();
@@ -3772,17 +3762,17 @@ bot.command("cleansessions", async (ctx) => {
 
     if (result.deletedSessions === 0) {
       await ctx.reply(
-        `✅ Cleanup Done!\n\nNo stale sessions found. MongoDB is clean.\n\n` +
+        `✅ <b>Cleanup Done!</b>\n\nNo stale sessions found. MongoDB is clean.\n\n` +
         `🧠 Memory: RSS ${rssMB} MB | Heap ${heapMB} MB`,
         { parse_mode: "HTML" }
       );
     } else {
       await ctx.reply(
-        `✅ Bulk Cleanup Done!\n\n` +
-        `🗑 Sessions deleted: ${result.deletedSessions}\n` +
-        `⚪ Unpaired deleted: ${result.deletedUnpaired}\n` +
-        `🔑 Keys freed: ${result.deletedKeys}\n\n` +
-        `🧠 Memory after: RSS ${rssMB} MB | Heap ${heapMB} MB`,
+        `✅ <b>Bulk Cleanup Done!</b>\n\n` +
+        `🗑 Sessions deleted: <b>${result.deletedSessions}</b>\n` +
+        `⚪ Unpaired deleted: <b>${result.deletedUnpaired}</b>\n` +
+        `🔑 Keys freed: <b>${result.deletedKeys}</b>\n\n` +
+        `🧠 <b>Memory after:</b> RSS ${rssMB} MB | Heap ${heapMB} MB`,
         { parse_mode: "HTML" }
       );
     }
@@ -3825,7 +3815,7 @@ function safeJsonSize(obj: unknown): number {
 }
 
 function computePerUserMemory(): UserMemEntry[] {
-  const map = new Map();
+  const map = new Map<number, UserMemEntry>();
   const ensure = (uid: number): UserMemEntry => {
     let e = map.get(uid);
     if (!e) {
@@ -3951,50 +3941,50 @@ bot.command("memory", async (ctx) => {
 
   let topUsersBlock = "";
   if (top5.length === 0) {
-    topUsersBlock = "  No active users\n";
+    topUsersBlock = "  <i>No active users</i>\n";
   } else {
     for (let i = 0; i < top5.length; i++) {
       const u = top5[i];
       const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`;
       const partsStr = u.parts.length > 0 ? u.parts.join(", ") : "—";
-      topUsersBlock += `  ${medal} ${u.userId} — ${fmtMB(u.estBytes)} MB\n`;
+      topUsersBlock += `  ${medal} <code>${u.userId}</code> — <b>${fmtMB(u.estBytes)} MB</b>\n`;
       topUsersBlock += `      └ ${esc(partsStr)}\n`;
     }
   }
 
   const text =
-    `🧠 Server Memory — Live\n` +
-    `Uptime: ${uptimeStr}\n` +
+    `🧠 <b>Server Memory — Live</b>\n` +
+    `<i>Uptime: ${uptimeStr}</i>\n` +
     `─────────────────────────────\n\n` +
-    `📦 RSS (Total RAM): ${fmtMB(mem.rss)} MB / ${RENDER_LIMIT_MB} MB\n` +
+    `📦 <b>RSS (Total RAM):</b> ${fmtMB(mem.rss)} MB / ${RENDER_LIMIT_MB} MB\n` +
     `${rssBar} ${rssPct}%  ${rssStatus}\n` +
-    `${growthEmoji} Since startup: ${growthSign}${rssGrowthMB.toFixed(1)} MB ` +
+    `${growthEmoji} Since startup: <b>${growthSign}${rssGrowthMB.toFixed(1)} MB</b> ` +
     `(boot: ${STARTUP_RSS_MB.toFixed(0)} MB)\n\n` +
-    `🔵 JS Heap (used / limit):\n` +
+    `🔵 <b>JS Heap (used / limit):</b>\n` +
     `${heapBar} ${heapPct}%  ${heapStatus}\n` +
     `   ${fmtMB(mem.heapUsed)} MB used / ${HEAP_LIMIT_MB} MB limit\n` +
     `   ${fmtMB(mem.heapTotal)} MB allocated by V8\n\n` +
-    `🧩 Off-heap (C++/Buffers):\n` +
+    `🧩 <b>Off-heap (C++/Buffers):</b>\n` +
     `   External: ${externalMB.toFixed(1)} MB\n` +
     `   ArrayBuffers: ${arrayBuffersMB.toFixed(1)} MB\n\n` +
-    `👥 Active Sessions:\n` +
-    `  📱 WhatsApp connected: ${waActiveIds.size}\n` +
-    `  🤖 Auto Chat: ${autoChatSessions.size} / ${MAX_CONCURRENT_AUTOCHAT}\n` +
-    `  💬 Chat-In-Group: ${cigSessions.size}\n` +
-    `  🔁 Auto Chat Friend: ${acfSessions.size}\n` +
-    `  🗂️ User states: ${userStates.size}\n` +
-    `  📷 QR pairings: ${qrPairings.size}\n` +
-    `  📖 Help pages cached: ${helpPages.size}\n\n` +
-    `🔥 Top RAM Consumers (Top 5):\n` +
+    `👥 <b>Active Sessions:</b>\n` +
+    `  📱 WhatsApp connected: <b>${waActiveIds.size}</b>\n` +
+    `  🤖 Auto Chat: <b>${autoChatSessions.size}</b> / ${MAX_CONCURRENT_AUTOCHAT}\n` +
+    `  💬 Chat-In-Group: <b>${cigSessions.size}</b>\n` +
+    `  🔁 Auto Chat Friend: <b>${acfSessions.size}</b>\n` +
+    `  🗂️ User states: <b>${userStates.size}</b>\n` +
+    `  📷 QR pairings: <b>${qrPairings.size}</b>\n` +
+    `  📖 Help pages cached: <b>${helpPages.size}</b>\n\n` +
+    `🔥 <b>Top RAM Consumers (Top 5):</b>\n` +
     topUsersBlock +
     `  ─────────────────\n` +
-    `  📊 Tracked total: ~${totalTrackedMB.toFixed(1)} MB across ${perUser.length} user(s)\n\n` +
-    `⚙️ Config:\n` +
+    `  📊 Tracked total: ~<b>${totalTrackedMB.toFixed(1)} MB</b> across <b>${perUser.length}</b> user(s)\n\n` +
+    `⚙️ <b>Config:</b>\n` +
     `  • Heap limit: ${HEAP_LIMIT_MB} MB\n` +
     `  • RSS limit: ${RENDER_LIMIT_MB} MB\n` +
     `  • Cleanup: every ${Math.round(MEMORY_CLEANUP_INTERVAL_MS / 60000)} min\n` +
     `  • WA socket est: ${WA_SOCKET_EST_MB} MB/user\n\n` +
-    `💡 Tap /cleanram to force a manual purge.`;
+    `💡 <i>Tap /cleanram to force a manual purge.</i>`;
 
   await ctx.reply(text, { parse_mode: "HTML" });
 });
@@ -4099,7 +4089,7 @@ function clearUserMemoryState(telegramUserId: number): void {
   newSessionFlag.delete(telegramUserId);
 }
 
-export async function runMemoryPurge(reason: string): Promise {
+export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult> {
   const memBefore = process.memoryUsage();
   const rssBefore = memBefore.rss / 1024 / 1024;
   const heapBefore = memBefore.heapUsed / 1024 / 1024;
@@ -4125,10 +4115,10 @@ export async function runMemoryPurge(reason: string): Promise {
   // 4. Stale userStates — only ones not in a long-running session AND
   //    idle past the disconnect window. Safe because the user has clearly
   //    walked away; they'll start fresh on next /start.
-  const longRunning = new Set([\
-    ...autoChatSessions.keys(),\
-    ...cigSessions.keys(),\
-    ...acfSessions.keys(),\
+  const longRunning = new Set<number>([
+    ...autoChatSessions.keys(),
+    ...cigSessions.keys(),
+    ...acfSessions.keys(),
   ]);
   let userStatesCleared = 0;
   for (const [userId, state] of userStates) {
@@ -4215,7 +4205,7 @@ export async function runMemoryPurge(reason: string): Promise {
 bot.command("cleanram", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
 
-  const statusMsg = await ctx.reply("🧹 Cleaning RAM...\n\nClearing caches and running garbage collection...", { parse_mode: "HTML" });
+  const statusMsg = await ctx.reply("🧹 <b>Cleaning RAM...</b>\n\nClearing caches and running garbage collection...", { parse_mode: "HTML" });
 
   const r = await runMemoryPurge("admin /cleanram");
   const i18nCleared = { memCleared: r.i18nMemCleared, negCleared: r.i18nNegCleared };
@@ -4241,16 +4231,16 @@ bot.command("cleanram", async (ctx) => {
     cancelCleared + newSessionCleared;
 
   const text =
-    `✅ RAM Cleanup Done!\n\n` +
-    `📦 RAM (RSS):\n` +
+    `✅ <b>RAM Cleanup Done!</b>\n\n` +
+    `📦 <b>RAM (RSS):</b>\n` +
     `  Before: ${fmt(rssBefore)} MB\n` +
     `  After:  ${fmt(rssAfter)} MB\n` +
-    `  Freed:  ${sign(rssDelta)}${fmt(Math.abs(rssDelta))} MB\n\n` +
-    `🔵 Heap:\n` +
+    `  Freed:  <b>${sign(rssDelta)}${fmt(Math.abs(rssDelta))} MB</b>\n\n` +
+    `🔵 <b>Heap:</b>\n` +
     `  Before: ${fmt(heapBefore)} MB\n` +
     `  After:  ${fmt(heapAfter)} MB\n` +
-    `  Freed:  ${sign(heapDelta)}${fmt(Math.abs(heapDelta))} MB\n\n` +
-    `🗑 Cache entries cleared: ${totalEntries}\n` +
+    `  Freed:  <b>${sign(heapDelta)}${fmt(Math.abs(heapDelta))} MB</b>\n\n` +
+    `🗑 <b>Cache entries cleared:</b> ${totalEntries}\n` +
     `  • Translation cache: ${i18nCleared.memCleared}\n` +
     `  • Translation neg-cache: ${i18nCleared.negCleared}\n` +
     `  • /help pagination: ${helpPagesCleared}\n` +
@@ -4259,8 +4249,8 @@ bot.command("cleanram", async (ctx) => {
     `  • Expired QR pairings: ${qrCleared}\n` +
     `  • Cancel flags: ${cancelCleared}\n` +
     `  • New-session flags: ${newSessionCleared}\n\n` +
-    `📱 WhatsApp sockets: ${waEvicted} idle evicted (${waTotal} live remain)\n\n` +
-    `💡 Active users, ongoing flows, and live WhatsApp sessions were not touched.`;
+    `📱 <b>WhatsApp sockets:</b> ${waEvicted} idle evicted (${waTotal} live remain)\n\n` +
+    `💡 <i>Active users, ongoing flows, and live WhatsApp sessions were not touched.</i>`;
 
   try {
     await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, text, { parse_mode: "HTML" });
@@ -4274,7 +4264,7 @@ bot.callbackQuery("broadcast_cancel", async (ctx) => {
   const adminId = ctx.from.id;
   if (!isAdmin(adminId)) return;
   userStates.delete(adminId);
-  await ctx.editMessageText("❌ Broadcast Cancelled\n\nNo message was sent.", {
+  await ctx.editMessageText("❌ <b>Broadcast Cancelled</b>\n\nNo message was sent.", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu"),
   }).catch(() => {});
@@ -4314,9 +4304,9 @@ bot.callbackQuery("connect_wa", async (ctx) => {
   if (!(await checkAccessMiddleware(ctx))) return;
   clearQrPairing(userId);
 
-  const connectedText = "✅ WhatsApp already connected!\n\nYou can use all features.";
+  const connectedText = "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.";
   const connectedKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
-  const connectText = "📱 Connect WhatsApp\n\nChoose pairing method:";
+  const connectText = "📱 <b>Connect WhatsApp</b>\n\nChoose pairing method:";
   const connectKb = new InlineKeyboard()
     .text("🔑 Pair Code", "connect_pair_code")
     .text("📷 Pair QR", "connect_pair_qr")
@@ -4358,14 +4348,14 @@ bot.callbackQuery("connect_pair_code", async (ctx) => {
   clearQrPairing(userId);
   if (isConnected(String(userId))) {
     await ctx.editMessageText(
-      "✅ WhatsApp already connected!\n\nYou can use all features.",
+      "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
   }
   userStates.set(userId, { step: "awaiting_phone" });
   await ctx.editMessageText(
-    "🔑 Pair Code\n\nEnter your phone number with country code:\n\nExample: +919942222222",
+    "🔑 <b>Pair Code</b>\n\nEnter your phone number with country code:\n\nExample: <code>+919942222222</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "connect_wa").text("❌ Cancel", "main_menu") }
   );
 });
@@ -4392,7 +4382,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
   await disconnectWhatsApp(String(userId)).catch(() => {});
   try { await ctx.deleteMessage(); } catch {}
   await ctx.reply(
-    "📱 Connect WhatsApp\n\nChoose pairing method:",
+    "📱 <b>Connect WhatsApp</b>\n\nChoose pairing method:",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -4421,12 +4411,12 @@ function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
 function settingsText(gs: GroupSettings): string {
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
   return (
-    "⚙️ Group Permissions\n\n" +
-    "👥 Members can:\n" +
+    "⚙️ <b>Group Permissions</b>\n\n" +
+    "<b>👥 Members can:</b>\n" +
     `📝 Edit Group Info: ${on(gs.editGroupInfo)}\n` +
     `💬 Send Messages: ${on(gs.sendMessages)}\n` +
     `➕ Add Members: ${on(gs.addMembers)}\n\n` +
-    "👑 Admins:\n" +
+    "<b>👑 Admins:</b>\n" +
     `🔐 Approve New Members: ${on(gs.approveJoin)}\n\n` +
     "Tap to toggle each setting:"
   );
@@ -4437,21 +4427,21 @@ bot.callbackQuery("create_groups", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!\n\nPlease connect first.", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>\n\nPlease connect first.", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
   userStates.set(userId, { step: "group_enter_name", groupSettings: defaultGroupSettings() });
   await ctx.editMessageText(
-    "👥 Create WhatsApp Groups\n\n✏️ Enter the group name:",
+    "👥 <b>Create WhatsApp Groups</b>\n\n✏️ Enter the group name:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
 
-for (const [cb, field] of [\
-  ["tog_editInfo", "editGroupInfo"], ["tog_sendMsg", "sendMessages"],\
-  ["tog_addMembers", "addMembers"], ["tog_approveJoin", "approveJoin"],\
+for (const [cb, field] of [
+  ["tog_editInfo", "editGroupInfo"], ["tog_sendMsg", "sendMessages"],
+  ["tog_addMembers", "addMembers"], ["tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -4475,8 +4465,8 @@ bot.callbackQuery("settings_done", async (ctx) => {
   };
   const cur = state.groupSettings.disappearingMessages;
   await ctx.editMessageText(
-    "⏳ Disappearing Messages\n\nGroup mein messages kitne time baad automatically delete hone chahiye?\n\n" +
-    `Current: ${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}`,
+    "⏳ <b>Disappearing Messages</b>\n\nGroup mein messages kitne time baad automatically delete hone chahiye?\n\n" +
+    `Current: <b>${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}</b>`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -4496,12 +4486,12 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
     state.step = "group_dp";
     const maxDps = state.groupSettings.count;
     await ctx.editMessageText(
-      "🖼️ Group Profile Photo(s)\n\n" +
+      "🖼️ <b>Group Profile Photo(s)</b>\n\n" +
       `Ek ya zyada photos bhejo (max ${maxDps}).\n\n` +
       "• 1 photo bhejoge → sab groups mein wahi DP lagega\n" +
       `• N photos bhejoge → 1st DP → 1st group, 2nd DP → 2nd group, ... (max ${maxDps} kyunki tum ${maxDps} group bana rahe ho)\n\n` +
-      "Photos ek ek karke bhejo. Saare bhej do to ✅ Done dabao.\n" +
-      "DP nahi lagana to ⏭️ Skip karo.",
+      "Photos ek ek karke bhejo. Saare bhej do to <b>✅ Done</b> dabao.\n" +
+      "DP nahi lagana to <b>⏭️ Skip</b> karo.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_dp_skip").text("❌ Cancel", "main_menu") }
     );
   });
@@ -4528,12 +4518,12 @@ async function showGroupFriendsStep(ctx: any) {
   if (!state?.groupSettings) return;
   state.step = "group_enter_friends";
   const friendsText =
-    "👫 Add Friends While Creating Group\n\n" +
-    "⚠️ Important: The friend's number must be saved in your contact list on WhatsApp. If the number is not saved, it may not be added.\n\n" +
+    "👫 <b>Add Friends While Creating Group</b>\n\n" +
+    "⚠️ <b>Important:</b> The friend's number must be saved in your contact list on WhatsApp. If the number is not saved, it may not be added.\n\n" +
     "Send friend numbers, one per line (with country code):\n" +
-    "919912345678\n919898765432\n\n" +
+    "<code>919912345678\n919898765432</code>\n\n" +
     "You can also send with + prefix:\n" +
-    "+919912345678\n+91 9898 765432\n\n" +
+    "<code>+919912345678\n+91 9898 765432</code>\n\n" +
     "If you don't want to add any friend, tap Skip.";
   const friendsMarkup = new InlineKeyboard().text("⏭️ Skip", "group_skip_friends").text("❌ Cancel", "main_menu");
   try {
@@ -4550,11 +4540,11 @@ async function showGroupFriendAdminStep(ctx: any) {
   state.step = "group_confirm_friend_admin";
   const count = state.groupSettings.friendNumbers.length;
   const text =
-    `👑 Make Friend Admin?\n\n` +
-    `You have added ${count} friend number(s).\n\n` +
-    `Do you want to make the friend(s) Admin in the group after they are added?\n\n` +
-    `• Yes → Friends will be added to the group AND made admin\n` +
-    `• No → Friends will only be added as members (not admin)`;
+    `👑 <b>Make Friend Admin?</b>\n\n` +
+    `You have added <b>${count}</b> friend number(s).\n\n` +
+    `Do you want to make the friend(s) <b>Admin</b> in the group after they are added?\n\n` +
+    `• <b>Yes</b> → Friends will be added to the group AND made admin\n` +
+    `• <b>No</b> → Friends will only be added as members (not admin)`;
   const markup = new InlineKeyboard()
     .text("✅ Yes, Make Admin", "group_friend_admin_yes")
     .text("❌ No, Just Add", "group_friend_admin_no");
@@ -4600,8 +4590,8 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   state.step = "group_enter_description";
   const preview = state.groupSettings.finalNames.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   await ctx.editMessageText(
-    `✅ Names Preview:\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
-    "📄 Group Description\n\nSend description or type skip:",
+    `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
+    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -4615,7 +4605,7 @@ bot.callbackQuery("naming_custom", async (ctx) => {
   state.groupSettings.finalNames = [];
   state.step = "group_enter_custom_names";
   await ctx.editMessageText(
-    `✏️ Custom Names\n\nSend all ${state.groupSettings.count} names, one per line:\n\nExample:\nSpidy Squad\nSpidy Gang\nSpidy Army`,
+    `✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -4629,15 +4619,15 @@ async function showGroupSummary(ctx: any) {
   state.step = "group_confirm";
   const dmText = gs.disappearingMessages === 86400 ? "24 Hours" : gs.disappearingMessages === 604800 ? "7 Days" : gs.disappearingMessages === 7776000 ? "90 Days" : "Off";
   const text =
-    "📋 Group Creation Summary\n\n" +
-    `📝 Names (${gs.finalNames.length}):\n${namesList}\n\n` +
-    `📄 Description: ${gs.description ? esc(gs.description) : "None"}\n` +
-    `🖼️ Group DPs: ${gs.dpBuffers.length > 0 ? `${gs.dpBuffers.length} photo(s)${gs.dpBuffers.length === 1 ? " (sab groups mein same)" : " (rotate honge)"}` : "❌ None"}\n` +
-    `⏳ Disappearing Msgs: ${dmText}\n` +
-    `👫 Friends to add: ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
-    (gs.friendNumbers.length > 0 ? `👑 Make Friend Admin: ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
+    "📋 <b>Group Creation Summary</b>\n\n" +
+    `📝 <b>Names (${gs.finalNames.length}):</b>\n${namesList}\n\n` +
+    `📄 <b>Description:</b> ${gs.description ? esc(gs.description) : "None"}\n` +
+    `🖼️ <b>Group DPs:</b> ${gs.dpBuffers.length > 0 ? `${gs.dpBuffers.length} photo(s)${gs.dpBuffers.length === 1 ? " (sab groups mein same)" : " (rotate honge)"}` : "❌ None"}\n` +
+    `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
+    `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
+    (gs.friendNumbers.length > 0 ? `👑 <b>Make Friend Admin:</b> ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
     `\n` +
-    "⚙️ Permissions:\n" +
+    "⚙️ <b>Permissions:</b>\n" +
     `${gs.editGroupInfo ? "✅" : "❌"} Edit Group Info | ${gs.sendMessages ? "✅" : "❌"} Send Messages\n` +
     `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
     "🚀 Ready to create?";
@@ -4700,9 +4690,9 @@ bot.callbackQuery("group_create_start", async (ctx) => {
   if (!gs || !gs.finalNames.length) {
     // State expired (>20 min) or never saved — tell the user clearly.
     await ctx.editMessageText(
-      "⚠️ Session Expired\n\n" +
+      "⚠️ <b>Session Expired</b>\n\n" +
       "Your group creation session has expired (20 minutes limit).\n\n" +
-      "Please start again by tapping Create Groups from the menu.",
+      "Please start again by tapping <b>Create Groups</b> from the menu.",
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
@@ -4714,7 +4704,7 @@ bot.callbackQuery("group_create_start", async (ctx) => {
   }
 
   await ctx.editMessageText(
-    `⏳ Creating ${gs.finalNames.length} group(s)...\n\n🔄 0/${gs.finalNames.length} done...`,
+    `⏳ <b>Creating ${gs.finalNames.length} group(s)...</b>\n\n🔄 0/${gs.finalNames.length} done...`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation") }
   );
 
@@ -4729,7 +4719,7 @@ bot.callbackQuery("group_cancel_creation", async (ctx) => {
   const state = userStates.get(userId);
   if (state) state.groupCreationCancelPending = true;
   await ctx.editMessageText(
-    "⚠️ Cancel Group Creation?\n\nGroups already created will remain. Only remaining groups won't be created.\n\nAre you sure?",
+    "⚠️ <b>Cancel Group Creation?</b>\n\nGroups already created will remain. Only remaining groups won't be created.\n\nAre you sure?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -4752,7 +4742,7 @@ bot.callbackQuery("group_cancel_confirm", async (ctx) => {
     state.groupCreationCancelPending = true;
   }
   await ctx.editMessageText(
-    "🛑 Group creation cancelled.\n\nGroups already created will remain.",
+    "🛑 <b>Group creation cancelled.</b>\n\nGroups already created will remain.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
   );
 });
@@ -4864,7 +4854,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
     if (!skipEdit) {
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Creating Groups: ${done}/${total}\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
+          `⏳ <b>Creating Groups: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
           { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation") : undefined }
         );
       } catch {}
@@ -4896,13 +4886,13 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   const cancelled = results.some((r) => r.error === "Cancelled by user");
   const created = results.filter((r) => r.link).length;
   let message = cancelled
-    ? `🛑 Cancelled! (${created}/${total} created before cancel)\n\n`
-    : `🎉 Done! (${created}/${total} created)\n\n`;
+    ? `🛑 <b>Cancelled! (${created}/${total} created before cancel)</b>\n\n`
+    : `🎉 <b>Done! (${created}/${total} created)</b>\n\n`;
   for (const r of results) {
     if (r.error === "Cancelled by user") {
-      message += `🛑 ${esc(r.name)}\n⚠️ Cancelled\n\n`;
+      message += `🛑 <b>${esc(r.name)}</b>\n⚠️ Cancelled\n\n`;
     } else if (r.link) {
-      let line = `✅ ${esc(r.name)}\n🔗 ${r.link}`;
+      let line = `✅ <b>${esc(r.name)}</b>\n🔗 ${r.link}`;
       if (r.friendsAdded !== undefined) {
         if (r.friendsFailed) {
           line += `\n👫 Friends: ${r.friendsAdded} added (some were not added — rejected by WhatsApp)`;
@@ -4915,7 +4905,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       }
       message += line + "\n\n";
     } else {
-      message += `❌ ${esc(r.name)}\n⚠️ ${esc(r.error || "")}\n\n`;
+      message += `❌ <b>${esc(r.name)}</b>\n⚠️ ${esc(r.error || "")}\n\n`;
     }
   }
 
@@ -4943,14 +4933,14 @@ bot.callbackQuery("join_groups", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
   userStates.set(userId, { step: "join_enter_links", joinData: { links: [] } });
   await ctx.editMessageText(
-    "🔗 Join Groups\n\nSend WhatsApp group link(s), one per line:\n\nhttps://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456",
+    "🔗 <b>Join Groups</b>\n\nSend WhatsApp group link(s), one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -5021,7 +5011,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
     console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
     try {
       await ctx.editMessageText(
-        "❌ WhatsApp not connected!\n\nPlease connect WhatsApp first to use CTC Checker.",
+        "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
         {
           parse_mode: "HTML",
           reply_markup: new InlineKeyboard()
@@ -5044,7 +5034,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   const ctcPrompt =
     "🔍 CTC Checker\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456";
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
@@ -5102,14 +5092,14 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
 
   try {
     await ctx.editMessageText(
-      `⏳ Checking ${activePairs.length} group(s)...\n\n⌛ Please wait...`,
+      `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
       { parse_mode: "HTML" }
     );
   } catch {
     try {
       await bot.api.sendMessage(
         chatId,
-        `⏳ Checking ${activePairs.length} group(s)...\n\n⌛ Please wait...`,
+        `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
         { parse_mode: "HTML" }
       );
     } catch {}
@@ -5129,7 +5119,7 @@ interface CtcFixData {
     link: string;
     // last-10-digit phone numbers from this group's VCF — used to decide
     // which pending JIDs are "wrong" (= not in VCF) at fix time.
-    vcfLast10Set: Set;
+    vcfLast10Set: Set<string>;
     // Snapshot count from the check, just for the confirmation prompt.
     wrongCount: number;
   }>;
@@ -5137,7 +5127,7 @@ interface CtcFixData {
   createdAt: number;
 }
 
-const ctcFixDataStore: Map = new Map();
+const ctcFixDataStore: Map<number, CtcFixData> = new Map();
 
 // Drop stale fix-data after 30 min so the map can't grow unbounded.
 setInterval(() => {
@@ -5167,7 +5157,7 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
     console.error("[CTC] Unexpected crash in ctcCheckBackground:", err?.message ?? err);
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `❌ CTC Check failed\n\n${esc(err?.message || "Unknown error")}\n\nPlease try again.`,
+        `❌ <b>CTC Check failed</b>\n\n<i>${esc(err?.message || "Unknown error")}</i>\n\nPlease try again.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {
@@ -5184,7 +5174,7 @@ async function ctcCheckBackground(userId: string, activePairs: CtcPair[], chatId
 async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], chatId: number, msgId: number) {
   // Collect all VCF phone numbers across all pairs for duplicate detection
   // Map: phone number → list of group names it appears as pending
-  const pendingPhoneToGroups = new Map();
+  const pendingPhoneToGroups = new Map<string, string[]>();
 
   // Running totals shown in the live progress message
   let runningCorrect = 0;
@@ -5202,14 +5192,14 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     const total = activePairs.length;
     const bar = buildProgressBar(i, total);
     const lines: string[] = [];
-    lines.push(`🔍 CTC Check in progress…`);
-    lines.push(`${bar}`);
-    lines.push(`📋 Group ${i + 1}/${total}${total > 1 ? ` — ${esc(truncate(groupLabel, 28))}` : ""}`);
-    lines.push(`📁 ${vcfCount} contact${vcfCount === 1 ? "" : "s"} in VCF`);
-    lines.push(`⚙️ ${esc(phase)}`);
+    lines.push(`🔍 <b>CTC Check in progress…</b>`);
+    lines.push(`<code>${bar}</code>`);
+    lines.push(`📋 Group <b>${i + 1}/${total}</b>${total > 1 ? ` — ${esc(truncate(groupLabel, 28))}` : ""}`);
+    lines.push(`📁 <b>${vcfCount}</b> contact${vcfCount === 1 ? "" : "s"} in VCF`);
+    lines.push(`⚙️ <i>${esc(phase)}</i>`);
     if (i > 0) {
       lines.push(`━━━━━━━━━━━━━━━━━━`);
-      lines.push(`✅ Correct so far: ${runningCorrect}   ⚠️ Wrong: ${runningWrong}${runningFailed ? `   ❌ Failed: ${runningFailed}` : ""}`);
+      lines.push(`✅ Correct so far: <b>${runningCorrect}</b>   ⚠️ Wrong: <b>${runningWrong}</b>${runningFailed ? `   ❌ Failed: <b>${runningFailed}</b>` : ""}`);
     }
     return lines.join("\n");
   };
@@ -5223,8 +5213,8 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     inMembers: string[];
     inPending: string[];
     notFoundPhones: string[];
-    allMemberPhones: Set;
-    allPendingPhones: Set;
+    allMemberPhones: Set<string>;
+    allPendingPhones: Set<string>;
     pendingAvailable: boolean;
     couldNotAccess: boolean;
   }> = [];
@@ -5350,7 +5340,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
   try {
     const total = activePairs.length;
     await bot.api.editMessageText(chatId, msgId,
-      `🔍 CTC Check in progress…\n${buildProgressBar(total, total)}\n⚙️ Finalising results…`,
+      `🔍 <b>CTC Check in progress…</b>\n<code>${buildProgressBar(total, total)}</code>\n⚙️ <i>Finalising results…</i>`,
       { parse_mode: "HTML" }
     );
   } catch {}
@@ -5374,7 +5364,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     notInVcfCount: number;
     wrongPending: string[];          // "+91XXXXXXXXXX" formatted
     wrongPendingFull: number;        // actual count (may exceed shown list)
-    vcfLast10Set: Set;
+    vcfLast10Set: Set<string>;
   };
   const summaries: Summary[] = [];
 
@@ -5423,10 +5413,10 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
   }
 
   // Headline summary
-  let result = "📊 CTC Check — Summary\n";
-  result += `📁 Groups: ${groupsAccessed}${groupsFailed ? ` ❌ ${groupsFailed} failed` : ""}\n`;
-  result += `✅ Correct Pending: ${totalCorrect}\n`;
-  result += `⚠️ Wrong Pending: ${totalWrong}\n`;
+  let result = "📊 <b>CTC Check — Summary</b>\n";
+  result += `📁 Groups: <b>${groupsAccessed}</b>${groupsFailed ? ` ❌ ${groupsFailed} failed` : ""}\n`;
+  result += `✅ Correct Pending: <b>${totalCorrect}</b>\n`;
+  result += `⚠️ Wrong Pending: <b>${totalWrong}</b>\n`;
   result += "━━━━━━━━━━━━━━━━━━\n\n";
 
   // Per-group block — kept short. Wrong pending phones limited to 10 lines.
@@ -5434,10 +5424,10 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     const s = summaries[i];
     const gr = s.gr;
     if (gr.couldNotAccess) {
-      result += `❌ Group ${i + 1}: Could not access\n   ${esc(gr.link)}\n\n`;
+      result += `❌ <b>Group ${i + 1}</b>: Could not access\n   ${esc(gr.link)}\n\n`;
       continue;
     }
-    result += `📋 ${esc(gr.groupName)}\n`;
+    result += `📋 <b>${esc(gr.groupName)}</b>\n`;
     // Show the group invite link right under the title so the user can copy it.
     result += `   🔗 ${esc(gr.link)}\n`;
     // Show the unique VCF file name(s) supplied for this group. Usually just
@@ -5448,13 +5438,13 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
       for (const vn of vcfNames) result += `   📁 ${esc(vn)}\n`;
     }
     if (!gr.pendingAvailable) {
-      result += `   ⚠️ Pending detection off — need admin + "Approval required" ON\n`;
+      result += `   ⚠️ <i>Pending detection off — need admin + "Approval required" ON</i>\n`;
     }
-    result += `   ✅ Correct Pending: ${s.correctPendingCount}`;
-    if (s.correctMembersCount) result += `   👥 Already In: ${s.correctMembersCount}`;
+    result += `   ✅ Correct Pending: <b>${s.correctPendingCount}</b>`;
+    if (s.correctMembersCount) result += `   👥 Already In: <b>${s.correctMembersCount}</b>`;
     result += "\n";
     if (s.wrongPendingFull > 0) {
-      result += `   ⚠️ Wrong Pending: ${s.wrongPendingFull}\n`;
+      result += `   ⚠️ Wrong Pending: <b>${s.wrongPendingFull}</b>\n`;
       const SHOW = 10;
       const slice = s.wrongPending.slice(0, SHOW);
       for (const p of slice) result += `      • ${esc(p)}\n`;
@@ -5469,7 +5459,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     if (groups.length > 1) duplicates.push({ phone: "+" + phone, groups });
   }
   if (duplicates.length > 0) {
-    result += `🔁 Duplicate Pending (${duplicates.length}):\n`;
+    result += `🔁 <b>Duplicate Pending (${duplicates.length}):</b>\n`;
     const SHOW = 8;
     // How many group names to print per phone before collapsing to "+N more".
     // Most duplicates are in 2 groups; cap at 3 so the message stays under
@@ -5477,7 +5467,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     const NAMES_PER_PHONE = 3;
     const slice = duplicates.slice(0, SHOW);
     for (const d of slice) {
-      result += `   • ${esc(d.phone)} — in ${d.groups.length} groups:\n`;
+      result += `   • ${esc(d.phone)} — in <b>${d.groups.length}</b> groups:\n`;
       const namesShown = d.groups.slice(0, NAMES_PER_PHONE);
       for (const g of namesShown) result += `      ↳ ${esc(g)}\n`;
       if (d.groups.length > NAMES_PER_PHONE) {
@@ -5542,28 +5532,28 @@ bot.callbackQuery("ctc_fix_wrong", async (ctx) => {
   const data = ctcFixDataStore.get(userId);
   if (!data || !data.groups.length) {
     await ctx.editMessageText(
-      "⚠️ Fix data expired\n\nPlease run the CTC check again.",
+      "⚠️ <b>Fix data expired</b>\n\nPlease run the CTC check again.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
   }
   if (!isConnected(String(userId))) {
     await ctx.editMessageText(
-      "❌ WhatsApp not connected!",
+      "❌ <b>WhatsApp not connected!</b>",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
     );
     return;
   }
   const groupList = data.groups
     .slice(0, 8)
-    .map((g) => `• ${esc(g.groupName)} — ${g.wrongCount}`)
+    .map((g) => `• ${esc(g.groupName)} — <b>${g.wrongCount}</b>`)
     .join("\n");
   const more = data.groups.length > 8 ? `\n… +${data.groups.length - 8} more groups` : "";
   await ctx.editMessageText(
-    `🛠 Fix Wrong Pending Requests\n\n` +
-    `Total: ${data.totalWrong} wrong pending requests across ${data.groups.length} group(s).\n\n` +
+    `🛠 <b>Fix Wrong Pending Requests</b>\n\n` +
+    `Total: <b>${data.totalWrong}</b> wrong pending requests across <b>${data.groups.length}</b> group(s).\n\n` +
     `${groupList}${more}\n\n` +
-    `This will REJECT (cancel) every pending request whose number is NOT in your VCF for that group.\n\n` +
+    `<i>This will REJECT (cancel) every pending request whose number is NOT in your VCF for that group.</i>\n\n` +
     `Sure?`,
     {
       parse_mode: "HTML",
@@ -5580,14 +5570,14 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
   const data = ctcFixDataStore.get(userId);
   if (!data || !data.groups.length) {
     await ctx.editMessageText(
-      "⚠️ Fix data expired\n\nPlease run the CTC check again.",
+      "⚠️ <b>Fix data expired</b>\n\nPlease run the CTC check again.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
   }
   if (!isConnected(String(userId))) {
     await ctx.editMessageText(
-      "❌ WhatsApp not connected!",
+      "❌ <b>WhatsApp not connected!</b>",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
     );
     return;
@@ -5601,7 +5591,7 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
   ctcFixDataStore.delete(userId);
 
   await ctx.editMessageText(
-    `⏳ Cancelling wrong pending requests...`,
+    `⏳ <b>Cancelling wrong pending requests...</b>`,
     { parse_mode: "HTML" }
   );
 
@@ -5613,7 +5603,7 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
     const g = data.groups[i];
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Cancelling wrong pending...\n\nGroup ${i + 1}/${data.groups.length}: ${esc(g.groupName)}`,
+        `⏳ <b>Cancelling wrong pending...</b>\n\nGroup ${i + 1}/${data.groups.length}: <b>${esc(g.groupName)}</b>`,
         { parse_mode: "HTML" }
       );
     } catch {}
@@ -5645,12 +5635,12 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
     totalAttempted += wrongJids.length;
     const rejected = await rejectGroupParticipantsBulk(String(userId), g.groupId, wrongJids);
     totalRejected += rejected;
-    perGroupReport.push(`• ${esc(g.groupName)} — ${rejected}/${wrongJids.length} cancelled`);
+    perGroupReport.push(`• ${esc(g.groupName)} — <b>${rejected}</b>/${wrongJids.length} cancelled`);
   }
 
   const finalText =
-    `✅ Wrong Pending Fixed\n\n` +
-    `Cancelled: ${totalRejected} / ${totalAttempted}\n\n` +
+    `✅ <b>Wrong Pending Fixed</b>\n\n` +
+    `Cancelled: <b>${totalRejected}</b> / ${totalAttempted}\n\n` +
     perGroupReport.join("\n");
 
   const chunks = splitMessage(finalText, 4000);
@@ -5670,7 +5660,7 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
         : undefined,
     });
   }
-});
+}); 
 
 // ─── Get Link ────────────────────────────────────────────────────────────────
 
@@ -5693,10 +5683,10 @@ function levenshtein(a: string, b: string): number {
 
 function detectSimilarGroups(groups: Array<{ id: string; subject: string }>): SimilarGroup[] {
   const results: SimilarGroup[] = [];
-  const usedIds = new Set();
+  const usedIds = new Set<string>();
 
   // Phase 1: trailing-number clusters (e.g. "Spidy 1", "Spidy 2")
-  const numberMap = new Map>();
+  const numberMap = new Map<string, Array<{ id: string; subject: string }>>();
   for (const g of groups) {
     const name = g.subject.trim();
     const match = name.match(/^(.*?)\s*\d+\s*$/);
@@ -5717,7 +5707,7 @@ function detectSimilarGroups(groups: Array<{ id: string; subject: string }>): Si
   // Phase 2: fuzzy matching for remaining groups (catches typos like "spidy"/"spdiy"/"Spidy")
   const remaining = groups.filter(g => !usedIds.has(g.id));
   const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const assigned = new Set();
+  const assigned = new Set<number>();
   for (let i = 0; i < remaining.length; i++) {
     if (assigned.has(i)) continue;
     const na = normalize(remaining[i].subject);
@@ -5746,12 +5736,12 @@ bot.callbackQuery("get_link", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your WhatsApp groups...\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
 
   const groups = await getAllGroups(String(userId));
   if (!groups.length) {
@@ -5775,8 +5765,8 @@ bot.callbackQuery("get_link", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `📱 Admin Groups Found: ${adminGroups.length} (Total: ${groups.length})\n\n` +
-    (patterns.length > 0 ? `🔍 Similar Patterns Detected: ${patterns.length}\n` : "⚠️ No similar group patterns found.\n") +
+    `📱 <b>Admin Groups Found: ${adminGroups.length}</b> (Total: ${groups.length})\n\n` +
+    (patterns.length > 0 ? `🔍 <b>Similar Patterns Detected: ${patterns.length}</b>\n` : "⚠️ No similar group patterns found.\n") +
     "\n📌 Choose an option:",
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -5826,7 +5816,7 @@ bot.callbackQuery("gl_similar", async (ctx) => {
   kb.text("🔙 Back", "get_link").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select its groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select its groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -5855,8 +5845,8 @@ bot.callbackQuery(/^gl_sim_(\d+)$/, async (ctx) => {
   };
 
   await ctx.editMessageText(
-    `🔍 Similar Groups — "${esc(pattern.base)}"\n\n` +
-    `${pool.length} group(s) — select which to get links for:\n${preSelected.size} selected`,
+    `🔍 <b>Similar Groups — "${esc(pattern.base)}"</b>\n\n` +
+    `<b>${pool.length} group(s)</b> — select which to get links for:\n<i>${preSelected.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5878,8 +5868,8 @@ bot.callbackQuery("gl_all", async (ctx) => {
   };
 
   await ctx.editMessageText(
-    `📋 All Admin Groups — Select for Link Fetch\n\n` +
-    `${allGroups.length} group(s)\nNone selected yet`,
+    `📋 <b>All Admin Groups — Select for Link Fetch</b>\n\n` +
+    `<b>${allGroups.length} group(s)</b>\n<i>None selected yet</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5897,7 +5887,7 @@ bot.callbackQuery(/^gl_tog_(\d+)$/, async (ctx) => {
     ? `Similar Groups — "${esc(state.glData.patternBase || "")}"`
     : "All Admin Groups";
   await ctx.editMessageText(
-    `🔍 ${label}\n\n${state.glData.selectedIndices.size} selected`,
+    `🔍 <b>${label}</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5908,7 +5898,7 @@ bot.callbackQuery("gl_prev_page", async (ctx) => {
   if (!state?.glData) return;
   if (state.glData.page > 0) state.glData.page--;
   await ctx.editMessageText(
-    `🔍 Select Groups\n\n${state.glData.selectedIndices.size} selected`,
+    `🔍 <b>Select Groups</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5920,7 +5910,7 @@ bot.callbackQuery("gl_next_page", async (ctx) => {
   const totalPages = Math.ceil(state.glData.groupsPool.length / GL_SEL_PAGE_SIZE);
   if (state.glData.page < totalPages - 1) state.glData.page++;
   await ctx.editMessageText(
-    `🔍 Select Groups\n\n${state.glData.selectedIndices.size} selected`,
+    `🔍 <b>Select Groups</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5935,7 +5925,7 @@ bot.callbackQuery("gl_select_all", async (ctx) => {
   if (!state?.glData) return;
   for (let i = 0; i < state.glData.groupsPool.length; i++) state.glData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `🔍 Select Groups\n\n✅ All ${state.glData.groupsPool.length} groups selected`,
+    `🔍 <b>Select Groups</b>\n\n✅ All <b>${state.glData.groupsPool.length}</b> groups selected`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5946,7 +5936,7 @@ bot.callbackQuery("gl_clear_all", async (ctx) => {
   if (!state?.glData) return;
   state.glData.selectedIndices.clear();
   await ctx.editMessageText(
-    `🔍 Select Groups\n\nNone selected`,
+    `🔍 <b>Select Groups</b>\n\n<i>None selected</i>`,
     { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
 });
@@ -5967,8 +5957,8 @@ bot.callbackQuery("gl_proceed", async (ctx) => {
 
   const isSimMode = state.glData.mode === "similar";
   const progressText = isSimMode
-    ? `⏳ Fetching links for "${esc(state.glData.patternBase || "")}" groups...\n\n📊 0/${selectedGroups.length} fetched...`
-    : `⏳ Fetching ${selectedGroups.length} group links...\n\n📊 0/${selectedGroups.length} fetched...`;
+    ? `⏳ <b>Fetching links for "${esc(state.glData.patternBase || "")}" groups...</b>\n\n📊 0/${selectedGroups.length} fetched...`
+    : `⏳ <b>Fetching ${selectedGroups.length} group links...</b>\n\n📊 0/${selectedGroups.length} fetched...`;
 
   await ctx.editMessageText(progressText, {
     parse_mode: "HTML",
@@ -6043,7 +6033,7 @@ type GetLinkRetryState = {
   msgId: number;
   cleanupTimer: NodeJS.Timeout;
 };
-const getLinkRetryState = new Map();
+const getLinkRetryState = new Map<number, GetLinkRetryState>();
 
 function clearGetLinkRetryState(userId: number): void {
   const s = getLinkRetryState.get(userId);
@@ -6066,7 +6056,7 @@ async function sendGetLinkResult(
   msgId: number,
   wasCancelled: boolean,
   canRetry: boolean,
-): Promise {
+): Promise<void> {
   const totalCount = results.length;
   const successCount = results.filter((r) => r.link).length;
   const failedResults = results
@@ -6078,22 +6068,22 @@ async function sendGetLinkResult(
 
   let result: string;
   if (mode === "similar") {
-    result = `🔗 "${esc(patternBase!)}" Pattern\n`;
-    result += `📊 Total: ${totalCount} groups | ✅ ${successCount} links fetched\n\n`;
+    result = `🔗 <b>"${esc(patternBase!)}" Pattern</b>\n`;
+    result += `📊 <b>Total: ${totalCount} groups | ✅ ${successCount} links fetched</b>\n\n`;
   } else {
-    result = `📋 All Group Links\n📊 Total: ${totalCount} groups | ✅ ${successCount} links fetched\n\n`;
+    result = `📋 <b>All Group Links</b>\n📊 <b>Total: ${totalCount} groups | ✅ ${successCount} links fetched</b>\n\n`;
   }
-  if (wasCancelled) result += "⛔ Fetch stopped by user.\n\n";
+  if (wasCancelled) result += "⛔ <b>Fetch stopped by user.</b>\n\n";
 
   for (const r of successResults) {
     result += `📌 ${esc(r.subject)}\n${r.link}\n\n`;
   }
 
   if (failedResults.length) {
-    result += "⚠️ Links Not Fetched\n";
+    result += "⚠️ <b>Links Not Fetched</b>\n";
     for (const r of failedResults) result += `• ${esc(r.subject)}\n`;
     if (canRetry && !wasCancelled) {
-      result += `\n💡 Tap below to retry the ${failedResults.length} pending link(s). You can retry only once.`;
+      result += `\n💡 <i>Tap below to retry the ${failedResults.length} pending link(s). You can retry only once.</i>`;
     }
   }
 
@@ -6146,7 +6136,7 @@ async function fetchGroupLinksBackground(
     try {
       const label = mode === "similar" ? `Fetching links for "${esc(patternBase!)}" groups` : "Fetching all group links";
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ ${label}...\n\n📊 ${fetchedCount}/${groups.length} fetched | ✅ ${successCount} links found${extra ? `\n\n${extra}` : ""}`,
+        `⏳ <b>${label}...</b>\n\n📊 ${fetchedCount}/${groups.length} fetched | ✅ ${successCount} links found${extra ? `\n\n${extra}` : ""}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request") }
       );
     } catch {}
@@ -6240,7 +6230,7 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
     } catch {}
     try {
       await ctx.reply(
-        "⚠️ Retry session expired\n\n" +
+        "⚠️ <b>Retry session expired</b>\n\n" +
         "Aap ek hi baar retry kar sakte the, ya 1 hour ka window khatam ho gaya. " +
         "Naye se link fetch karne ke liye menu se Get Link dobara dabao.",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
@@ -6267,7 +6257,7 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
   if (!isConnected(String(userId))) {
     try {
       await bot.api.editMessageText(state.chatId, state.msgId,
-        "❌ WhatsApp not connected\n\n" +
+        "❌ <b>WhatsApp not connected</b>\n\n" +
         "Retry nahi ho sakta — pehle WhatsApp connect karo, phir Get Link dobara dabao.",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
       );
@@ -6287,7 +6277,7 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
   let workChatId = state.chatId;
   let workMsgId = state.msgId;
   const retryProgress = (k: number) =>
-    `🔄 Retrying pending link(s)...\n\n` +
+    `🔄 <b>Retrying pending link(s)...</b>\n\n` +
     `📊 ${k}/${failedIndexes.length} retried`;
   try {
     await bot.api.editMessageText(workChatId, workMsgId, retryProgress(0), {
@@ -6393,8 +6383,7 @@ bot.callbackQuery("help_button", async (ctx) => {
     `👤 Owner: ${OWNER_USERNAME}`;
 
   await ctx.reply(
-    `${codeBlock}
-`,
+    `<pre>${codeBlock}</pre>`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
@@ -6412,15 +6401,15 @@ interface AutoAccepterJob {
   endsAt: number;
   chatId: number;
   statusMsgId: number;
-  pollTimer: ReturnType;
-  endTimer: ReturnType;
+  pollTimer: ReturnType<typeof setInterval>;
+  endTimer: ReturnType<typeof setTimeout>;
   totalAccepted: number;
-  seenJids: Set;
+  seenJids: Set<string>;
 }
 
-const autoAccepterJobs: Map = new Map();
+const autoAccepterJobs: Map<number, AutoAccepterJob> = new Map();
 
-async function runAutoAccepterPoll(job: AutoAccepterJob): Promise {
+async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
   const { userId, groupIds, groupNames, chatId, statusMsgId } = job;
   const userIdStr = String(userId);
   let newCount = 0;
@@ -6490,12 +6479,12 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise {
     await bot.api.editMessageText(
       chatId,
       statusMsgId,
-      `🛡️ Auto Request Accepter — Running\n\n` +
-      `📋 Groups (${groupNames.length}):\n${statusLines}${moreText}\n\n` +
-      `✅ Total Accepted: ${job.totalAccepted}\n` +
-      (newCount > 0 ? `🆕 Just Accepted: ${newCount}\n` : "") +
-      `⏰ Time Remaining: ~${remainMins} min\n\n` +
-      `Polls every 10 seconds. Only accepts invite-link joiners.`,
+      `🛡️ <b>Auto Request Accepter — Running</b>\n\n` +
+      `📋 <b>Groups (${groupNames.length}):</b>\n${statusLines}${moreText}\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
+      (newCount > 0 ? `🆕 <b>Just Accepted:</b> ${newCount}\n` : "") +
+      `⏰ <b>Time Remaining:</b> ~${remainMins} min\n\n` +
+      `<i>Polls every 10 seconds. Only accepts invite-link joiners.</i>`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job"),
@@ -6517,7 +6506,7 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise {
   });
 }
 
-async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" | "access_revoked"): Promise {
+async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" | "access_revoked"): Promise<void> {
   const job = autoAccepterJobs.get(userId);
   if (!job) return;
 
@@ -6536,21 +6525,21 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" 
   let msg: string;
   if (reason === "done") {
     msg =
-      `🛡️ Auto Request Accepter — Finished\n\n` +
-      `✅ Total Accepted: ${job.totalAccepted}\n` +
-      `⏱️ Duration: ${Math.round(job.durationMs / 60000)} min\n\n` +
-      `Time is up! The Auto Request Accepter has been stopped.\n` +
+      `🛡️ <b>Auto Request Accepter — Finished</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
+      `⏱️ <b>Duration:</b> ${Math.round(job.durationMs / 60000)} min\n\n` +
+      `<b>Time is up! The Auto Request Accepter has been stopped.</b>\n` +
       `Your selected groups will no longer auto-accept join requests.`;
   } else if (reason === "access_revoked") {
     msg =
-      `🚫 Auto Request Accepter — Stopped\n\n` +
-      `✅ Total Accepted: ${job.totalAccepted}\n\n` +
-      `Your access has expired or been revoked.\n` +
+      `🚫 <b>Auto Request Accepter — Stopped</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n\n` +
+      `<b>Your access has expired or been revoked.</b>\n` +
       `The Auto Request Accepter has been stopped automatically. Please renew your access to use this feature.`;
   } else {
     msg =
-      `⛔ Auto Request Accepter — Cancelled\n\n` +
-      `✅ Total Accepted: ${job.totalAccepted}\n\n` +
+      `⛔ <b>Auto Request Accepter — Cancelled</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n\n` +
       `You cancelled the Auto Request Accepter. No more requests will be auto-accepted.`;
   }
 
@@ -6571,9 +6560,9 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" 
     try {
       await bot.api.sendMessage(
         job.chatId,
-        `🔔 Notification: Auto Request Accepter Stopped\n\n` +
+        `🔔 <b>Notification: Auto Request Accepter Stopped</b>\n\n` +
         `The Auto Request Accepter has been turned off — your selected time duration has expired.\n\n` +
-        `✅ Total requests accepted: ${job.totalAccepted}`,
+        `✅ <b>Total requests accepted:</b> ${job.totalAccepted}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -6581,9 +6570,9 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" 
     try {
       await bot.api.sendMessage(
         job.chatId,
-        `🔔 Notification: Auto Request Accepter Stopped\n\n` +
+        `🔔 <b>Notification: Auto Request Accepter Stopped</b>\n\n` +
         `Your access has expired or been revoked, so the Auto Request Accepter was stopped automatically.\n\n` +
-        `✅ Total requests accepted: ${job.totalAccepted}\n\n` +
+        `✅ <b>Total requests accepted:</b> ${job.totalAccepted}\n\n` +
         `Please renew your access to continue using this feature.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
@@ -6597,7 +6586,7 @@ bot.callbackQuery("auto_accepter", async (ctx) => {
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText(
-      `❌ WhatsApp not connected!\n\nPlease connect WhatsApp first.`,
+      `❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
     ); return;
   }
@@ -6608,16 +6597,16 @@ bot.callbackQuery("auto_accepter", async (ctx) => {
     const remaining = Math.max(0, existingJob.endsAt - Date.now());
     const remainMins = Math.ceil(remaining / 60000);
     await ctx.editMessageText(
-      `🛡️ Auto Request Accepter\n\n` +
+      `🛡️ <b>Auto Request Accepter</b>\n\n` +
       `⚡ A job is already running!\n\n` +
-      `✅ Accepted so far: ${existingJob.totalAccepted}\n` +
-      `⏰ Time remaining: ~${remainMins} min\n\n` +
+      `✅ Accepted so far: <b>${existingJob.totalAccepted}</b>\n` +
+      `⏰ Time remaining: <b>~${remainMins} min</b>\n\n` +
       `Stop the current job first to start a new one.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Stop Current Job", "ar_stop_job").text("🏠 Menu", "main_menu") }
     ); return;
   }
 
-  await ctx.editMessageText("🔍 Scanning your WhatsApp groups...\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
 
   const groups = await getAllGroups(String(userId));
   if (!groups.length) {
@@ -6649,11 +6638,11 @@ bot.callbackQuery("auto_accepter", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n` +
-    `📱 Admin Groups Found: ${adminGroups.length}\n` +
-    (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : `⚠️ No similar patterns found.\n`) +
+    `🛡️ <b>Auto Request Accepter</b>\n\n` +
+    `📱 <b>Admin Groups Found: ${adminGroups.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 <b>Similar Patterns: ${patterns.length}</b>\n` : `⚠️ No similar patterns found.\n`) +
     `\n📌 Select which groups to monitor:\n\n` +
-    `Bot will auto-accept all pending join requests in selected groups.`,
+    `<i>Bot will auto-accept all pending join requests in selected groups.</i>`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -6711,7 +6700,7 @@ bot.callbackQuery("ar_similar", async (ctx) => {
   kb.text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -6735,7 +6724,7 @@ bot.callbackQuery(/^ar_sim_(\d+)$/, async (ctx) => {
   state.arData.page = 0;
 
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups to monitor:\n${state.arData.selectedIndices.size} selected`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>${state.arData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6748,7 +6737,7 @@ bot.callbackQuery("ar_show_all", async (ctx) => {
   state.step = "ar_select";
   state.arData.page = 0;
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups to monitor:\nTap to select/deselect`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>Tap to select/deselect</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6764,7 +6753,7 @@ bot.callbackQuery(/^ar_tog_(\d+)$/, async (ctx) => {
   else state.arData.selectedIndices.add(idx);
   const cnt = state.arData.selectedIndices.size;
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups to monitor:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups to monitor:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6776,7 +6765,7 @@ bot.callbackQuery("ar_prev_page", async (ctx) => {
   if ((state.arData.page || 0) > 0) state.arData.page--;
   const cnt = state.arData.selectedIndices.size;
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6789,7 +6778,7 @@ bot.callbackQuery("ar_next_page", async (ctx) => {
   if ((state.arData.page || 0) < totalPages - 1) state.arData.page++;
   const cnt = state.arData.selectedIndices.size;
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6802,7 +6791,7 @@ bot.callbackQuery("ar_select_all", async (ctx) => {
   if (!state?.arData) return;
   for (let i = 0; i < state.arData.allGroups.length; i++) state.arData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\nAll ${state.arData.allGroups.length} groups selected`,
+    `🛡️ <b>Auto Request Accepter</b>\n\nAll <b>${state.arData.allGroups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6813,7 +6802,7 @@ bot.callbackQuery("ar_clear_all", async (ctx) => {
   if (!state?.arData) return;
   state.arData.selectedIndices.clear();
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n📱 ${state.arData.allGroups.length} admin group(s)\n\nSelect groups:\nNone selected yet`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n📱 <b>${state.arData.allGroups.length} admin group(s)</b>\n\nSelect groups:\n<i>None selected yet</i>`,
     { parse_mode: "HTML", reply_markup: buildArKeyboard(state) }
   );
 });
@@ -6837,9 +6826,9 @@ bot.callbackQuery("ar_proceed", async (ctx) => {
     .text("🔙 Back", "auto_accepter").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter\n\n` +
-    `📋 Selected Groups (${selectedGroups.length}):\n${previewGroups}${moreText}\n\n` +
-    `⏰ How long should it run?`,
+    `🛡️ <b>Auto Request Accepter</b>\n\n` +
+    `📋 <b>Selected Groups (${selectedGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `⏰ <b>How long should it run?</b>`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -6866,15 +6855,15 @@ bot.callbackQuery(/^ar_time_(\d+)$/, async (ctx) => {
     .text("❌ Cancel", "main_menu");
 
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter — Review\n\n` +
-    `📋 Groups to Monitor (${arGroups.length}):\n${previewGroups}${moreText}\n\n` +
-    `⏱️ Duration: ${durationLabel}\n\n` +
-    `ℹ️ What will happen:\n` +
+    `🛡️ <b>Auto Request Accepter — Review</b>\n\n` +
+    `📋 <b>Groups to Monitor (${arGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
+    `⏱️ <b>Duration:</b> ${durationLabel}\n\n` +
+    `ℹ️ <b>What will happen:</b>\n` +
     `• Bot polls every 10 seconds\n` +
     `• Only users who joined via invite link will be accepted\n` +
     `• Admin-added pending requests will NOT be accepted\n` +
     `• You will get a notification when time is up\n\n` +
-    `Tap Start to begin or Cancel to go back.`,
+    `Tap <b>Start</b> to begin or <b>Cancel</b> to go back.`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -6907,8 +6896,8 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
   const chatId = ctx.chat!.id;
 
   await ctx.editMessageText(
-    `🛡️ Auto Request Accepter — Starting...\n\n` +
-    `📋 Groups (${groupNames.length}):\n` +
+    `🛡️ <b>Auto Request Accepter — Starting...</b>\n\n` +
+    `📋 <b>Groups (${groupNames.length}):</b>\n` +
     groupNames.slice(0, 5).map((n) => `• ${esc(n)}`).join("\n") +
     (groupNames.length > 5 ? `\n... +${groupNames.length - 5} more` : "") +
     `\n\n⏱️ Duration: ${durationLabel}\n\n⌛ Starting first poll...`,
@@ -6983,7 +6972,7 @@ bot.callbackQuery("ar_stop_job", async (ctx) => {
 
 // ─── Leave Group ─────────────────────────────────────────────────────────────
 
-const leaveJobCancel = new Set();
+const leaveJobCancel = new Set<number>();
 const LV_PAGE_SIZE = 20;
 
 function buildLeaveKeyboard(state: UserState): InlineKeyboard {
@@ -7024,13 +7013,13 @@ bot.callbackQuery("leave_group", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
 
-  await ctx.editMessageText("🔍 Scanning groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   if (!allGroups.length) {
     await ctx.editMessageText("📭 No groups found.", {
@@ -7058,9 +7047,9 @@ bot.callbackQuery("leave_group", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n` +
-    `📊 Found ${allGroups.length} groups\n` +
-    (patterns.length > 0 ? `🔍 ${patterns.length} similar patterns detected\n` : "") +
+    `🚪 <b>Select Groups to Leave</b>\n\n` +
+    `📊 Found <b>${allGroups.length}</b> groups\n` +
+    (patterns.length > 0 ? `🔍 <b>${patterns.length}</b> similar patterns detected\n` : "") +
     `\nChoose how to select groups:`,
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -7085,7 +7074,7 @@ bot.callbackQuery("lv_similar", async (ctx) => {
   }
   kb.text("🔙 Back", "leave_group").text("🏠 Menu", "main_menu");
 
-  await ctx.editMessageText("🔍 Similar Group Patterns\n\nTap a pattern to select those groups:", {
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", {
     parse_mode: "HTML", reply_markup: kb,
   });
 });
@@ -7110,7 +7099,7 @@ bot.callbackQuery(/^lv_sim_(\d+)$/, async (ctx) => {
 
   const cnt = state.leaveData.selectedIndices.size;
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\n${cnt} selected`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7123,7 +7112,7 @@ bot.callbackQuery("lv_show_all", async (ctx) => {
   state.step = "lv_select";
   state.leaveData.page = 0;
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\nNone selected yet`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>None selected yet</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7139,7 +7128,7 @@ bot.callbackQuery(/^lv_tog_(\d+)$/, async (ctx) => {
   else state.leaveData.selectedIndices.add(idx);
   const cnt = state.leaveData.selectedIndices.size;
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7151,7 +7140,7 @@ bot.callbackQuery("lv_prev_page", async (ctx) => {
   if ((state.leaveData.page || 0) > 0) state.leaveData.page!--;
   const cnt = state.leaveData.selectedIndices?.size || 0;
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7164,7 +7153,7 @@ bot.callbackQuery("lv_next_page", async (ctx) => {
   if ((state.leaveData.page || 0) < totalPages - 1) state.leaveData.page!++;
   const cnt = state.leaveData.selectedIndices?.size || 0;
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\n${cnt > 0 ? `${cnt} selected` : "None selected yet"}`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7177,7 +7166,7 @@ bot.callbackQuery("lv_select_all", async (ctx) => {
   if (!state?.leaveData?.selectedIndices) return;
   for (let i = 0; i < state.leaveData.groups.length; i++) state.leaveData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\nAll ${state.leaveData.groups.length} groups selected`,
+    `🚪 <b>Select Groups to Leave</b>\n\nAll <b>${state.leaveData.groups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7188,7 +7177,7 @@ bot.callbackQuery("lv_clear_all", async (ctx) => {
   if (!state?.leaveData?.selectedIndices) return;
   state.leaveData.selectedIndices.clear();
   await ctx.editMessageText(
-    `🚪 Select Groups to Leave\n\n📊 ${state.leaveData.groups.length} groups total\n\nTap to select/deselect:\nNone selected yet`,
+    `🚪 <b>Select Groups to Leave</b>\n\n📊 <b>${state.leaveData.groups.length}</b> groups total\n\nTap to select/deselect:\n<i>None selected yet</i>`,
     { parse_mode: "HTML", reply_markup: buildLeaveKeyboard(state) }
   );
 });
@@ -7203,10 +7192,10 @@ bot.callbackQuery("lv_proceed", async (ctx) => {
     .map((i) => state.leaveData!.groups[i]);
   state.leaveData.selectedGroups = selectedGroups;
 
-  let text = `🚪 Leave Groups — Confirm\n\n`;
-  text += `📊 ${selectedGroups.length} group(s) will be left:\n\n`;
+  let text = `🚪 <b>Leave Groups — Confirm</b>\n\n`;
+  text += `📊 <b>${selectedGroups.length} group(s) will be left:</b>\n\n`;
   for (const g of selectedGroups) text += `• ${esc(g.subject)} ${g.isAdmin ? "👑" : "👤"}\n`;
-  text += `\n⚠️ Are you sure you want to leave these groups?`;
+  text += `\n⚠️ <b>Are you sure you want to leave these groups?</b>`;
 
   const chunks = splitMessage(text, 4000);
   for (let i = 0; i < chunks.length; i++) {
@@ -7234,7 +7223,7 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
   leaveJobCancel.delete(userId);
 
   await ctx.editMessageText(
-    `⏳ Leaving ${groups.length} group(s)...\n\n🔄 0/${groups.length} done...`,
+    `⏳ <b>Leaving ${groups.length} group(s)...</b>\n\n🔄 0/${groups.length} done...`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
   );
 
@@ -7249,7 +7238,7 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       else { lines.push(`❌ Failed: ${esc(g.subject)}`); failed++; }
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Leaving: ${li + 1}/${groups.length}\n\n${lines.join("\n")}`,
+          `⏳ <b>Leaving: ${li + 1}/${groups.length}</b>\n\n${lines.join("\n")}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
@@ -7257,9 +7246,9 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     }
     leaveJobCancel.delete(userId);
     const summary = cancelled
-      ? `\n\n⛔ Cancelled! ✅ ${success} left | ❌ ${failed} failed`
-      : `\n\n📊 Done! ✅ ${success} left | ❌ ${failed} failed`;
-    const result = `🚪 Leave Groups Result\n\n${lines.join("\n")}${summary}`;
+      ? `\n\n⛔ <b>Cancelled! ✅ ${success} left | ❌ ${failed} failed</b>`
+      : `\n\n📊 <b>Done! ✅ ${success} left | ❌ ${failed} failed</b>`;
+    const result = `🚪 <b>Leave Groups Result</b>\n\n${lines.join("\n")}${summary}`;
     const chunks = splitMessage(result, 4000);
     try {
       await bot.api.editMessageText(chatId, msgId, chunks[0], {
@@ -7324,12 +7313,12 @@ bot.callbackQuery("remove_members", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter((g) => g.isAdmin);
 
@@ -7350,7 +7339,7 @@ bot.callbackQuery("remove_members", async (ctx) => {
 
   const state = userStates.get(userId)!;
   await ctx.editMessageText(
-    `🗑️ Remove Members\n\n👑 ${adminGroups.length} admin group(s) found\n\nSelect the group(s) from which you want to remove members:\nTap to select/deselect`,
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${adminGroups.length} admin group(s) found</b>\n\nSelect the group(s) from which you want to remove members:\n<i>Tap to select/deselect</i>`,
     { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
@@ -7372,7 +7361,7 @@ bot.callbackQuery(/^rm_tog_(\d+)$/, async (ctx) => {
 
   const selectedCount = state.removeData.selectedIndices.size;
   await ctx.editMessageText(
-    `🗑️ Remove Members\n\n👑 ${state.removeData.allGroups.length} admin group(s)\n\nSelect group(s) to remove members from:\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${state.removeData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to remove members from:\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
@@ -7389,7 +7378,7 @@ bot.callbackQuery("rm_select_all", async (ctx) => {
   }
 
   await ctx.editMessageText(
-    `🗑️ Remove Members\n\n👑 All ${state.removeData.allGroups.length} groups selected\n\nSelect group(s) to remove members from:`,
+    `🗑️ <b>Remove Members</b>\n\n👑 All <b>${state.removeData.allGroups.length} groups selected</b>\n\nSelect group(s) to remove members from:`,
     { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
@@ -7402,7 +7391,7 @@ bot.callbackQuery("rm_page_prev", async (ctx) => {
   if (state.removeData.page > 0) state.removeData.page--;
   const selectedCount = state.removeData.selectedIndices.size;
   await ctx.editMessageText(
-    `🗑️ Remove Members\n\n👑 ${state.removeData.allGroups.length} admin group(s)\n\nSelect group(s) to remove members from:\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${state.removeData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to remove members from:\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
@@ -7416,7 +7405,7 @@ bot.callbackQuery("rm_page_next", async (ctx) => {
   if (state.removeData.page < totalPages - 1) state.removeData.page++;
   const selectedCount = state.removeData.selectedIndices.size;
   await ctx.editMessageText(
-    `🗑️ Remove Members\n\n👑 ${state.removeData.allGroups.length} admin group(s)\n\nSelect group(s) to remove members from:\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${state.removeData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to remove members from:\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
@@ -7445,15 +7434,15 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
 
   const groupList = selectedGroups.map(g => `• ${esc(g.subject)}`).join("\n");
   await ctx.editMessageText(
-    `✅ ${selectedGroups.length} group(s) selected:\n\n${groupList}\n\n` +
-    `📱 Exclude Numbers\n\n` +
-    `🛡️ Admins hamesha safe rahenge — unhe kabhi remove nahi karta, chahe aap exclude karo ya na karo.\n\n` +
+    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}\n\n` +
+    `📱 <b>Exclude Numbers</b>\n\n` +
+    `🛡️ <b>Admins hamesha safe rahenge</b> — unhe kabhi remove nahi karta, chahe aap exclude karo ya na karo.\n\n` +
     `Aap do tarah se exclude kar sakte ho (ek per line, dono mix bhi kar sakte ho):\n\n` +
-    `1️⃣ Pura number — sirf wahi number exclude hoga.\n` +
-    `   Example:\n   +919912345678\n   +919998887777\n\n` +
-    `2️⃣ Sirf country code (1-4 digits, + optional) — uss country ke saare numbers exclude honge.\n` +
-    `   Example:\n   +91\n   +92\n   (India aur Pakistan ke saare numbers safe rahenge)\n\n` +
-    `Agar kuch bhi exclude nahi karna to Skip dabao:`,
+    `1️⃣ <b>Pura number</b> — sirf wahi number exclude hoga.\n` +
+    `   Example:\n   <code>+919912345678\n   +919998887777</code>\n\n` +
+    `2️⃣ <b>Sirf country code</b> (1-4 digits, + optional) — uss country ke <i>saare</i> numbers exclude honge.\n` +
+    `   Example:\n   <code>+91\n   +92</code>\n   (India aur Pakistan ke saare numbers safe rahenge)\n\n` +
+    `Agar kuch bhi exclude nahi karna to <b>Skip</b> dabao:`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -7503,8 +7492,8 @@ async function startRemoveMembersProcess(
   ctx: any,
   userId: number,
   selectedGroups: Array<{ id: string; subject: string }>,
-  excludeNumbers: Set,
-  excludePrefixes: Set
+  excludeNumbers: Set<string>,
+  excludePrefixes: Set<string>
 ) {
   const chatId = ctx.callbackQuery?.message?.chat.id || ctx.chat?.id;
   const msgId = ctx.callbackQuery?.message?.message_id;
@@ -7516,11 +7505,11 @@ async function startRemoveMembersProcess(
 
   const groupList = selectedGroups.map(g => `• ${esc(g.subject)}`).join("\n");
   const excludeBits: string[] = [];
-  if (excludeList.length > 0) excludeBits.push(`🚫 Excluding ${excludeList.length} number(s)`);
-  if (prefixList.length > 0) excludeBits.push(`🌐 Excluding country code(s): ${prefixList.map(p => "+" + p).join(", ")}`);
+  if (excludeList.length > 0) excludeBits.push(`🚫 <b>Excluding ${excludeList.length} number(s)</b>`);
+  if (prefixList.length > 0) excludeBits.push(`🌐 <b>Excluding country code(s):</b> ${prefixList.map(p => "+" + p).join(", ")}`);
   const excludeText = excludeBits.length > 0 ? "\n" + excludeBits.join("\n") : "";
 
-  const statusText = `⏳ Removing members from ${selectedGroups.length} group(s)...\n\n${groupList}${excludeText}\n\n⌛ Please wait...`;
+  const statusText = `⏳ <b>Removing members from ${selectedGroups.length} group(s)...</b>\n\n${groupList}${excludeText}\n\n⌛ Please wait...`;
 
   try {
     if (msgId) {
@@ -7548,7 +7537,7 @@ async function removeAllGroupMembersBackground(
   chatId: number,
   msgId: number | undefined
 ) {
-  let fullResult = "🗑️ Remove Members Result\n\n";
+  let fullResult = "🗑️ <b>Remove Members Result</b>\n\n";
   const excludeSet = new Set(excludeNumbers);
   // Pre-compute the digit-only prefix list once (already stripped, but be safe).
   const prefixDigitsList = excludePrefixes
@@ -7561,7 +7550,7 @@ async function removeAllGroupMembersBackground(
     try {
       if (msgId) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Processing group ${gi + 1}/${groups.length}:\n${esc(group.subject)}\n\n⌛ Fetching members...`,
+          `⏳ <b>Processing group ${gi + 1}/${groups.length}:</b>\n${esc(group.subject)}\n\n⌛ Fetching members...`,
           { parse_mode: "HTML" }
         );
       }
@@ -7572,7 +7561,7 @@ async function removeAllGroupMembersBackground(
     const participants = await getGroupParticipants(userId, group.id);
 
     // Build last-10-digit set of excluded numbers for robust matching
-    const excludeLast10Set = new Set();
+    const excludeLast10Set = new Set<string>();
     for (const excl of excludeSet) {
       const digits = excl.replace(/[^0-9]/g, "");
       if (digits.length >= 7) excludeLast10Set.add(digits.slice(-10));
@@ -7596,7 +7585,7 @@ async function removeAllGroupMembersBackground(
     });
 
     if (!nonAdmins.length) {
-      fullResult += `📋 ${esc(group.subject)}\n`;
+      fullResult += `📋 <b>${esc(group.subject)}</b>\n`;
       fullResult += `✅ No members to remove (all are admins or excluded)\n\n`;
       continue;
     }
@@ -7616,7 +7605,7 @@ async function removeAllGroupMembersBackground(
         if (msgId && !cancelDialogActiveFor.has(Number(userId))) {
           try {
             await bot.api.editMessageText(chatId, msgId,
-              `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n🗑️ Removing: ${pi + 1}/${nonAdmins.length}\n✅ Removed: ${removed} | ❌ Failed: ${failed}`,
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n🗑️ Removing: ${pi + 1}/${nonAdmins.length}\n✅ Removed: ${removed} | ❌ Failed: ${failed}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rm_cancel_request") }
             );
           } catch {}
@@ -7626,7 +7615,7 @@ async function removeAllGroupMembersBackground(
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    fullResult += `📋 ${esc(group.subject)}\n`;
+    fullResult += `📋 <b>${esc(group.subject)}</b>\n`;
     fullResult += `🗑️ Removed: ${removed} | ❌ Failed: ${failed}\n\n`;
     if (cancelledEarly) break;
   }
@@ -7635,8 +7624,8 @@ async function removeAllGroupMembersBackground(
   removeMembersCancelRequests.delete(Number(userId));
   cancelDialogActiveFor.delete(Number(userId));
 
-  if (wasCancelled) fullResult += `⛔ Stopped by user.\n\n`;
-  fullResult += `━━━━━━━━━━━━━━━━━━\n✅ Done processing group(s)!`;
+  if (wasCancelled) fullResult += `⛔ <b>Stopped by user.</b>\n\n`;
+  fullResult += `━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
@@ -7701,12 +7690,12 @@ bot.callbackQuery("make_admin", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter((g) => g.isAdmin);
 
@@ -7735,7 +7724,7 @@ bot.callbackQuery("make_admin", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `👑 Make Admin\n\n` +
+    `👑 <b>Make Admin</b>\n\n` +
     `📊 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
     `\n📌 Choose an option:`,
@@ -7764,7 +7753,7 @@ bot.callbackQuery("ma_similar", async (ctx) => {
   kb.text("🔙 Back", "make_admin").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -7790,7 +7779,7 @@ bot.callbackQuery(/^ma_sim_(\d+)$/, async (ctx) => {
   state.step = "make_admin_select";
   state.makeAdminData.page = 0;
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s):\n${state.makeAdminData.selectedIndices.size} selected`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${state.makeAdminData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7804,7 +7793,7 @@ bot.callbackQuery("ma_show_all", async (ctx) => {
   state.step = "make_admin_select";
   state.makeAdminData.page = 0;
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s) in which to make admin:\nTap to select/deselect`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s) in which to make admin:\n<i>Tap to select/deselect</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7826,7 +7815,7 @@ bot.callbackQuery(/^ma_tog_(\d+)$/, async (ctx) => {
 
   const selectedCount = state.makeAdminData.selectedIndices.size;
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7839,7 +7828,7 @@ bot.callbackQuery("ma_prev_page", async (ctx) => {
   if ((state.makeAdminData.page || 0) > 0) state.makeAdminData.page = (state.makeAdminData.page || 0) - 1;
   const selectedCount = state.makeAdminData.selectedIndices.size;
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7853,7 +7842,7 @@ bot.callbackQuery("ma_next_page", async (ctx) => {
   if ((state.makeAdminData.page || 0) < totalPages - 1) state.makeAdminData.page = (state.makeAdminData.page || 0) + 1;
   const selectedCount = state.makeAdminData.selectedIndices.size;
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7873,7 +7862,7 @@ bot.callbackQuery("ma_select_all", async (ctx) => {
   }
 
   await ctx.editMessageText(
-    `👑 Make Admin\n\nAll ${state.makeAdminData.allGroups.length} groups selected`,
+    `👑 <b>Make Admin</b>\n\nAll <b>${state.makeAdminData.allGroups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7887,7 +7876,7 @@ bot.callbackQuery("ma_clear_all", async (ctx) => {
   state.makeAdminData.selectedIndices.clear();
 
   await ctx.editMessageText(
-    `👑 Make Admin\n\n👑 ${state.makeAdminData.allGroups.length} admin group(s)\n\nSelect group(s):\nNone selected yet`,
+    `👑 <b>Make Admin</b>\n\n👑 <b>${state.makeAdminData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>None selected yet</i>`,
     { parse_mode: "HTML", reply_markup: buildMakeAdminKeyboard(state) }
   );
 });
@@ -7904,10 +7893,10 @@ bot.callbackQuery("ma_proceed", async (ctx) => {
   const moreText = selectedGroups.length > 60 ? `\n... +${selectedGroups.length - 60} more group(s)` : "";
 
   await ctx.editMessageText(
-    `✅ ${selectedGroups.length} group(s) selected:\n\n${groupList}${moreText}\n\n` +
-    `📱 Send phone number(s)\n\n` +
+    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}${moreText}\n\n` +
+    `📱 <b>Send phone number(s)</b>\n\n` +
     `Send the phone numbers (with country code) of people you want to make admin, one per line:\n\n` +
-    `Example:\n+919912345678\n+919998887777`,
+    `Example:\n<code>+919912345678\n+919998887777</code>`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -7953,12 +7942,12 @@ bot.callbackQuery("approval", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter((g) => g.isAdmin);
 
@@ -7987,7 +7976,7 @@ bot.callbackQuery("approval", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `✅ Approval\n\n` +
+    `✅ <b>Approval</b>\n\n` +
     `📊 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
     `\n📌 Choose an option:`,
@@ -8016,7 +8005,7 @@ bot.callbackQuery("ap_similar", async (ctx) => {
   kb.text("🔙 Back", "approval").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -8042,7 +8031,7 @@ bot.callbackQuery(/^ap_sim_(\d+)$/, async (ctx) => {
   state.step = "approval_select";
   state.approvalData.page = 0;
   await ctx.editMessageText(
-    `✅ Approval\n\n👑 ${state.approvalData.allGroups.length} admin group(s)\n\nSelect group(s):\n${state.approvalData.selectedIndices.size} selected`,
+    `✅ <b>Approval</b>\n\n👑 <b>${state.approvalData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${state.approvalData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8056,7 +8045,7 @@ bot.callbackQuery("ap_show_all", async (ctx) => {
   state.step = "approval_select";
   state.approvalData.page = 0;
   await ctx.editMessageText(
-    `✅ Approval\n\n👑 ${state.approvalData.allGroups.length} admin group(s)\n\nSelect group(s) to approve pending members:\nTap to select/deselect`,
+    `✅ <b>Approval</b>\n\n👑 <b>${state.approvalData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to approve pending members:\n<i>Tap to select/deselect</i>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8078,7 +8067,7 @@ bot.callbackQuery(/^ap_tog_(\d+)$/, async (ctx) => {
 
   const selectedCount = state.approvalData.selectedIndices.size;
   await ctx.editMessageText(
-    `✅ Approval\n\n👑 ${state.approvalData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `✅ <b>Approval</b>\n\n👑 <b>${state.approvalData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8091,7 +8080,7 @@ bot.callbackQuery("ap_prev_page", async (ctx) => {
   if ((state.approvalData.page || 0) > 0) state.approvalData.page = (state.approvalData.page || 0) - 1;
   const selectedCount = state.approvalData.selectedIndices.size;
   await ctx.editMessageText(
-    `✅ Approval\n\n👑 ${state.approvalData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `✅ <b>Approval</b>\n\n👑 <b>${state.approvalData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8105,7 +8094,7 @@ bot.callbackQuery("ap_next_page", async (ctx) => {
   if ((state.approvalData.page || 0) < totalPages - 1) state.approvalData.page = (state.approvalData.page || 0) + 1;
   const selectedCount = state.approvalData.selectedIndices.size;
   await ctx.editMessageText(
-    `✅ Approval\n\n👑 ${state.approvalData.allGroups.length} admin group(s)\n\nSelect group(s):\n${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}`,
+    `✅ <b>Approval</b>\n\n👑 <b>${state.approvalData.allGroups.length} admin group(s)</b>\n\nSelect group(s):\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8125,7 +8114,7 @@ bot.callbackQuery("ap_select_all", async (ctx) => {
   }
 
   await ctx.editMessageText(
-    `✅ Approval\n\nAll ${state.approvalData.allGroups.length} groups selected`,
+    `✅ <b>Approval</b>\n\nAll <b>${state.approvalData.allGroups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildApprovalKeyboard(state) }
   );
 });
@@ -8141,10 +8130,10 @@ bot.callbackQuery("ap_proceed", async (ctx) => {
   const moreText = selectedGroups.length > 30 ? `\n... +${selectedGroups.length - 30} more group(s)` : "";
 
   await ctx.editMessageText(
-    `✅ ${selectedGroups.length} group(s) selected:\n\n${preview}${moreText}\n\n` +
-    `📌 Choose approval type:\n\n` +
-    `• 👥 All Approval — Approve every pending member in the selected groups (1 by 1 or all together)\n` +
-    `• 👑 Admin Approval — Approve only specific numbers (from a VCF or a list) and optionally also make them admin`,
+    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${preview}${moreText}\n\n` +
+    `📌 <b>Choose approval type:</b>\n\n` +
+    `• <b>👥 All Approval</b> — Approve every pending member in the selected groups (1 by 1 or all together)\n` +
+    `• <b>👑 Admin Approval</b> — Approve only specific numbers (from a VCF or a list) and optionally also make them admin`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -8168,10 +8157,10 @@ bot.callbackQuery("ap_type_all", async (ctx) => {
   const moreText = selectedGroups.length > 30 ? `\n... +${selectedGroups.length - 30} more group(s)` : "";
 
   await ctx.editMessageText(
-    `👥 All Approval — ${selectedGroups.length} group(s):\n\n${preview}${moreText}\n\n` +
-    `📌 Choose approval method:\n\n` +
-    `• Approve 1 by 1 — Approve each pending member one at a time\n` +
-    `• Approve Together — Turn off approval setting, then turn it back on to approve all at once`,
+    `👥 <b>All Approval — ${selectedGroups.length} group(s):</b>\n\n${preview}${moreText}\n\n` +
+    `📌 <b>Choose approval method:</b>\n\n` +
+    `• <b>Approve 1 by 1</b> — Approve each pending member one at a time\n` +
+    `• <b>Approve Together</b> — Turn off approval setting, then turn it back on to approve all at once`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -8200,10 +8189,10 @@ bot.callbackQuery("ap_type_admin", async (ctx) => {
   const moreText = selectedGroups.length > 30 ? `\n... +${selectedGroups.length - 30} more group(s)` : "";
 
   await ctx.editMessageText(
-    `👑 Admin Approval — ${selectedGroups.length} group(s):\n\n${preview}${moreText}\n\n` +
-    `📁 Send a VCF file OR send phone numbers (one per line, with country code).\n\n` +
+    `👑 <b>Admin Approval — ${selectedGroups.length} group(s):</b>\n\n${preview}${moreText}\n\n` +
+    `📁 <b>Send a VCF file</b> OR <b>send phone numbers</b> (one per line, with country code).\n\n` +
     `Only these numbers will be approved across the selected groups.\n\n` +
-    `Example:\n+919912345678\n+919998887777`,
+    `Example:\n<code>+919912345678\n+919998887777</code>`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -8221,10 +8210,10 @@ async function showAdminApprovalChoice(ctx: any, userId: number) {
   const phoneMore = phones.length > 10 ? `\n... +${phones.length - 10} more` : "";
 
   await ctx.reply(
-    `✅ ${phones.length} number(s) received\n\n${phonePreview}${phoneMore}\n\n` +
-    `📌 After approval, what should I do?\n\n` +
-    `• Approve only — Just approve these numbers in the selected groups\n` +
-    `• Approve + Make Admin — Approve them, then also promote them to admin in those groups`,
+    `✅ <b>${phones.length} number(s) received</b>\n\n${phonePreview}${phoneMore}\n\n` +
+    `📌 <b>After approval, what should I do?</b>\n\n` +
+    `• <b>Approve only</b> — Just approve these numbers in the selected groups\n` +
+    `• <b>Approve + Make Admin</b> — Approve them, then also promote them to admin in those groups`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -8268,15 +8257,15 @@ async function showAdminApprovalReview(ctx: any, userId: number) {
   const phoneMore = phones.length > 15 ? `\n... +${phones.length - 15} more` : "";
 
   const actionLine = state.approvalData.makeAdminAfter
-    ? "✅ Approve and 👑 make admin"
+    ? "✅ Approve <b>and</b> 👑 make admin"
     : "✅ Approve only";
 
   await ctx.editMessageText(
-    `📋 Review — Admin Approval\n\n` +
-    `Groups (${selectedGroups.length}):\n${groupPreview}${groupMore}\n\n` +
-    `Numbers (${phones.length}):\n${phonePreview}${phoneMore}\n\n` +
-    `Action: ${actionLine}\n\n` +
-    `Tap Confirm to start.`,
+    `📋 <b>Review — Admin Approval</b>\n\n` +
+    `<b>Groups (${selectedGroups.length}):</b>\n${groupPreview}${groupMore}\n\n` +
+    `<b>Numbers (${phones.length}):</b>\n${phonePreview}${phoneMore}\n\n` +
+    `<b>Action:</b> ${actionLine}\n\n` +
+    `Tap <b>Confirm</b> to start.`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -8302,7 +8291,7 @@ bot.callbackQuery("ap_admin_confirm", async (ctx) => {
 
   userStates.delete(userId);
   await ctx.editMessageText(
-    `⏳ ${makeAdminAfter ? "Approving + making admin" : "Approving"} ${phones.length} number(s) in ${selectedGroups.length} group(s)...\n\n⌛ Please wait...`,
+    `⏳ <b>${makeAdminAfter ? "Approving + making admin" : "Approving"} ${phones.length} number(s) in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
     { parse_mode: "HTML" }
   );
   void approveAdminSpecificBackground(String(userId), selectedGroups, phones, makeAdminAfter, chatId, msgId);
@@ -8318,7 +8307,7 @@ async function approveAdminSpecificBackground(
 ) {
   const normalizedTargets = new Set(phones.map(p => p.replace(/[^0-9]/g, "")));
   const titleLabel = makeAdminAfter ? "✅ Admin Approval (Approve + Make Admin) Result" : "✅ Admin Approval (Approve only) Result";
-  let fullResult = `${titleLabel}\n\n`;
+  let fullResult = `<b>${titleLabel}</b>\n\n`;
   const lines: string[] = [];
 
   for (let gi = 0; gi < groups.length; gi++) {
@@ -8326,20 +8315,20 @@ async function approveAdminSpecificBackground(
 
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n⌛ Fetching pending list...`,
+        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching pending list...`,
         { parse_mode: "HTML" }
       );
     } catch {}
 
     const pending = await getGroupPendingRequestsDetailed(userId, group.id);
     // Build a last-10-digits index so we tolerate missing/extra country codes on either side.
-    const targetByLast10 = new Map();
+    const targetByLast10 = new Map<string, string>();
     for (const t of normalizedTargets) {
       const last10 = t.slice(-10);
       if (last10.length >= 7) targetByLast10.set(last10, t);
     }
     const matched: Array<{ jid: string; phone: string }> = [];
-    const matchedTargets = new Set();
+    const matchedTargets = new Set<string>();
     for (const p of pending) {
       const phone = (p.phone || "").replace(/[^0-9]/g, "");
       if (!phone) continue; // LID without resolvable phone — skip (will be reported below)
@@ -8376,7 +8365,7 @@ async function approveAdminSpecificBackground(
         if (mi % 3 === 0 || mi === matched.length - 1) {
           try {
             await bot.api.editMessageText(chatId, msgId,
-              `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
               `Approving: ${mi + 1}/${matched.length}\n` +
               `✅ Approved: ${approved} | ❌ Failed: ${approveFailed}`,
               { parse_mode: "HTML" }
@@ -8398,7 +8387,7 @@ async function approveAdminSpecificBackground(
     if (makeAdminAfter && matched.length > 0) {
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n👑 Promoting approved members to admin...`,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n👑 Promoting approved members to admin...`,
           { parse_mode: "HTML" }
         );
       } catch {}
@@ -8427,11 +8416,11 @@ async function approveAdminSpecificBackground(
     const summary = makeAdminAfter
       ? `✅ Approved: ${approved} | 👑 Admin: ${madeAdmin} | ❌ Failed: ${approveFailed + adminFailed} | ⚠️ Not found: ${notFound.length}`
       : `✅ Approved: ${approved} | ❌ Failed: ${approveFailed} | ⚠️ Not found: ${notFound.length}`;
-    lines.push(`📋 ${esc(group.subject)}\n${groupLines.join("\n")}\n${summary}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n${summary}`);
   }
 
   fullResult += lines.join("\n\n");
-  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ Done processing ${groups.length} group(s)!`;
+  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
@@ -8465,7 +8454,7 @@ bot.callbackQuery("ap_one_by_one", async (ctx) => {
   cancelDialogActiveFor.delete(userId);
 
   await ctx.editMessageText(
-    `⏳ Approving pending members 1 by 1...\n\n⌛ Please wait...`,
+    `⏳ <b>Approving pending members 1 by 1...</b>\n\n⌛ Please wait...`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("❌ Cancel", "ap_cancel_request"),
@@ -8512,7 +8501,7 @@ bot.callbackQuery("ap_cancel_confirm", async (ctx) => {
 // Fetch a group's current total member count after an approval pass.
 // Returns "?" if the metadata fetch fails or returns an empty list, so the
 // result message stays readable instead of dropping the line.
-async function getGroupMemberCountSafe(userId: string, groupId: string): Promise {
+async function getGroupMemberCountSafe(userId: string, groupId: string): Promise<string> {
   try {
     const parts = await getGroupParticipants(userId, groupId);
     return parts.length > 0 ? String(parts.length) : "?";
@@ -8529,7 +8518,7 @@ async function approveOneByOneBackground(
   msgId: number
 ) {
   const progressMarkup = new InlineKeyboard().text("❌ Cancel", "ap_cancel_request");
-  let fullResult = "✅ Approve 1 by 1 Result\n\n";
+  let fullResult = "✅ <b>Approve 1 by 1 Result</b>\n\n";
   const lines: string[] = [];
   let cancelled = false;
 
@@ -8538,7 +8527,7 @@ async function approveOneByOneBackground(
     const group = groups[gi];
 
     await safeBackgroundEdit(userIdNum, chatId, msgId,
-      `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n⌛ Fetching pending members...`,
+      `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching pending members...`,
       { parse_mode: "HTML", reply_markup: progressMarkup }
     );
 
@@ -8548,7 +8537,7 @@ async function approveOneByOneBackground(
     const pendingJids = await getGroupPendingRequestsJids(userId, group.id);
 
     if (!pendingJids.length) {
-      lines.push(`📋 ${esc(group.subject)}\n✅ No pending members`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ No pending members`);
       continue;
     }
 
@@ -8559,7 +8548,7 @@ async function approveOneByOneBackground(
         // the live total so the user knows the group's current size after
         // the partial approval.
         const total = await getGroupMemberCountSafe(userId, group.id);
-        lines.push(`📋 ${esc(group.subject)}\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 🛑 Stopped at ${pi}/${pendingJids.length} | 👥 Total: ${total}`);
+        lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 🛑 Stopped at ${pi}/${pendingJids.length} | 👥 Total: ${total}`);
         cancelled = true;
         break outer;
       }
@@ -8570,7 +8559,7 @@ async function approveOneByOneBackground(
 
       if (pi % 3 === 0 || pi === pendingJids.length - 1) {
         await safeBackgroundEdit(userIdNum, chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
           `✅ Approving: ${pi + 1}/${pendingJids.length}\n` +
           `Approved: ${approved} | Failed: ${failed}`,
           { parse_mode: "HTML", reply_markup: progressMarkup }
@@ -8584,7 +8573,7 @@ async function approveOneByOneBackground(
     // Show the live total member count so the user sees how big the group
     // is now (post-approval). Stays as "?" if metadata fetch fails.
     const total = await getGroupMemberCountSafe(userId, group.id);
-    lines.push(`📋 ${esc(group.subject)}\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 👥 Total: ${total}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 👥 Total: ${total}`);
   }
 
   // Cleanup flags so the next run starts clean (and so any racing dialog
@@ -8593,12 +8582,12 @@ async function approveOneByOneBackground(
   cancelDialogActiveFor.delete(userIdNum);
 
   if (cancelled) {
-    fullResult = `🛑 Approve 1 by 1 — Cancelled\n\n`;
+    fullResult = `🛑 <b>Approve 1 by 1 — Cancelled</b>\n\n`;
   }
   fullResult += lines.join("\n\n");
   fullResult += cancelled
-    ? `\n\n━━━━━━━━━━━━━━━━━━\n🛑 Stopped after ${lines.length} group(s).`
-    : `\n\n━━━━━━━━━━━━━━━━━━\n✅ Done processing ${groups.length} group(s)!`;
+    ? `\n\n━━━━━━━━━━━━━━━━━━\n🛑 <b>Stopped after ${lines.length} group(s).</b>`
+    : `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
@@ -8629,7 +8618,7 @@ bot.callbackQuery("ap_together", async (ctx) => {
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(`⏳ Approving all pending members together...\n\n⌛ Please wait...`, { parse_mode: "HTML" });
+  await ctx.editMessageText(`⏳ <b>Approving all pending members together...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
 
   void approveTogetherBackground(String(userId), selectedGroups, chatId, msgId);
 });
@@ -8640,7 +8629,7 @@ async function approveTogetherBackground(
   chatId: number,
   msgId: number
 ) {
-  let fullResult = "✅ Approve Together Result\n\n";
+  let fullResult = "✅ <b>Approve Together Result</b>\n\n";
   const lines: string[] = [];
 
   for (let gi = 0; gi < groups.length; gi++) {
@@ -8649,7 +8638,7 @@ async function approveTogetherBackground(
     try {
       if (msgId) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
           `🔄 Step 1: Turning OFF approval mode...`,
           { parse_mode: "HTML" }
         );
@@ -8658,7 +8647,7 @@ async function approveTogetherBackground(
 
     const offOk = await setGroupApprovalMode(userId, group.id, "off");
     if (!offOk) {
-      lines.push(`📋 ${esc(group.subject)}\n❌ Failed to turn off approval mode`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n❌ Failed to turn off approval mode`);
       continue;
     }
 
@@ -8667,7 +8656,7 @@ async function approveTogetherBackground(
     try {
       if (msgId) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
           `🔄 Step 2: Turning ON approval mode...\n` +
           `✅ All pending members will be approved!`,
           { parse_mode: "HTML" }
@@ -8677,7 +8666,7 @@ async function approveTogetherBackground(
 
     const onOk = await setGroupApprovalMode(userId, group.id, "on");
     if (!onOk) {
-      lines.push(`📋 ${esc(group.subject)}\n⚠️ Turned off approval but failed to turn it back on`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n⚠️ Turned off approval but failed to turn it back on`);
       continue;
     }
 
@@ -8687,11 +8676,11 @@ async function approveTogetherBackground(
     // we read here reflects the post-approval member count.
     await new Promise((r) => setTimeout(r, 1000));
     const total = await getGroupMemberCountSafe(userId, group.id);
-    lines.push(`📋 ${esc(group.subject)}\n✅ All pending members approved! | 👥 Total: ${total}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ All pending members approved! | 👥 Total: ${total}`);
   }
 
   fullResult += lines.join("\n\n");
-  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ Done processing ${groups.length} group(s)!`;
+  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
@@ -8718,7 +8707,7 @@ async function makeAdminBackground(
   msgId: number
 ) {
   const userId = String(userIdNum);
-  let fullResult = "👑 Make Admin Result\n\n";
+  let fullResult = "👑 <b>Make Admin Result</b>\n\n";
   const lines: string[] = [];
   let wasCancelled = false;
 
@@ -8734,7 +8723,7 @@ async function makeAdminBackground(
     try {
       if (msgId && !cancelDialogActiveFor.has(userIdNum)) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n⌛ Processing ${phoneNumbers.length} number(s)...`,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Processing ${phoneNumbers.length} number(s)...`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ma_cancel_request") }
         );
       }
@@ -8766,7 +8755,7 @@ async function makeAdminBackground(
         try {
           if (msgId && !cancelDialogActiveFor.has(userIdNum)) {
             await bot.api.editMessageText(chatId, msgId,
-              `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
               `Processing: ${pi + 1}/${phoneNumbers.length}\n` +
               `✅ Admin: ${madeAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ma_cancel_request") }
@@ -8779,7 +8768,7 @@ async function makeAdminBackground(
     }
 
     if (wasCancelled) break;
-    lines.push(`📋 ${esc(group.subject)}\n${groupLines.join("\n")}\n✅ Admin: ${madeAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Admin: ${madeAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`);
   }
 
   makeAdminCancelRequests.delete(userIdNum);
@@ -8787,9 +8776,9 @@ async function makeAdminBackground(
 
   fullResult += lines.join("\n\n");
   if (wasCancelled) {
-    fullResult += `\n\n⛔ Process cancelled by user after ${lines.length}/${groups.length} group(s).`;
+    fullResult += `\n\n⛔ <b>Process cancelled by user after ${lines.length}/${groups.length} group(s).</b>`;
   } else {
-    fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ Done processing ${groups.length} group(s)!`;
+    fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
   }
 
   const chunks = splitMessage(fullResult, 4000);
@@ -8854,14 +8843,14 @@ bot.callbackQuery("session_refresh", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "🔄 Session Refresh\n\n" +
-    "This will reconnect your WhatsApp session and reload the LATEST data from WhatsApp:\n\n" +
+    "🔄 <b>Session Refresh</b>\n\n" +
+    "This will reconnect your WhatsApp session and reload the <b>LATEST</b> data from WhatsApp:\n\n" +
     "• 👥 Latest groups (including new ones where you just became admin)\n" +
     "• 👑 Latest admin status in every group\n" +
     "• 🔗 Latest invite links\n" +
     "• 📋 Latest pending requests\n" +
     "• 📞 Latest contacts\n\n" +
-    "⚠️ Your saved login is NOT deleted — you do NOT need to re-pair. " +
+    "⚠️ Your saved login is <b>NOT</b> deleted — you do <b>NOT</b> need to re-pair. " +
     "The bot will be paused for ~10–30 seconds while it refreshes.\n\n" +
     "Do you want to continue?",
     {
@@ -8873,13 +8862,13 @@ bot.callbackQuery("session_refresh", async (ctx) => {
   );
 });
 
-const REFRESH_PHASES = [\
-  "🔌 Closing existing socket...",\
-  "🔐 Loading saved credentials...",\
-  "🌐 Reconnecting to WhatsApp servers...",\
-  "📥 Syncing latest groups & metadata...",\
-  "👑 Refreshing admin status...",\
-  "✨ Almost ready...",\
+const REFRESH_PHASES = [
+  "🔌 Closing existing socket...",
+  "🔐 Loading saved credentials...",
+  "🌐 Reconnecting to WhatsApp servers...",
+  "📥 Syncing latest groups & metadata...",
+  "👑 Refreshing admin status...",
+  "✨ Almost ready...",
 ];
 
 function progressBar(percent: number, width = 14): string {
@@ -8909,8 +8898,8 @@ bot.callbackQuery("session_refresh_confirm", async (ctx) => {
   const renderProgress = async (phase: string, percent: number, extra = "") => {
     const elapsed = Math.floor((Date.now() - startedAt) / 1000);
     const text =
-      `🔄 Refreshing WhatsApp Session...\n\n` +
-      `${progressBar(percent)} ${percent}%\n\n` +
+      `🔄 <b>Refreshing WhatsApp Session...</b>\n\n` +
+      `${progressBar(percent)} <b>${percent}%</b>\n\n` +
       `${phase}\n` +
       `⏱️ Elapsed: ${elapsed}s${extra ? `\n\n${extra}` : ""}`;
     if (text === lastRendered) return;
@@ -8943,8 +8932,8 @@ bot.callbackQuery("session_refresh_confirm", async (ctx) => {
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `✅ Session Refreshed Successfully!\n\n` +
-          `${progressBar(100)} 100%\n\n` +
+          `✅ <b>Session Refreshed Successfully!</b>\n\n` +
+          `${progressBar(100)} <b>100%</b>\n\n` +
           `🎉 All the LATEST WhatsApp data has been loaded:\n` +
           `• 👥 Groups\n• 👑 Admin status\n• 🔗 Invite links\n• 📋 Pending requests\n\n` +
           `⏱️ Took: ${elapsed}s\n\n` +
@@ -8958,7 +8947,7 @@ bot.callbackQuery("session_refresh_confirm", async (ctx) => {
       clearInterval(ticker);
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `❌ Session Refresh Failed\n\nReason: ${esc(reason)}\n\n` +
+          `❌ <b>Session Refresh Failed</b>\n\nReason: ${esc(reason)}\n\n` +
           `Please try again, or use 🔌 Disconnect and reconnect manually.`,
           {
             parse_mode: "HTML",
@@ -8978,7 +8967,7 @@ bot.callbackQuery("session_refresh_confirm", async (ctx) => {
     clearInterval(ticker);
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⚠️ Refresh is taking longer than expected\n\n` +
+        `⚠️ <b>Refresh is taking longer than expected</b>\n\n` +
         `The reconnect is still running in the background. Try the action again in a few seconds, or use the menu below.`,
         {
           parse_mode: "HTML",
@@ -9030,12 +9019,12 @@ bot.callbackQuery("reset_link", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter((g) => g.isAdmin);
 
@@ -9065,10 +9054,10 @@ bot.callbackQuery("reset_link", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `🔗 Reset Group Invite Links\n\n` +
+    `🔗 <b>Reset Group Invite Links</b>\n\n` +
     `📊 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
-    `\n⚠️ This will revoke existing links and generate new ones.\n\n📌 Choose an option:`,
+    `\n⚠️ This will <b>revoke</b> existing links and generate new ones.\n\n📌 Choose an option:`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -9107,7 +9096,7 @@ bot.callbackQuery("rl_similar", async (ctx) => {
 
   state.resetLinkData.patternPage = 0;
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(patterns, 0) }
   );
 });
@@ -9121,7 +9110,7 @@ bot.callbackQuery("rl_sim_prev_page", async (ctx) => {
   if (current > 0) state.resetLinkData.patternPage = current - 1;
   const page = state.resetLinkData.patternPage || 0;
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(state.resetLinkData.patterns, page) }
   );
 });
@@ -9136,7 +9125,7 @@ bot.callbackQuery("rl_sim_next_page", async (ctx) => {
   if (current < totalPages - 1) state.resetLinkData.patternPage = current + 1;
   const page = state.resetLinkData.patternPage || 0;
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern to select those groups:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
     { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(state.resetLinkData.patterns, page) }
   );
 });
@@ -9165,7 +9154,7 @@ bot.callbackQuery(/^rl_sim_(\d+)$/, async (ctx) => {
   state.step = "reset_link_select";
   state.resetLinkData.page = 0;
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n${state.resetLinkData.selectedIndices.size} selected`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n<i>${state.resetLinkData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9178,7 +9167,7 @@ bot.callbackQuery("rl_show_all", async (ctx) => {
   state.step = "reset_link_select";
   state.resetLinkData.page = 0;
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\nSelect groups to reset their invite links:`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\nSelect groups to reset their invite links:`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9196,7 +9185,7 @@ bot.callbackQuery(/^rl_tog_(\d+)$/, async (ctx) => {
     state.resetLinkData.selectedIndices.add(idx);
   }
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n${state.resetLinkData.selectedIndices.size} selected`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n<i>${state.resetLinkData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9208,7 +9197,7 @@ bot.callbackQuery("rl_prev_page", async (ctx) => {
   if (!state?.resetLinkData) return;
   if (state.resetLinkData.page > 0) state.resetLinkData.page--;
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n${state.resetLinkData.selectedIndices.size} selected`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n<i>${state.resetLinkData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9221,7 +9210,7 @@ bot.callbackQuery("rl_next_page", async (ctx) => {
   const totalPages = Math.ceil(state.resetLinkData.allGroups.length / RL_PAGE_SIZE);
   if (state.resetLinkData.page < totalPages - 1) state.resetLinkData.page++;
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n${state.resetLinkData.selectedIndices.size} selected`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n<i>${state.resetLinkData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9237,7 +9226,7 @@ bot.callbackQuery("rl_select_all", async (ctx) => {
   if (!state?.resetLinkData) return;
   for (let i = 0; i < state.resetLinkData.allGroups.length; i++) state.resetLinkData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `🔗 Reset Link\n\nAll ${state.resetLinkData.allGroups.length} groups selected`,
+    `🔗 <b>Reset Link</b>\n\nAll <b>${state.resetLinkData.allGroups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9249,7 +9238,7 @@ bot.callbackQuery("rl_clear_all", async (ctx) => {
   if (!state?.resetLinkData) return;
   state.resetLinkData.selectedIndices.clear();
   await ctx.editMessageText(
-    `🔗 Reset Link\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\nNone selected`,
+    `🔗 <b>Reset Link</b>\n\n${state.resetLinkData.allGroups.length} admin group(s)\n\n<i>None selected</i>`,
     { parse_mode: "HTML", reply_markup: buildResetLinkKeyboard(state) }
   );
 });
@@ -9263,9 +9252,9 @@ bot.callbackQuery("rl_proceed", async (ctx) => {
   const selectedGroups = Array.from(state.resetLinkData.selectedIndices).map(i => state.resetLinkData!.allGroups[i]);
 
   await ctx.editMessageText(
-    `🔗 Reset Invite Links — Confirm\n\n` +
-    `✅ ${selectedGroups.length} group(s) selected\n\n` +
-    `⚠️ Current invite links revoke ho jayenge.\n` +
+    `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
+    `✅ <b>${selectedGroups.length} group(s) selected</b>\n\n` +
+    `⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
     `Old link se koi join nahi kar payega.\n\n` +
     `Aage badhna chahte ho?`,
     {
@@ -9302,10 +9291,10 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
   rlLinkCollectMsgId.delete(userId);
 
   const sent = await ctx.editMessageText(
-    "🔗 Reset by Group Link\n\n" +
-    "📎 0 links collected\n\n" +
+    "🔗 <b>Reset by Group Link</b>\n\n" +
+    "📎 <b>0 links collected</b>\n\n" +
     "Send WhatsApp group invite links (one per message or multiple at once):\n" +
-    "https://chat.whatsapp.com/ABC123\n\n" +
+    "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
     "⚠️ You must be an admin in those groups.\n" +
     "Send at least one link first, then the Done button will appear.",
     {
@@ -9334,10 +9323,10 @@ bot.callbackQuery("rl_link_done", async (ctx) => {
   const msgId = ctx.callbackQuery.message!.message_id;
 
   await ctx.editMessageText(
-    `🔗 Reset by Group Link — Confirm\n\n` +
-    `📎 ${buffer.length} link(s) collect kiye hain.\n\n` +
+    `🔗 <b>Reset by Group Link — Confirm</b>\n\n` +
+    `📎 <b>${buffer.length} link(s)</b> collect kiye hain.\n\n` +
     `Bot in links ko resolve karke invite links reset karega.\n\n` +
-    `⚠️ Current invite links revoke ho jayenge. Old link se koi join nahi kar payega.\n\n` +
+    `⚠️ <b>Current invite links revoke ho jayenge.</b> Old link se koi join nahi kar payega.\n\n` +
     `Aage badhna chahte ho?`,
     {
       parse_mode: "HTML",
@@ -9375,7 +9364,7 @@ async function runRlResolvePipelineBackground(
   links: string[],
   chatId: number,
   msgId: number
-): Promise {
+): Promise<void> {
   const userId = String(userIdNum);
   const total = links.length;
   let done = 0;
@@ -9388,10 +9377,10 @@ async function runRlResolvePipelineBackground(
     const filled = Math.round((done / Math.max(total, 1)) * 20);
     const bar = `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
     return (
-      `⏳ Resolving & Resetting Links...\n\n` +
+      `⏳ <b>Resolving & Resetting Links...</b>\n\n` +
       `${bar}\n\n` +
-      `✅ Reset: ${resetOk} | ❌ Failed: ${done - resetOk}\n` +
-      (done < total ? `⌛ ${total - done} remaining...` : `⏳ Finishing up...`)
+      `✅ Reset: <b>${resetOk}</b> | ❌ Failed: <b>${done - resetOk}</b>\n` +
+      (done < total ? `⌛ <b>${total - done}</b> remaining...` : `⏳ Finishing up...`)
     );
   };
 
@@ -9444,20 +9433,19 @@ async function runRlResolvePipelineBackground(
   const successResults = results.filter(r => r.newLink);
   const failedResults = results.filter(r => !r.newLink);
 
-  let resultText = `🔗 Reset by Link — Result\n\n`;
+  let resultText = `🔗 <b>Reset by Link — Result</b>\n\n`;
   resultText += `📊 Total Links: ${total} | ✅ Reset: ${resetOk} | ❌ Failed: ${failedResults.length}\n\n`;
-  if (wasCancelled) resultText += `⛔ Cancelled after ${done}/${total}.\n\n`;
+  if (wasCancelled) resultText += `⛔ <b>Cancelled after ${done}/${total}.</b>\n\n`;
 
   for (const r of successResults) {
-    resultText += `✅ ${esc(r.subject)}\n${r.newLink}\n\n`;
+    resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
   if (failedResults.length > 0) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ Failed to Reset (${failedResults.length} link(s)):\n`;
+    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed to Reset (${failedResults.length} link(s)):</b>\n`;
     for (const r of failedResults) {
       const reason = r.resolveErr ? "Link resolve nahi hua" : (r.resetErr || "Failed");
-      resultText += `❌ ${esc(r.subject)} — ${esc(reason)}\n`;
+      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(reason)}\n`;
     }
-    resultText += `\n`;
   }
   if (!wasCancelled) {
     resultText += `━━━━━━━━━━━━━━━━━━\n✅ ${resetOk}/${total} links reset successfully!`;
@@ -9525,7 +9513,7 @@ async function resetLinkBackground(
     if (cancelDialogActiveFor.has(userIdNum)) return;
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Resetting invite links...\n\n` +
+        `⏳ <b>Resetting invite links...</b>\n\n` +
         `📊 ${gi}/${groups.length} done | ✅ ${successCount} succeeded` +
         (currentGroup ? `\n\n🔄 Currently: ${esc(currentGroup)}` : ""),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
@@ -9580,26 +9568,26 @@ async function resetLinkBackground(
   const successResults = results.filter(r => r.newLink);
   const failedResults = results.filter(r => !r.newLink);
 
-  let resultText = `🔗 Reset Link Result\n\n`;
+  let resultText = `🔗 <b>Reset Link Result</b>\n\n`;
   resultText += `📊 Total Groups: ${groups.length} | ✅ Reset: ${successCount} | ❌ Failed: ${failedResults.length}\n\n`;
-  if (wasCancelled) resultText += `⛔ Cancelled after ${results.length}/${groups.length} group(s).\n\n`;
+  if (wasCancelled) resultText += `⛔ <b>Cancelled after ${results.length}/${groups.length} group(s).</b>\n\n`;
 
   // Show all successful resets first with their new links
   for (const r of successResults) {
-    resultText += `✅ ${esc(r.subject)}\n${r.newLink}\n\n`;
+    resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
 
   // Show all failed groups together at the end
   if (failedResults.length > 0) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ Failed to Reset (${failedResults.length} group(s)):\n`;
+    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed to Reset (${failedResults.length} group(s)):</b>\n`;
     for (const r of failedResults) {
-      resultText += `❌ ${esc(r.subject)} — ${esc(r.error || "Failed")}\n`;
+      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(r.error || "Failed")}\n`;
     }
     resultText += "\n";
   }
 
   if (!wasCancelled) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n✅ ${successCount}/${groups.length} links reset successfully!`;
+    resultText += `━━━━━━━━━━━━━━━━━━\n✅ <b>${successCount}/${groups.length} links reset successfully!</b>`;
   }
 
   const chunks = splitMessage(resultText, 4000);
@@ -9655,12 +9643,12 @@ bot.callbackQuery("demote_admin", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter((g) => g.isAdmin);
 
@@ -9689,7 +9677,7 @@ bot.callbackQuery("demote_admin", async (ctx) => {
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n` +
+    `👤 <b>Demote Admin</b>\n\n` +
     `📊 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
     `\n📌 Choose an option:`,
@@ -9713,7 +9701,7 @@ bot.callbackQuery("da_similar", async (ctx) => {
     kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length})`, `da_sim_${i}`).row();
   }
   kb.text("🔙 Back", "demote_admin").text("🏠 Menu", "main_menu");
-  await ctx.editMessageText("🔍 Similar Group Patterns\n\nTap a pattern to select those groups:", {
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", {
     parse_mode: "HTML", reply_markup: kb,
   });
 });
@@ -9734,7 +9722,7 @@ bot.callbackQuery(/^da_sim_(\d+)$/, async (ctx) => {
   state.step = "demote_admin_select";
   state.demoteAdminData.page = 0;
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n${state.demoteAdminData.selectedIndices.size} selected`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9747,7 +9735,7 @@ bot.callbackQuery("da_show_all", async (ctx) => {
   state.step = "demote_admin_select";
   state.demoteAdminData.page = 0;
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\nSelect groups:`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\nSelect groups:`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9762,7 +9750,7 @@ bot.callbackQuery(/^da_tog_(\d+)$/, async (ctx) => {
   if (state.demoteAdminData.selectedIndices.has(idx)) state.demoteAdminData.selectedIndices.delete(idx);
   else state.demoteAdminData.selectedIndices.add(idx);
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n${state.demoteAdminData.selectedIndices.size} selected`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9773,7 +9761,7 @@ bot.callbackQuery("da_prev_page", async (ctx) => {
   if (!state?.demoteAdminData) return;
   if (state.demoteAdminData.page > 0) state.demoteAdminData.page--;
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n${state.demoteAdminData.selectedIndices.size} selected`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9785,7 +9773,7 @@ bot.callbackQuery("da_next_page", async (ctx) => {
   const totalPages = Math.ceil(state.demoteAdminData.allGroups.length / DA_PAGE_SIZE);
   if (state.demoteAdminData.page < totalPages - 1) state.demoteAdminData.page++;
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n${state.demoteAdminData.selectedIndices.size} selected`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>${state.demoteAdminData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9800,7 +9788,7 @@ bot.callbackQuery("da_select_all", async (ctx) => {
   if (!state?.demoteAdminData) return;
   for (let i = 0; i < state.demoteAdminData.allGroups.length; i++) state.demoteAdminData.selectedIndices.add(i);
   await ctx.editMessageText(
-    `👤 Demote Admin\n\nAll ${state.demoteAdminData.allGroups.length} groups selected`,
+    `👤 <b>Demote Admin</b>\n\nAll <b>${state.demoteAdminData.allGroups.length} groups selected</b>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9811,7 +9799,7 @@ bot.callbackQuery("da_clear_all", async (ctx) => {
   if (!state?.demoteAdminData) return;
   state.demoteAdminData.selectedIndices.clear();
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\nNone selected`,
+    `👤 <b>Demote Admin</b>\n\n${state.demoteAdminData.allGroups.length} admin group(s)\n\n<i>None selected</i>`,
     { parse_mode: "HTML", reply_markup: buildDemoteAdminKeyboard(state) }
   );
 });
@@ -9827,8 +9815,8 @@ bot.callbackQuery("da_proceed", async (ctx) => {
   const more = selectedGroups.length > 20 ? `\n... +${selectedGroups.length - 20} more` : "";
 
   await ctx.editMessageText(
-    `👤 Demote Admin\n\n` +
-    `${selectedGroups.length} group(s) selected:\n${groupList}${more}\n\n` +
+    `👤 <b>Demote Admin</b>\n\n` +
+    `<b>${selectedGroups.length} group(s) selected:</b>\n${groupList}${more}\n\n` +
     `Choose demote mode:`,
     {
       parse_mode: "HTML",
@@ -9852,9 +9840,9 @@ bot.callbackQuery("da_mode_all", async (ctx) => {
   const more = selectedGroups.length > 20 ? `\n... +${selectedGroups.length - 20} more` : "";
 
   await ctx.editMessageText(
-    `🔴 Demote All Admins — Confirm\n\n` +
-    `${selectedGroups.length} group(s):\n${groupList}${more}\n\n` +
-    `⚠️ This will demote all non-owner admins in the selected groups.\n\n` +
+    `🔴 <b>Demote All Admins — Confirm</b>\n\n` +
+    `<b>${selectedGroups.length} group(s):</b>\n${groupList}${more}\n\n` +
+    `⚠️ This will demote <b>all non-owner admins</b> in the selected groups.\n\n` +
     `Are you sure?`,
     {
       parse_mode: "HTML",
@@ -9879,7 +9867,7 @@ bot.callbackQuery("da_all_confirm", async (ctx) => {
 
   try {
     await bot.api.editMessageText(chatId, msgId,
-      `⏳ Demoting all admins in ${selectedGroups.length} group(s)...\n\n⌛ Please wait...`,
+      `⏳ <b>Demoting all admins in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
     );
   } catch {}
@@ -9897,9 +9885,9 @@ bot.callbackQuery("da_mode_numbers", async (ctx) => {
   state.step = "demote_admin_enter_numbers";
 
   await ctx.editMessageText(
-    `📱 Demote Selected Numbers\n\n` +
+    `📱 <b>Demote Selected Numbers</b>\n\n` +
     `Send the phone numbers to demote (one per line):\n\n` +
-    `Example:\n919912345678\n919898765432\n\n` +
+    `Example:\n<code>919912345678\n919898765432</code>\n\n` +
     `Only numbers that are currently admin in the selected groups will be demoted.`,
     {
       parse_mode: "HTML",
@@ -9923,7 +9911,7 @@ bot.callbackQuery("da_numbers_confirm", async (ctx) => {
 
   try {
     await bot.api.editMessageText(chatId, msgId,
-      `⏳ Demoting ${phoneNumbers.length} number(s) in ${selectedGroups.length} group(s)...\n\n⌛ Please wait...`,
+      `⏳ <b>Demoting ${phoneNumbers.length} number(s) in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
     );
   } catch {}
@@ -9986,7 +9974,7 @@ async function demoteAllBackground(
     try {
       if (!cancelDialogActiveFor.has(userIdNum)) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n⌛ Fetching admins...`,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching admins...`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
         );
       }
@@ -9999,7 +9987,7 @@ async function demoteAllBackground(
     void mySession; // suppress unused warning
     // We check by attempting a safe read: if participants is empty the group is likely inaccessible
     if (!participants.length) {
-      lines.push(`📋 ${esc(group.subject)}\n  ⚠️ Could not fetch group data (bot may not be a member)`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ⚠️ Could not fetch group data (bot may not be a member)`);
       continue;
     }
 
@@ -10018,7 +10006,7 @@ async function demoteAllBackground(
 
     if (!admins.length) {
       const ownerNote = ownerCount > 0 ? ` (${ownerCount} owner(s) skipped)` : "";
-      lines.push(`📋 ${esc(group.subject)}\n  ℹ️ No demotable admins found${ownerNote}`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ℹ️ No demotable admins found${ownerNote}`);
       continue;
     }
 
@@ -10069,7 +10057,7 @@ async function demoteAllBackground(
         try {
           if (!cancelDialogActiveFor.has(userIdNum)) {
             await bot.api.editMessageText(chatId, msgId,
-              `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
               `Processing: ${ai + 1}/${admins.length}\n✅ Demoted: ${demoted} | ❌ Failed: ${failed}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
             );
@@ -10080,16 +10068,16 @@ async function demoteAllBackground(
     }
 
     if (wasCancelled) break;
-    lines.push(`📋 ${esc(group.subject)}\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ❌ Failed: ${failed} | ⏭️ Skipped: ${skipped}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ❌ Failed: ${failed} | ⏭️ Skipped: ${skipped}`);
   }
 
   demoteAdminCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
 
-  let result = `👤 Demote All Admins — Result\n\n`;
+  let result = `👤 <b>Demote All Admins — Result</b>\n\n`;
   result += lines.join("\n\n");
-  if (wasCancelled) result += `\n\n⛔ Cancelled after ${lines.length}/${groups.length} group(s).`;
-  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ Total demoted: ${totalDemoted} across ${groups.length} group(s)!`;
+  if (wasCancelled) result += `\n\n⛔ <b>Cancelled after ${lines.length}/${groups.length} group(s).</b>`;
+  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Total demoted: ${totalDemoted} across ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(result, 4000);
   try {
@@ -10127,7 +10115,7 @@ async function demoteSelectedBackground(
     try {
       if (!cancelDialogActiveFor.has(userIdNum)) {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n⌛ Processing ${phoneNumbers.length} number(s)...`,
+          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Processing ${phoneNumbers.length} number(s)...`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
         );
       }
@@ -10196,7 +10184,7 @@ async function demoteSelectedBackground(
         try {
           if (!cancelDialogActiveFor.has(userIdNum)) {
             await bot.api.editMessageText(chatId, msgId,
-              `⏳ Group ${gi + 1}/${groups.length}: ${esc(group.subject)}\n\n` +
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
               `Processing: ${pi + 1}/${phoneNumbers.length}\n✅ Demoted: ${demoted} | ⚠️ Skip: ${notAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "da_cancel_request") }
             );
@@ -10207,16 +10195,16 @@ async function demoteSelectedBackground(
     }
 
     if (wasCancelled) break;
-    lines.push(`📋 ${esc(group.subject)}\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ⚠️ Not admin: ${notAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`);
+    lines.push(`📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Demoted: ${demoted} | ⚠️ Not admin: ${notAdmin} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`);
   }
 
   demoteAdminCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
 
-  let result = `👤 Demote Selected Numbers — Result\n\n`;
+  let result = `👤 <b>Demote Selected Numbers — Result</b>\n\n`;
   result += lines.join("\n\n");
-  if (wasCancelled) result += `\n\n⛔ Cancelled after ${lines.length}/${groups.length} group(s).`;
-  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ Total demoted: ${totalDemoted} across ${groups.length} group(s)!`;
+  if (wasCancelled) result += `\n\n⛔ <b>Cancelled after ${lines.length}/${groups.length} group(s).</b>`;
+  else result += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Total demoted: ${totalDemoted} across ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(result, 4000);
   try {
@@ -10244,7 +10232,7 @@ bot.callbackQuery("disconnect_wa", async (ctx) => {
     }); return;
   }
   await ctx.editMessageText(
-    "⚠️ Disconnect WhatsApp?\n\nAre you sure you want to disconnect your WhatsApp session? You will need to reconnect again to use the bot.",
+    "⚠️ <b>Disconnect WhatsApp?</b>\n\nAre you sure you want to disconnect your WhatsApp session? You will need to reconnect again to use the bot.",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -10273,7 +10261,7 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
   // 4. Run a global purge to flush translation caches + nudge V8/glibc to
   //    actually release pages back to the OS so RSS visibly drops.
   void runMemoryPurge("user disconnect");
-  await ctx.editMessageText("✅ WhatsApp disconnected!", {
+  await ctx.editMessageText("✅ <b>WhatsApp disconnected!</b>", {
     parse_mode: "HTML", reply_markup: mainMenu(userId),
   });
 });
@@ -10287,7 +10275,7 @@ bot.callbackQuery("connect_auto_wa", async (ctx) => {
 
   if (isAutoConnected(String(userId))) {
     await ctx.editMessageText(
-      "✅ Auto Chat WhatsApp already connected!\n\n" + connectedStatusText(userId),
+      "✅ <b>Auto Chat WhatsApp already connected!</b>\n\n" + connectedStatusText(userId),
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -10295,10 +10283,10 @@ bot.callbackQuery("connect_auto_wa", async (ctx) => {
 
   userStates.set(userId, { step: "auto_connect_phone", autoConnectStep: "phone" });
   await ctx.editMessageText(
-    "🤖 Connect Auto Chat WhatsApp\n\n" +
+    "🤖 <b>Connect Auto Chat WhatsApp</b>\n\n" +
     "Yeh alag WhatsApp number Auto Chat ke liye connect hoga.\n\n" +
     "📱 Apna phone number bhejo (country code ke saath):\n" +
-    "Example: 919876543210",
+    "Example: <code>919876543210</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -10312,7 +10300,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!canUserSeeAutoChat(userId)) {
     await ctx.editMessageText(
-      "🚫 Auto Chat Access Nahi Hai\n\nYe feature abhi aapke liye available nahi hai.\nAdmin se contact karo.",
+      "🚫 <b>Auto Chat Access Nahi Hai</b>\n\nYe feature abhi aapke liye available nahi hai.\nAdmin se contact karo.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -10320,7 +10308,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!isConnected(String(userId))) {
     await ctx.editMessageText(
-      "🤖 Auto Chat\n\n" +
+      "🤖 <b>Auto Chat</b>\n\n" +
       "Primary WhatsApp is not connected yet.\n\n" +
       "Please connect your 1st WhatsApp first. After that, you can connect the 2nd WhatsApp for Auto Chat.",
       {
@@ -10335,7 +10323,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!isAutoConnected(String(userId))) {
     await ctx.editMessageText(
-      "🤖 Auto Chat\n\n" +
+      "🤖 <b>Auto Chat</b>\n\n" +
       "Primary WhatsApp is connected.\n\n" +
       "Now connect your 2nd WhatsApp number for Auto Chat:",
       {
@@ -10375,9 +10363,9 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
   const autoNumber = getAutoConnectedNumber(String(userId));
   const mainNumber = getConnectedWhatsAppNumber(String(userId));
   await ctx.editMessageText(
-    "🤖 Auto Chat Menu\n\n" +
-    (mainNumber ? `📞 Primary WA: ${esc(mainNumber)}\n` : "") +
-    (autoNumber ? `🤖 Auto WA: ${esc(autoNumber)}\n` : "") +
+    "🤖 <b>Auto Chat Menu</b>\n\n" +
+    (mainNumber ? `📞 Primary WA: <code>${esc(mainNumber)}</code>\n` : "") +
+    (autoNumber ? `🤖 Auto WA: <code>${esc(autoNumber)}</code>\n` : "") +
     "\nKya karna chahte ho?",
     {
       parse_mode: "HTML",
@@ -10396,7 +10384,7 @@ bot.callbackQuery("auto_chat_refresh", async (ctx) => {
   const session = autoChatSessions.get(userId);
   if (!session?.running) {
     await ctx.editMessageText(
-      "✅ Auto Chat has stopped.",
+      "✅ <b>Auto Chat has stopped.</b>",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -10424,7 +10412,7 @@ bot.callbackQuery("auto_chat_stop", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ Stop Auto Chat?\n\nDo you want to stop auto chat?",
+    "⚠️ <b>Stop Auto Chat?</b>\n\nDo you want to stop auto chat?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -10442,7 +10430,7 @@ bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ Auto Chat stopped!", {
+  await ctx.editMessageText("⏹️ <b>Auto Chat stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -10458,7 +10446,7 @@ bot.callbackQuery("auto_disconnect_wa", async (ctx) => {
     }); return;
   }
   await ctx.editMessageText(
-    "⚠️ Disconnect Auto Chat WA?",
+    "⚠️ <b>Disconnect Auto Chat WA?</b>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -10492,7 +10480,7 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   removeMembersCancelRequests.delete(userId);
   // Nudge GC so RSS drops promptly on the 512MB free-tier dyno.
   void runMemoryPurge("auto-chat disconnect");
-  await ctx.editMessageText("✅ Auto Chat WhatsApp disconnected!", {
+  await ctx.editMessageText("✅ <b>Auto Chat WhatsApp disconnected!</b>", {
     parse_mode: "HTML", reply_markup: mainMenu(userId),
   });
 });
@@ -10516,9 +10504,9 @@ bot.callbackQuery("acig_start", async (ctx) => {
   let primaryGroups: Array<{ id: string; subject: string }> = [];
   let autoGroups: Array<{ id: string; subject: string }> = [];
   try {
-    [primaryGroups, autoGroups] = await Promise.all([\
-      getAllGroups(String(userId)),\
-      getAllGroups(autoUserId),\
+    [primaryGroups, autoGroups] = await Promise.all([
+      getAllGroups(String(userId)),
+      getAllGroups(autoUserId),
     ]);
   } catch {}
 
@@ -10527,7 +10515,7 @@ bot.callbackQuery("acig_start", async (ctx) => {
 
   if (!commonGroups.length) {
     await ctx.editMessageText(
-      "❌ Koi common group nahi mila!\n\n" +
+      "❌ <b>Koi common group nahi mila!</b>\n\n" +
       "Dono WhatsApp numbers jo groups me hain unme se koi common group nahi hai.\n\n" +
       `Primary WA groups: ${primaryGroups.length}\nAuto WA groups: ${autoGroups.length}`,
       {
@@ -10552,7 +10540,7 @@ bot.callbackQuery("acig_start", async (ctx) => {
   });
 
   await ctx.editMessageText(
-    "👥 Chat In Group — Groups Select Karo\n\n" +
+    "👥 <b>Chat In Group — Groups Select Karo</b>\n\n" +
     `📋 ${commonGroups.length} common groups mile (dono WA me hain).\n\n` +
     "Jin groups me dono numbers se msg bhejnha hai unhe select karo:",
     {
@@ -10650,7 +10638,7 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
   state.step = "acig_select_duration";
   await ctx.editMessageText(
-    "⏱️ Select Auto Chat Duration\n\n" +
+    "⏱️ <b>Select Auto Chat Duration</b>\n\n" +
     "How long should Auto Chat run in groups?\n\n" +
     "After the selected time, Auto Chat will stop automatically and you will be notified.",
     {
@@ -10675,8 +10663,8 @@ bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
     : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
 
   const statusMsg = await ctx.editMessageText(
-    "👥 Chat In Group Started!\n\n" +
-    `⏱️ Duration: ${durationLabel}\n` +
+    "👥 <b>Chat In Group Started!</b>\n\n" +
+    `⏱️ Duration: <b>${durationLabel}</b>\n` +
     "Funny/study messages will rotate across all selected groups.\n\n" +
     "Use Stop to end it early.",
     { parse_mode: "HTML" }
@@ -10691,20 +10679,20 @@ bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
 function cigProgressText(session: CigSession): string {
   const currentGroup = session.groups[session.currentGroupIndex]?.subject || session.groups[0]?.subject || "group";
   const expiryText = session.autoChatExpiresAt
-    ? `\n⏳ Time Remaining: ${formatRemaining(session.autoChatExpiresAt)}`
+    ? `\n⏳ Time Remaining: <b>${formatRemaining(session.autoChatExpiresAt)}</b>`
     : "";
   return (
-    "🤖 Auto Chat Running\n\n" +
-    `📍 Mode: Chat in Group\n` +
-    `🎯 Current Group: ${esc(currentGroup)}\n\n` +
-    `📊 Messages Sent:\n` +
-    `📱 Account 1: ${session.sentByAccount1} messages\n` +
-    `📱 Account 2: ${session.sentByAccount2} messages\n` +
-    `📩 Total: ${session.sent} messages\n` +
-    `❌ Failed: ${session.failed}\n\n` +
+    "🤖 <b>Auto Chat Running</b>\n\n" +
+    `📍 Mode: <b>Chat in Group</b>\n` +
+    `🎯 Current Group: <b>${esc(currentGroup)}</b>\n\n` +
+    `📊 <b>Messages Sent:</b>\n` +
+    `📱 Account 1: <b>${session.sentByAccount1} messages</b>\n` +
+    `📱 Account 2: <b>${session.sentByAccount2} messages</b>\n` +
+    `📩 Total: <b>${session.sent} messages</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n\n` +
     (session.nextDelayMs > 0 ? `⏰ Next send in ~${formatDelay(session.nextDelayMs)}\n` : "") +
     expiryText +
-    "\nPress Stop to stop the chat."
+    "\nPress <b>Stop</b> to stop the chat."
   );
 }
 
@@ -10722,7 +10710,7 @@ async function runGroupChatDualBackground(
   startSentByAccount1 = 0,
   startSentByAccount2 = 0,
   startFailed = 0
-): Promise {
+): Promise<void> {
   const session: CigSession = {
     running: true,
     cancelled: false,
@@ -10780,10 +10768,10 @@ async function runGroupChatDualBackground(
         try {
           await bot.api.sendMessage(
             userId,
-            "⏰ Auto Chat Time Expired!\n\n" +
+            "⏰ <b>Auto Chat Time Expired!</b>\n\n" +
             "Your selected Auto Chat duration has ended.\n" +
-            `📤 Total sent: ${session.sent}\n` +
-            `❌ Failed: ${session.failed}\n\n` +
+            `📤 Total sent: <b>${session.sent}</b>\n` +
+            `❌ Failed: <b>${session.failed}</b>\n\n` +
             "Auto Chat has been stopped automatically.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
           );
@@ -10803,9 +10791,9 @@ async function runGroupChatDualBackground(
             try {
               await bot.api.sendMessage(
                 userId,
-                "🚫 Auto Chat Stopped!\n\n" +
+                "🚫 <b>Auto Chat Stopped!</b>\n\n" +
                 "Your bot access or Auto Chat access has been revoked by the admin.\n" +
-                `📤 Total sent: ${session.sent}\n\n` +
+                `📤 Total sent: <b>${session.sent}</b>\n\n` +
                 "Auto Chat has been stopped automatically.",
                 { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
               );
@@ -10845,8 +10833,8 @@ async function runGroupChatDualBackground(
         session.running = false; session.cancelled = true;
         try {
           await bot.api.sendMessage(userId,
-            "⏰ Auto Chat Time Expired!\n\nYour Auto Chat duration ended. Auto Chat stopped automatically.\n" +
-            `📤 Sent: ${session.sent}`,
+            "⏰ <b>Auto Chat Time Expired!</b>\n\nYour Auto Chat duration ended. Auto Chat stopped automatically.\n" +
+            `📤 Sent: <b>${session.sent}</b>`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
           );
         } catch {}
@@ -10912,7 +10900,7 @@ async function runGroupChatDualBackground(
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `✅ Chat In Group Complete!\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📋 Groups: ${groups.length}`,
+        `✅ <b>Chat In Group Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📋 Groups: ${groups.length}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -10924,7 +10912,7 @@ bot.callbackQuery("cig_refresh", async (ctx) => {
   const userId = ctx.from.id;
   const session = cigSessions.get(userId);
   if (!session?.running) {
-    await ctx.editMessageText("✅ Chat In Group band ho gaya.", {
+    await ctx.editMessageText("✅ <b>Chat In Group band ho gaya.</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -10952,7 +10940,7 @@ bot.callbackQuery("cig_stop_btn", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ Stop Chat In Group?\n\nDo you want to stop sending messages?",
+    "⚠️ <b>Stop Chat In Group?</b>\n\nDo you want to stop sending messages?",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -10970,7 +10958,7 @@ bot.callbackQuery("cig_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ Chat In Group stopped!", {
+  await ctx.editMessageText("⏹️ <b>Chat In Group stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -11025,9 +11013,9 @@ bot.callbackQuery("acf_start", async (ctx) => {
   });
 
   await ctx.editMessageText(
-    "⏱️ Select Chat Friend Duration\n\n" +
-    `📞 Primary: ${esc(primaryNumber)}\n` +
-    `🤖 Auto: ${esc(autoNumber)}\n\n` +
+    "⏱️ <b>Select Chat Friend Duration</b>\n\n" +
+    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
+    `🤖 Auto: <code>${esc(autoNumber)}</code>\n\n` +
     "How long should Chat Friend run?\n\n" +
     "After the selected time, it will stop automatically and you will be notified.",
     {
@@ -11057,10 +11045,10 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
     : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
 
   const statusMsg = await ctx.editMessageText(
-    "👫 Chat Friend Started!\n\n" +
-    `📞 Primary: ${esc(primaryNumber)}\n` +
-    `🤖 Auto: ${esc(autoNumber)}\n` +
-    `⏱️ Duration: ${durationLabel}\n\n` +
+    "👫 <b>Chat Friend Started!</b>\n\n" +
+    `📞 Primary: <code>${esc(primaryNumber)}</code>\n` +
+    `🤖 Auto: <code>${esc(autoNumber)}</code>\n` +
+    `⏱️ Duration: <b>${durationLabel}</b>\n\n` +
     "Auto funny/study messages will continue until time is up or you press Stop.",
     { parse_mode: "HTML" }
   );
@@ -11073,15 +11061,15 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
 
 function acfProgressText(session: AcfSession): string {
   const expiryText = session.autoChatExpiresAt
-    ? `\n⏳ Time Remaining: ${formatRemaining(session.autoChatExpiresAt)}`
+    ? `\n⏳ Time Remaining: <b>${formatRemaining(session.autoChatExpiresAt)}</b>`
     : "";
   return (
-    "👫 Chat Friend Running...\n\n" +
-    `🔁 Cycle: ${session.cycle}\n` +
-    `💬 Pair: ${session.currentPair}/${session.totalPairs}\n` +
-    `📤 Sent: ${session.sent}\n` +
-    `❌ Failed: ${session.failed}\n` +
-    (session.nextDelayMs > 0 ? `⏱️ Next send in: ${formatDelay(session.nextDelayMs)}\n` : "") +
+    "👫 <b>Chat Friend Running...</b>\n\n" +
+    `🔁 Cycle: <b>${session.cycle}</b>\n` +
+    `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
+    `📤 Sent: <b>${session.sent}</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n` +
+    (session.nextDelayMs > 0 ? `⏱️ Next send in: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
     expiryText +
     "\nPress Stop to end it."
   );
@@ -11099,7 +11087,7 @@ async function runChatFriendBackground(
   autoChatExpiresAt?: number,
   startSent = 0,
   startFailed = 0
-): Promise {
+): Promise<void> {
   const session: AcfSession = {
     running: true,
     cancelled: false,
@@ -11156,10 +11144,10 @@ async function runChatFriendBackground(
         try {
           await bot.api.sendMessage(
             userId,
-            "⏰ Chat Friend Time Expired!\n\n" +
+            "⏰ <b>Chat Friend Time Expired!</b>\n\n" +
             "Your selected Chat Friend duration has ended.\n" +
-            `📤 Total sent: ${session.sent}\n` +
-            `❌ Failed: ${session.failed}\n\n` +
+            `📤 Total sent: <b>${session.sent}</b>\n` +
+            `❌ Failed: <b>${session.failed}</b>\n\n` +
             "Chat Friend has been stopped automatically.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
           );
@@ -11179,9 +11167,9 @@ async function runChatFriendBackground(
             try {
               await bot.api.sendMessage(
                 userId,
-                "🚫 Chat Friend Stopped!\n\n" +
+                "🚫 <b>Chat Friend Stopped!</b>\n\n" +
                 "Your bot access or Auto Chat access has been revoked by the admin.\n" +
-                `📤 Total sent: ${session.sent}\n\n` +
+                `📤 Total sent: <b>${session.sent}</b>\n\n` +
                 "Chat Friend has been stopped automatically.",
                 { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
               );
@@ -11270,7 +11258,7 @@ async function runChatFriendBackground(
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `✅ Chat Friend Complete!\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n💬 Pairs: ${session.totalPairs}`,
+        `✅ <b>Chat Friend Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n💬 Pairs: ${session.totalPairs}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -11282,7 +11270,7 @@ bot.callbackQuery("acf_refresh", async (ctx) => {
   const userId = ctx.from.id;
   const session = acfSessions.get(userId);
   if (!session?.running) {
-    await ctx.editMessageText("✅ Chat Friend band ho gaya.", {
+    await ctx.editMessageText("✅ <b>Chat Friend band ho gaya.</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -11310,7 +11298,7 @@ bot.callbackQuery("acf_stop_btn", async (ctx) => {
     return;
   }
   await ctx.editMessageText(
-    "⚠️ Stop Chat Friend?",
+    "⚠️ <b>Stop Chat Friend?</b>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -11328,7 +11316,7 @@ bot.callbackQuery("acf_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
-  await ctx.editMessageText("⏹️ Chat Friend stopped!", {
+  await ctx.editMessageText("⏹️ <b>Chat Friend stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
@@ -11341,11 +11329,11 @@ function autoChatProgressText(session: AutoChatSession): string {
   const processed = session.sent + session.failed;
   const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
   return (
-    "🤖 Auto Chat Chal Raha Hai...\n\n" +
-    `🔁 Round: ${session.currentRound}/${session.repeatCount === 0 ? "∞" : session.repeatCount}\n` +
-    `📤 Sent: ${session.sent}\n` +
-    `❌ Failed: ${session.failed}\n` +
-    `📊 Progress: ${percent}%\n\n` +
+    "🤖 <b>Auto Chat Chal Raha Hai...</b>\n\n" +
+    `🔁 Round: <b>${session.currentRound}/${session.repeatCount === 0 ? "∞" : session.repeatCount}</b>\n` +
+    `📤 Sent: <b>${session.sent}</b>\n` +
+    `❌ Failed: <b>${session.failed}</b>\n` +
+    `📊 Progress: <b>${percent}%</b>\n\n` +
     "Roknay ke liye Stop dabao."
   );
 }
@@ -11358,14 +11346,14 @@ const MAX_GROUPS_PER_AUTOCHAT = Number(process.env.MAX_GROUPS_PER_AUTOCHAT || "3
 const AUTOCHAT_PROGRESS_THROTTLE_MS = Number(process.env.AUTOCHAT_PROGRESS_THROTTLE_MS || "20000");
 let activeAutoChatCount = 0;
 
-async function runAutoChatBackground(userId: number, autoUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number, repeatCount: number): Promise {
+async function runAutoChatBackground(userId: number, autoUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number, repeatCount: number): Promise<void> {
   // Backpressure: if too many auto-chats are already running, refuse politely
   // instead of pushing the host into OOM.
   if (activeAutoChatCount >= MAX_CONCURRENT_AUTOCHAT) {
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Server is busy\n\n` +
-        `Abhi ${activeAutoChatCount} users ka Auto Chat chal raha hai (max ${MAX_CONCURRENT_AUTOCHAT} ek saath allowed).\n\n` +
+        `⏳ <b>Server is busy</b>\n\n` +
+        `Abhi <b>${activeAutoChatCount}</b> users ka Auto Chat chal raha hai (max <b>${MAX_CONCURRENT_AUTOCHAT}</b> ek saath allowed).\n\n` +
         `Thodi der baad firse try karein. 🙏`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
@@ -11426,7 +11414,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     .text("🔄 Refresh", "auto_chat_refresh")
     .text("⏹️ Stop", "auto_chat_stop").row()
     .text("🏠 Main Menu", "main_menu");
-  const tryUpdateProgress = async (force = false): Promise => {
+  const tryUpdateProgress = async (force = false): Promise<void> => {
     const now = Date.now();
     if (!force && now - lastProgressAt < AUTOCHAT_PROGRESS_THROTTLE_MS) return;
     lastProgressAt = now;
@@ -11503,7 +11491,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     if (!session.cancelled) {
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `✅ Auto Chat Complete!\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}`,
+          `✅ <b>Auto Chat Complete!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
         );
       } catch {}
@@ -11555,7 +11543,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("📱 WhatsApp not connected!\n\nConnect first to use this feature.", {
+    await ctx.editMessageText("📱 <b>WhatsApp not connected!</b>\n\nConnect first to use this feature.", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     });
@@ -11568,7 +11556,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
   } catch {}
 
   if (!groups.length) {
-    await ctx.editMessageText("❌ Koi group nahi mila!", {
+    await ctx.editMessageText("❌ <b>Koi group nahi mila!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -11588,7 +11576,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
   });
 
   await ctx.editMessageText(
-    `💬 Chat In Group\n\n📋 ${groups.length} groups mile.\nJin groups me msg bhejnha hai unhe select karo:`,
+    `💬 <b>Chat In Group</b>\n\n📋 ${groups.length} groups mile.\nJin groups me msg bhejnha hai unhe select karo:`,
     { parse_mode: "HTML", reply_markup: buildChatGroupKeyboard(userStates.get(userId)!) }
   );
 });
@@ -11655,7 +11643,7 @@ bot.callbackQuery("cig_proceed", async (ctx) => {
   state.step = "cig_enter_message";
   const count = state.chatInGroupData.selectedIndices.size;
   await ctx.editMessageText(
-    `✅ ${count} groups select kiye!\n\n` +
+    `✅ <b>${count} groups select kiye!</b>\n\n` +
     "📝 Ab wo message bhejo jo in groups me bhejnha hai:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
@@ -11670,7 +11658,7 @@ bot.callbackQuery("cig_start_confirm", async (ctx) => {
   const data = state.chatInGroupData;
   const selectedGroups = [...data.selectedIndices].map(i => data.allGroups[i]);
   const statusMsg = await ctx.editMessageText(
-    `⏳ Message bhej raha hun...\n\n📤 0/${selectedGroups.length} done...`,
+    `⏳ <b>Message bhej raha hun...</b>\n\n📤 0/${selectedGroups.length} done...`,
     { parse_mode: "HTML" }
   );
   const msgId = (statusMsg as any).message_id;
@@ -11685,13 +11673,13 @@ bot.callbackQuery("cig_cancel_confirm", async (ctx) => {
   const state = userStates.get(userId);
   if (state?.chatInGroupData) state.chatInGroupData.cancelled = true;
   userStates.delete(userId);
-  await ctx.editMessageText("❌ Cancelled.", {
+  await ctx.editMessageText("❌ <b>Cancelled.</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
   });
 });
 
-async function cigSendBackground(userId: number, waUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number): Promise {
+async function cigSendBackground(userId: number, waUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number): Promise<void> {
   const session: CigSession = {
     running: true,
     cancelled: false,
@@ -11725,11 +11713,11 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
 
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `📤 Messages bhej raha hun...\n\n` +
+          `📤 <b>Messages bhej raha hun...</b>\n\n` +
           `✅ Sent: ${session.sent}\n❌ Failed: ${session.failed}\n` +
           `🔁 Cycle: ${session.cycle}\n` +
           `📊 Group: ${groupIndex + 1}/${groups.length}\n` +
-          `⏱️ Next Delay: ${formatDelay(session.nextDelayMs)}\n` +
+          `⏱️ Next Delay: <b>${formatDelay(session.nextDelayMs)}</b>\n` +
           `⏳ Last: ${esc(group.subject)}\n\n` +
           `Press Stop to end it.`,
           {
@@ -11757,7 +11745,7 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `✅ Chat In Group Band!\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📊 Groups: ${groups.length}`,
+        `✅ <b>Chat In Group Band!</b>\n\n📤 Sent: ${session.sent}\n❌ Failed: ${session.failed}\n📊 Groups: ${groups.length}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -11803,12 +11791,12 @@ function editSettingsKeyboard(gs: GroupSettings): InlineKeyboard {
 function editSettingsText(gs: GroupSettings): string {
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
   return (
-    "⚙️ Edit Group Settings\n\n" +
-    "👥 Members can:\n" +
+    "⚙️ <b>Edit Group Settings</b>\n\n" +
+    "<b>👥 Members can:</b>\n" +
     `📝 Edit Group Info: ${on(gs.editGroupInfo)}\n` +
     `💬 Send Messages: ${on(gs.sendMessages)}\n` +
     `➕ Add Members: ${on(gs.addMembers)}\n\n` +
-    "👑 Admins:\n" +
+    "<b>👑 Admins:</b>\n" +
     `🔐 Approve New Members: ${on(gs.approveJoin)}\n\n` +
     "Tap to toggle each setting:"
   );
@@ -11819,12 +11807,12 @@ bot.callbackQuery("edit_settings", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
-  await ctx.editMessageText("🔍 Scanning your admin groups...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your admin groups...</b>", { parse_mode: "HTML" });
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter(g => g.isAdmin);
   if (!adminGroups.length) {
@@ -11846,7 +11834,7 @@ bot.callbackQuery("edit_settings", async (ctx) => {
   else kb.text("📋 All Groups", "es_show_all").row();
   kb.text("🏠 Main Menu", "main_menu");
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n📊 Admin Groups: ${adminGroups.length}\n` +
+    `⚙️ <b>Edit Settings</b>\n\n📊 Admin Groups: ${adminGroups.length}\n` +
     (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
     `\n📌 Choose an option:`,
     { parse_mode: "HTML", reply_markup: kb }
@@ -11868,7 +11856,7 @@ bot.callbackQuery("es_similar", async (ctx) => {
     kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `es_sim_${i}`).row();
   }
   kb.text("🔙 Back", "edit_settings").text("🏠 Menu", "main_menu");
-  await ctx.editMessageText("🔍 Similar Group Patterns\n\nTap a pattern to select those groups:", { parse_mode: "HTML", reply_markup: kb });
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", { parse_mode: "HTML", reply_markup: kb });
 });
 
 bot.callbackQuery(/^es_sim_(\d+)$/, async (ctx) => {
@@ -11886,7 +11874,7 @@ bot.callbackQuery(/^es_sim_(\d+)$/, async (ctx) => {
   state.step = "edit_settings_select";
   state.editSettingsData.page = 0;
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n👑 ${state.editSettingsData.allGroups.length} admin group(s)\n\nGroup(s) select karo:\n${state.editSettingsData.selectedIndices.size} selected`,
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11898,7 +11886,7 @@ bot.callbackQuery("es_show_all", async (ctx) => {
   state.step = "edit_settings_select";
   state.editSettingsData.page = 0;
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n👑 ${state.editSettingsData.allGroups.length} admin group(s)\n\nGroup(s) select karo:\nTap to select/deselect`,
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>Tap to select/deselect</i>`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11912,7 +11900,7 @@ bot.callbackQuery(/^es_tog_(\d+)$/, async (ctx) => {
   if (state.editSettingsData.selectedIndices.has(idx)) state.editSettingsData.selectedIndices.delete(idx);
   else state.editSettingsData.selectedIndices.add(idx);
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n👑 ${state.editSettingsData.allGroups.length} admin group(s)\n\nGroup(s) select karo:\n${state.editSettingsData.selectedIndices.size > 0 ? `${state.editSettingsData.selectedIndices.size} selected` : "None selected"}`,
+    `⚙️ <b>Edit Settings</b>\n\n👑 <b>${state.editSettingsData.allGroups.length} admin group(s)</b>\n\nGroup(s) select karo:\n<i>${state.editSettingsData.selectedIndices.size > 0 ? `${state.editSettingsData.selectedIndices.size} selected` : "None selected"}</i>`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11923,7 +11911,7 @@ bot.callbackQuery("es_select_all", async (ctx) => {
   if (!state?.editSettingsData) return;
   state.editSettingsData.selectedIndices = new Set(state.editSettingsData.allGroups.map((_, i) => i));
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n${state.editSettingsData.allGroups.length} groups selected.\n\nSab select ho gaye:`,
+    `⚙️ <b>Edit Settings</b>\n\n${state.editSettingsData.allGroups.length} groups selected.\n\nSab select ho gaye:`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11934,7 +11922,7 @@ bot.callbackQuery("es_clear_all", async (ctx) => {
   if (!state?.editSettingsData) return;
   state.editSettingsData.selectedIndices = new Set();
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\nSab clear. Group(s) select karo:`,
+    `⚙️ <b>Edit Settings</b>\n\nSab clear. Group(s) select karo:`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11945,7 +11933,7 @@ bot.callbackQuery("es_prev_page", async (ctx) => {
   if (!state?.editSettingsData) return;
   if (state.editSettingsData.page > 0) state.editSettingsData.page--;
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n${state.editSettingsData.selectedIndices.size} selected`,
+    `⚙️ <b>Edit Settings</b>\n\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11957,7 +11945,7 @@ bot.callbackQuery("es_next_page", async (ctx) => {
   const totalPages = Math.ceil(state.editSettingsData.allGroups.length / ES_PAGE_SIZE);
   if (state.editSettingsData.page < totalPages - 1) state.editSettingsData.page++;
   await ctx.editMessageText(
-    `⚙️ Edit Settings\n\n${state.editSettingsData.selectedIndices.size} selected`,
+    `⚙️ <b>Edit Settings</b>\n\n<i>${state.editSettingsData.selectedIndices.size} selected</i>`,
     { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(state) }
   );
 });
@@ -11976,9 +11964,9 @@ bot.callbackQuery("es_continue", async (ctx) => {
   await ctx.editMessageText(editSettingsText(gs), { parse_mode: "HTML", reply_markup: editSettingsKeyboard(gs) });
 });
 
-for (const [cb, field] of [\
-  ["es_tog_editInfo", "editGroupInfo"], ["es_tog_sendMsg", "sendMessages"],\
-  ["es_tog_addMembers", "addMembers"], ["es_tog_approveJoin", "approveJoin"],\
+for (const [cb, field] of [
+  ["es_tog_editInfo", "editGroupInfo"], ["es_tog_sendMsg", "sendMessages"],
+  ["es_tog_addMembers", "addMembers"], ["es_tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -11996,8 +11984,8 @@ bot.callbackQuery("es_settings_done", async (ctx) => {
   const cur = state.editSettingsData.settings.disappearingMessages;
   state.step = "edit_settings_disappearing";
   await ctx.editMessageText(
-    "⏳ Disappearing Messages\n\nMessages kitne time baad delete honge?\n\n" +
-    `Current: ${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}`,
+    "⏳ <b>Disappearing Messages</b>\n\nMessages kitne time baad delete honge?\n\n" +
+    `Current: <b>${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}</b>`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -12016,7 +12004,7 @@ for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d
     state.editSettingsData.settings.disappearingMessages = dur;
     state.step = "edit_settings_dp";
     await ctx.editMessageText(
-      "🖼️ Group DP\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.",
+      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_dp_skip").text("❌ Cancel", "main_menu") }
     );
   });
@@ -12029,7 +12017,7 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
   state.editSettingsData.settings.dpBuffers = [];
   state.step = "edit_settings_desc";
   await ctx.editMessageText(
-    "📄 Group Description\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu") }
   );
 });
@@ -12054,12 +12042,12 @@ async function showEditSettingsReview(ctx: any) {
   const dmText = settings.disappearingMessages === 86400 ? "24 Hours" : settings.disappearingMessages === 604800 ? "7 Days" : settings.disappearingMessages === 7776000 ? "90 Days" : "Off";
   const on = (v: boolean) => v ? "✅" : "❌";
   const reviewText =
-    "📋 Edit Settings — Review\n\n" +
-    `📋 Groups (${selectedGroups.length}):\n${groupList}${moreText}\n\n` +
+    "📋 <b>Edit Settings — Review</b>\n\n" +
+    `📋 <b>Groups (${selectedGroups.length}):</b>\n${groupList}${moreText}\n\n` +
     `📄 Description: ${settings.description ? esc(settings.description) : "Skip"}\n` +
     `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Change" : "❌ Skip"}\n` +
     `⏳ Disappearing: ${dmText}\n\n` +
-    "⚙️ Permissions:\n" +
+    "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
     `${on(settings.addMembers)} Add Members | ${on(settings.approveJoin)} Approve Join\n\n` +
     "✅ Confirm to apply these settings to all selected groups:";
@@ -12080,7 +12068,7 @@ bot.callbackQuery("es_apply_confirm", async (ctx) => {
   state.editSettingsData.cancelled = false;
   state.step = "edit_settings_applying";
   await ctx.editMessageText(
-    `⏳ Applying Settings...\n\n🔄 0/${selectedGroups.length} done`,
+    `⏳ <b>Applying Settings...</b>\n\n🔄 0/${selectedGroups.length} done`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") }
   );
   void applyEditSettingsBackground(String(userId), userId, settings, selectedGroups, chatId, msgId);
@@ -12089,7 +12077,7 @@ bot.callbackQuery("es_apply_confirm", async (ctx) => {
 bot.callbackQuery("es_cancel_apply", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
-    "⚠️ Are you sure you want to cancel?\n\nGroups already processed will not be reverted.",
+    "⚠️ <b>Are you sure you want to cancel?</b>\n\nGroups already processed will not be reverted.",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -12103,7 +12091,7 @@ bot.callbackQuery("es_cancel_confirm", async (ctx) => {
   await ctx.answerCallbackQuery({ text: "🛑 Cancelled!" });
   const state = userStates.get(ctx.from.id);
   if (state?.editSettingsData) state.editSettingsData.cancelled = true;
-  await ctx.editMessageText("🛑 Apply cancelled.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu") });
+  await ctx.editMessageText("🛑 <b>Apply cancelled.</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu") });
 });
 
 bot.callbackQuery("es_cancel_dismiss", async (ctx) => {
@@ -12146,7 +12134,7 @@ async function applyEditSettingsBackground(
     const lines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)}` : `❌ ${esc(r.name)}`).join("\n");
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Applying Settings: ${done}/${total}\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
+        `⏳ <b>Applying Settings: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
         { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") : undefined }
       );
     } catch {}
@@ -12156,7 +12144,7 @@ async function applyEditSettingsBackground(
   userStates.delete(numericUserId);
   const ok = results.filter(r => r.ok).length;
   const cancelled = results.some(r => r.error === "Cancelled");
-  const header = cancelled ? `🛑 Cancelled (${ok}/${total} done)` : `🎉 Done! (${ok}/${total} applied)`;
+  const header = cancelled ? `🛑 <b>Cancelled (${ok}/${total} done)</b>` : `🎉 <b>Done! (${ok}/${total} applied)</b>`;
 
   // Build settings summary to show at the top of the result
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
@@ -12165,7 +12153,7 @@ async function applyEditSettingsBackground(
     : settings.disappearingMessages === 7776000 ? "90 Days"
     : "Off";
   const settingsSummary =
-    `⚙️ Settings Applied:\n` +
+    `⚙️ <b>Settings Applied:</b>\n` +
     `📄 Description: ${settings.description ? esc(settings.description) : "Skipped"}\n` +
     `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Changed" : "❌ Skipped"}\n` +
     `⏳ Disappearing Messages: ${dmLabel}\n` +
@@ -12177,7 +12165,7 @@ async function applyEditSettingsBackground(
   const finalLines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)} (skipped)` : `❌ ${esc(r.name)}: ${esc(r.error || "")}`).join("\n");
   try {
     await bot.api.editMessageText(chatId, msgId,
-      `${header}\n\n${settingsSummary}\n\n📋 Groups (${total}):\n${finalLines}`, {
+      `${header}\n\n${settingsSummary}\n\n📋 <b>Groups (${total}):</b>\n${finalLines}`, {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -12222,7 +12210,7 @@ bot.callbackQuery("change_group_name", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ WhatsApp not connected!", {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     });
@@ -12234,13 +12222,13 @@ bot.callbackQuery("change_group_name", async (ctx) => {
     .text("📁 Auto (VCF + name)", "cgn_auto").row()
     .text("🏠 Main Menu", "main_menu");
   await ctx.editMessageText(
-    "🏷️ Change Group Name\n\n" +
+    "🏷️ <b>Change Group Name</b>\n\n" +
     "Pick a mode:\n\n" +
-    "✏️ Manual (by name)\n" +
+    "✏️ <b>Manual (by name)</b>\n" +
     "• Pick groups (Similar / All) by tapping — order matters\n" +
     "• Type names yourself (auto-numbered or one per line)\n" +
     "• Bot renames in your tap order\n\n" +
-    "📁 Auto (VCF + name)\n" +
+    "📁 <b>Auto (VCF + name)</b>\n" +
     "• Only groups with pending requests are shown\n" +
     "• Upload one VCF per selected group — bot matches each VCF to its group by checking pending phones\n" +
     "• Group name comes from the VCF filename (same or with your custom prefix)",
@@ -12259,13 +12247,13 @@ bot.callbackQuery("cgn_manual", async (ctx) => {
     });
     return;
   }
-  await ctx.editMessageText("🔍 Scanning your WhatsApp groups...\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
 
   const groups = await getAllGroups(String(userId));
   const adminGroups = groups.filter((g) => g.isAdmin);
   if (!adminGroups.length) {
     await ctx.editMessageText(
-      "📭 No admin groups found.\n\nYou must be an admin in a group to rename it.",
+      "📭 <b>No admin groups found.</b>\n\nYou must be an admin in a group to rename it.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -12293,9 +12281,9 @@ bot.callbackQuery("cgn_manual", async (ctx) => {
   kb.text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    `✏️ Manual Rename\n\n` +
-    `📱 Admin groups found: ${adminGroups.length}\n` +
-    (patterns.length > 0 ? `🔍 Similar patterns: ${patterns.length}\n\n` : `\n`) +
+    `✏️ <b>Manual Rename</b>\n\n` +
+    `📱 Admin groups found: <b>${adminGroups.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 Similar patterns: <b>${patterns.length}</b>\n\n` : `\n`) +
     `Pick which set of groups to choose from:`,
     { parse_mode: "HTML", reply_markup: kb }
   );
@@ -12319,7 +12307,7 @@ bot.callbackQuery("cgn_m_similar", async (ctx) => {
   }
   kb.text("🔙 Back", "cgn_manual").text("🏠 Menu", "main_menu");
   await ctx.editMessageText(
-    "🔍 Similar Group Patterns\n\nTap a pattern — its groups will be the selection pool:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern — its groups will be the selection pool:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -12387,9 +12375,9 @@ async function renderCgnManualSelect(ctx: any) {
   const data = state.changeGroupNameData;
   const count = (data.selectedGroupIds || []).length;
   await ctx.editMessageText(
-    `✏️ Manual Rename — Select Groups\n\n` +
-    `📂 Pool: ${esc(data.selectionPoolLabel || "")} (${(data.selectionPool || []).length} groups)\n` +
-    `📌 Selected: ${count}\n\n` +
+    `✏️ <b>Manual Rename — Select Groups</b>\n\n` +
+    `📂 Pool: <b>${esc(data.selectionPoolLabel || "")}</b> (${(data.selectionPool || []).length} groups)\n` +
+    `📌 Selected: <b>${count}</b>\n\n` +
     `Tap groups in the order you want them renamed. Numbers on the buttons (1, 2, 3…) show your tap order — the bot will use the same order when you pick names.`,
     { parse_mode: "HTML", reply_markup: buildCgnManualKeyboard(state) }
   );
@@ -12463,10 +12451,10 @@ bot.callbackQuery("cgn_m_proceed", async (ctx) => {
   state.step = "cgn_manual_naming_choose";
   const count = state.changeGroupNameData.selectedGroupIds.length;
   await ctx.editMessageText(
-    `✏️ Manual Rename — Choose Naming Mode\n\n` +
-    `📌 Selected groups: ${count}\n\n` +
-    `🔢 Auto-numbered: You give one base name, bot generates ${count} numbered names (e.g. "Spidy 1, Spidy 2, Spidy 3…"). If your base ends in a number, bot continues from that number.\n\n` +
-    `✏️ Custom Names: You send all ${count} names yourself, one per line, in the same order you tapped the groups.`,
+    `✏️ <b>Manual Rename — Choose Naming Mode</b>\n\n` +
+    `📌 Selected groups: <b>${count}</b>\n\n` +
+    `🔢 <b>Auto-numbered:</b> You give one base name, bot generates ${count} numbered names (e.g. "Spidy 1, Spidy 2, Spidy 3…"). If your base ends in a number, bot continues from that number.\n\n` +
+    `✏️ <b>Custom Names:</b> You send all ${count} names yourself, one per line, in the same order you tapped the groups.`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -12486,11 +12474,11 @@ bot.callbackQuery("cgn_m_naming_auto", async (ctx) => {
   state.step = "cgn_manual_naming_auto_input";
   const count = (state.changeGroupNameData.selectedGroupIds || []).length;
   await ctx.editMessageText(
-    `🔢 Auto-numbered Names\n\n` +
-    `Send the base name for ${count} group(s).\n\n` +
+    `🔢 <b>Auto-numbered Names</b>\n\n` +
+    `Send the <b>base name</b> for ${count} group(s).\n\n` +
     `Examples:\n` +
-    `• Spidy → Spidy 1, Spidy 2, … Spidy ${count}\n` +
-    `• Spidy 5 → Spidy 5, Spidy 6, … Spidy ${4 + count} (continues numbering)`,
+    `• <code>Spidy</code> → Spidy 1, Spidy 2, … Spidy ${count}\n` +
+    `• <code>Spidy 5</code> → Spidy 5, Spidy 6, … Spidy ${4 + count} (continues numbering)`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -12504,9 +12492,9 @@ bot.callbackQuery("cgn_m_naming_custom", async (ctx) => {
   state.step = "cgn_manual_naming_custom_input";
   const count = (state.changeGroupNameData.selectedGroupIds || []).length;
   await ctx.editMessageText(
-    `✏️ Custom Names\n\n` +
-    `Send ${count} names, one per line, in the order you tapped the groups:\n\n` +
-    `Example:\nSpidy Squad\nSpidy Gang\nSpidy Army`,
+    `✏️ <b>Custom Names</b>\n\n` +
+    `Send <b>${count}</b> names, one per line, in the order you tapped the groups:\n\n` +
+    `<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -12530,12 +12518,12 @@ async function showCgnManualReview(ctx: any) {
   data.renamePlan = plan;
   state.step = "cgn_manual_review";
   const previewLines = plan.slice(0, 10)
-    .map((p, i) => `${i + 1}. ${esc(p.oldName)}\n   → ${esc(p.newName)}`)
+    .map((p, i) => `${i + 1}. <code>${esc(p.oldName)}</code>\n   → <code>${esc(p.newName)}</code>`)
     .join("\n\n");
-  const more = plan.length > 10 ? `\n\n… +${plan.length - 10} more` : "";
+  const more = plan.length > 10 ? `\n\n<i>… +${plan.length - 10} more</i>` : "";
   const text =
-    `📋 Rename Review\n\n` +
-    `Groups to rename: ${plan.length}\n\n${previewLines}${more}\n\n` +
+    `📋 <b>Rename Review</b>\n\n` +
+    `Groups to rename: <b>${plan.length}</b>\n\n${previewLines}${more}\n\n` +
     `🚀 Ready to rename?`;
   const markup = new InlineKeyboard()
     .text("✅ Start Rename", "cgn_confirm")
@@ -12555,13 +12543,13 @@ bot.callbackQuery("cgn_auto", async (ctx) => {
     });
     return;
   }
-  await ctx.editMessageText("⏳ Fetching groups with pending requests...\n\nPlease wait...", { parse_mode: "HTML" });
+  await ctx.editMessageText("⏳ <b>Fetching groups with pending requests...</b>\n\nPlease wait...", { parse_mode: "HTML" });
 
   const list = await getGroupPendingList(String(userId));
   const pendingOnly = list.filter((g) => g.pendingCount > 0);
   if (!pendingOnly.length) {
     await ctx.editMessageText(
-      "📋 Auto Rename\n\nNo groups with pending requests found.\n\nThis mode only works for groups that have at least one pending member request — that's how the bot matches a VCF to the right group.",
+      "📋 <b>Auto Rename</b>\n\nNo groups with pending requests found.\n\nThis mode only works for groups that have at least one pending member request — that's how the bot matches a VCF to the right group.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "change_group_name").text("🏠 Menu", "main_menu") }
     );
     return;
@@ -12615,9 +12603,9 @@ async function renderCgnAutoSelect(ctx: any) {
   const data = state.changeGroupNameData;
   const count = (data.pendingSelectedIds || []).length;
   await ctx.editMessageText(
-    `📁 Auto Rename — Select Groups\n\n` +
-    `📊 Groups with pending: ${(data.pendingPool || []).length}\n` +
-    `📌 Selected: ${count}\n\n` +
+    `📁 <b>Auto Rename — Select Groups</b>\n\n` +
+    `📊 Groups with pending: <b>${(data.pendingPool || []).length}</b>\n` +
+    `📌 Selected: <b>${count}</b>\n\n` +
     `Tap groups to select. After this you'll upload one VCF per group — the bot matches each VCF to the group whose pending list contains it.`,
     { parse_mode: "HTML", reply_markup: buildCgnAutoSelectKeyboard(state) }
   );
@@ -12692,10 +12680,10 @@ bot.callbackQuery("cgn_a_proceed", async (ctx) => {
   state.step = "cgn_auto_collect_vcf";
   const count = state.changeGroupNameData.pendingSelectedIds.length;
   await ctx.editMessageText(
-    `📁 Upload VCF Files\n\n` +
-    `Send ${count} VCF file(s) — one per selected group.\n\n` +
+    `📁 <b>Upload VCF Files</b>\n\n` +
+    `Send <b>${count}</b> VCF file(s) — one per selected group.\n\n` +
     `📌 You can upload them in any order. The bot will match each VCF to the right group by checking which group's pending list contains the VCF's phone numbers.\n\n` +
-    `Progress: 0 / ${count} received`,
+    `Progress: <b>0 / ${count}</b> received`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -12718,14 +12706,14 @@ async function cgnAutoAfterVcfUploaded(ctx: any) {
   // All VCFs collected — ask which naming mode
   state.step = "cgn_auto_name_choose";
   await ctx.reply(
-    `✅ All ${need} VCF file(s) received!\n\n` +
+    `✅ <b>All ${need} VCF file(s) received!</b>\n\n` +
     `Choose how the new group names should be built:\n\n` +
-    `📁 Same as VCF name\n` +
+    `📁 <b>Same as VCF name</b>\n` +
     `Each group's new name = its VCF filename without ".vcf"\n` +
-    `e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61"\n\n` +
-    `✏️ Customize name\n` +
-    `You give a prefix like SPIDY 酒店EMPIRE動FL_. The bot keeps just the trailing number from each VCF filename and appends it.\n` +
-    `e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61"`,
+    `<i>e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61"</i>\n\n` +
+    `✏️ <b>Customize name</b>\n` +
+    `You give a prefix like <code>SPIDY 酒店EMPIRE動FL_</code>. The bot keeps just the trailing number from each VCF filename and appends it.\n` +
+    `<i>e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61"</i>`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -12753,13 +12741,13 @@ bot.callbackQuery("cgn_a_name_custom", async (ctx) => {
   state.changeGroupNameData.autoNameMode = "custom_vcf";
   state.step = "cgn_auto_custom_prefix_input";
   await ctx.editMessageText(
-    `✏️ Custom Prefix\n\n` +
+    `✏️ <b>Custom Prefix</b>\n\n` +
     `Send the prefix you want before the trailing number from each VCF filename.\n\n` +
     `Example:\n` +
-    `• Prefix: SPIDY 酒店EMPIRE動FL_\n` +
-    `• VCF filename: Expedia 酒店回饋活動FL_61.vcf\n` +
-    `• Final group name: SPIDY 酒店EMPIRE動FL_61\n\n` +
-    `Tip: include a separator (space, _, -) at the end of your prefix if you want one.`,
+    `• Prefix: <code>SPIDY 酒店EMPIRE動FL_</code>\n` +
+    `• VCF filename: <code>Expedia 酒店回饋活動FL_61.vcf</code>\n` +
+    `• Final group name: <code>SPIDY 酒店EMPIRE動FL_61</code>\n\n` +
+    `<i>Tip: include a separator (space, _, -) at the end of your prefix if you want one.</i>`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -12778,7 +12766,7 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   let matchingMsg: any = null;
   try {
     matchingMsg = await ctx.reply(
-      `⏳ Matching ${vcfs.length} VCF(s) to ${selectedIds.length} group(s)...\n\nFetching pending requests for each group.`,
+      `⏳ <b>Matching ${vcfs.length} VCF(s) to ${selectedIds.length} group(s)...</b>\n\nFetching pending requests for each group.`,
       { parse_mode: "HTML" }
     );
   } catch {}
@@ -12786,11 +12774,11 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   // For each selected group, fetch its pending phone numbers.
   // Then for each group, pick the VCF with most overlap (≥1) as its match.
   const poolMap = new Map((data.pendingPool || []).map((g) => [g.groupId, g] as const));
-  const groupPendingPhones: Map> = new Map(); // last10 set
+  const groupPendingPhones: Map<string, Set<string>> = new Map(); // last10 set
   for (const gid of selectedIds) {
     try {
       const detailed = await getGroupPendingRequestsDetailed(String(userId), gid);
-      const last10s = new Set();
+      const last10s = new Set<string>();
       for (const p of detailed) {
         const cleaned = (p.phone || "").replace(/[^0-9]/g, "");
         if (cleaned.length >= 7) last10s.add(cleaned.slice(-10));
@@ -12802,7 +12790,7 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   }
 
   // Pre-compute each VCF's last-10 phone set
-  const vcfLast10: Array<{ idx: number; fileName: string; last10: Set }> = vcfs.map((v, i) => ({
+  const vcfLast10: Array<{ idx: number; fileName: string; last10: Set<string> }> = vcfs.map((v, i) => ({
     idx: i,
     fileName: v.fileName,
     last10: new Set(v.phones.map((p) => p.replace(/[^0-9]/g, "").slice(-10)).filter((s) => s.length >= 7)),
@@ -12811,8 +12799,8 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   // Greedy matching: for each VCF, find best group (most overlap, ≥1).
   // Once a group is taken, it can't be re-used. If two VCFs tie for the
   // same group, the higher-overlap VCF wins; the loser stays unmatched.
-  const groupTaken = new Set();
-  const vcfToGroup = new Map(); // vcfIdx -> groupId
+  const groupTaken = new Set<string>();
+  const vcfToGroup = new Map<number, string>(); // vcfIdx -> groupId
   // Compute all (vcf, group) overlap candidates, sort descending, then assign.
   type Cand = { vcfIdx: number; groupId: string; overlap: number };
   const cands: Cand[] = [];
@@ -12825,7 +12813,7 @@ async function buildAndShowCgnAutoReview(ctx: any) {
     }
   }
   cands.sort((a, b) => b.overlap - a.overlap);
-  const vcfTaken = new Set();
+  const vcfTaken = new Set<number>();
   for (const c of cands) {
     if (vcfTaken.has(c.vcfIdx) || groupTaken.has(c.groupId)) continue;
     vcfToGroup.set(c.vcfIdx, c.groupId);
@@ -12838,7 +12826,7 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   //   • compute new name based on autoNameMode
   const plan: Array<{ groupId: string; oldName: string; newName: string; vcfFileName?: string }> = [];
   // Reverse map: groupId -> matched vcf
-  const groupToVcf = new Map();
+  const groupToVcf = new Map<string, { vcfIdx: number; fileName: string }>();
   for (const [vidx, gid] of vcfToGroup.entries()) {
     groupToVcf.set(gid, { vcfIdx: vidx, fileName: vcfs[vidx].fileName });
   }
@@ -12871,9 +12859,9 @@ async function buildAndShowCgnAutoReview(ctx: any) {
 
   const previewLines = plan.slice(0, 12).map((p, i) => {
     const vcfTag = p.vcfFileName ? `   📁 ${esc(p.vcfFileName)}\n` : "";
-    return `${i + 1}. ${esc(p.oldName)}\n${vcfTag}   → ${esc(p.newName)}`;
+    return `${i + 1}. <code>${esc(p.oldName)}</code>\n${vcfTag}   → <code>${esc(p.newName)}</code>`;
   }).join("\n\n");
-  const more = plan.length > 12 ? `\n\n… +${plan.length - 12} more` : "";
+  const more = plan.length > 12 ? `\n\n<i>… +${plan.length - 12} more</i>` : "";
   const validCount = plan.filter((p) => !p.newName.startsWith("(no matching")).length;
   const skipCount = plan.length - validCount;
 
@@ -12886,8 +12874,8 @@ async function buildAndShowCgnAutoReview(ctx: any) {
   }
 
   const text =
-    `📋 Auto Rename — Review\n\n` +
-    `Will rename: ${validCount} / ${plan.length} groups${warn}\n\n` +
+    `📋 <b>Auto Rename — Review</b>\n\n` +
+    `Will rename: <b>${validCount}</b> / ${plan.length} groups${warn}\n\n` +
     `${previewLines}${more}\n\n` +
     `🚀 Ready to rename?`;
   const markup = new InlineKeyboard();
@@ -12925,7 +12913,7 @@ bot.callbackQuery("cgn_confirm", async (ctx) => {
   state.changeGroupNameData.cancel = false;
 
   await ctx.editMessageText(
-    `⏳ Renaming ${plan.length} group(s)...\n\n🔄 0/${plan.length} done...`,
+    `⏳ <b>Renaming ${plan.length} group(s)...</b>\n\n🔄 0/${plan.length} done...`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request") }
   );
 
@@ -12987,7 +12975,7 @@ async function runChangeGroupNameBackground(
           return `${tag} ${esc(res.oldName)} → ${esc(res.newName)}${res.ok ? "" : ` (${esc(res.error || "fail")})`}`;
         }).join("\n");
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Renaming ${done}/${plan.length}...\n\n${last5}`,
+          `⏳ <b>Renaming ${done}/${plan.length}...</b>\n\n${last5}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request") }
         );
       } catch {}
@@ -13006,11 +12994,11 @@ async function runChangeGroupNameBackground(
   const fail = results.length - ok;
   const skipped = plan.length - results.length; // remaining when cancelled
   const header = cancelled
-    ? `🛑 Cancelled (${ok} renamed, ${fail} failed, ${skipped} skipped)`
-    : `🎉 Done! (${ok} renamed, ${fail} failed)`;
+    ? `🛑 <b>Cancelled</b> (${ok} renamed, ${fail} failed, ${skipped} skipped)`
+    : `🎉 <b>Done!</b> (${ok} renamed, ${fail} failed)`;
   const lines = results.map((r) => {
     if (r.ok) return `✅ ${esc(r.oldName)} → ${esc(r.newName)}`;
-    return `❌ ${esc(r.oldName)} → ${esc(r.newName)} (${esc(r.error || "fail")})`;
+    return `❌ ${esc(r.oldName)} → ${esc(r.newName)} <i>(${esc(r.error || "fail")})</i>`;
   }).join("\n");
 
   const fullText = `${header}\n\n${lines}`;
@@ -13041,6 +13029,7 @@ async function runChangeGroupNameBackground(
   }
 }
 
+
 // ─── Add Members Feature ──────────────────────────────────────────────────────
 
 bot.callbackQuery("add_members", async (ctx) => {
@@ -13048,7 +13037,7 @@ bot.callbackQuery("add_members", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("📱 WhatsApp not connected!\n\nConnect first to use this feature.", {
+    await ctx.editMessageText("📱 <b>WhatsApp not connected!</b>\n\nConnect first to use this feature.", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     });
@@ -13064,12 +13053,12 @@ bot.callbackQuery("add_members", async (ctx) => {
     },
   });
   await ctx.editMessageText(
-    "➕ Add Members to Group\n\n" +
-    "🔗 Step 1: WhatsApp group link(s) bhejo.\n\n" +
-    "✅ Single group: Ek link (Friend + Admin/Navy/Member VCF support)\n" +
-    "✅ Multiple groups: Multiple links, ek per line (sirf Friend numbers)\n\n" +
-    "Example single:\nhttps://chat.whatsapp.com/ABC123xyz\n\n" +
-    "Example multiple:\nhttps://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456",
+    "➕ <b>Add Members to Group</b>\n\n" +
+    "🔗 <b>Step 1:</b> WhatsApp group link(s) bhejo.\n\n" +
+    "✅ <b>Single group:</b> Ek link (Friend + Admin/Navy/Member VCF support)\n" +
+    "✅ <b>Multiple groups:</b> Multiple links, ek per line (sirf Friend numbers)\n\n" +
+    "Example single:\n<code>https://chat.whatsapp.com/ABC123xyz</code>\n\n" +
+    "Example multiple:\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -13082,14 +13071,14 @@ bot.callbackQuery("am_skip_friends", async (ctx) => {
   state.addMembersData.friendNumbers = [];
   if (state.addMembersData.multiGroup) {
     await ctx.editMessageText(
-      "❌ Multiple groups mode mein friend numbers zaroori hain!\n\nFriend numbers ke bina kuch add nahi hoga.\n\nFriend numbers bhejo ya feature restart karo.",
+      "❌ <b>Multiple groups mode mein friend numbers zaroori hain!</b>\n\nFriend numbers ke bina kuch add nahi hoga.\n\nFriend numbers bhejo ya feature restart karo.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Restart", "add_members").text("🏠 Menu", "main_menu") }
     );
     return;
   }
   state.step = "add_members_admin_vcf";
   await ctx.editMessageText(
-    "👑 Step 3: Admin VCF File\n\n" +
+    "👑 <b>Step 3: Admin VCF File</b>\n\n" +
     "📁 Send Admin VCF file (.vcf)\n\n" +
     "Agar admin ka VCF nahi hai to Skip karo.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_admin").text("❌ Cancel", "main_menu") }
@@ -13104,7 +13093,7 @@ bot.callbackQuery("am_skip_admin", async (ctx) => {
   state.addMembersData.adminContacts = [];
   state.step = "add_members_navy_vcf";
   await ctx.editMessageText(
-    "⚓ Step 4: Navy VCF File\n\n" +
+    "⚓ <b>Step 4: Navy VCF File</b>\n\n" +
     "📁 Send Navy VCF file (.vcf)\n\n" +
     "Agar navy ka VCF nahi hai to Skip karo.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_navy").text("❌ Cancel", "main_menu") }
@@ -13119,7 +13108,7 @@ bot.callbackQuery("am_skip_navy", async (ctx) => {
   state.addMembersData.navyContacts = [];
   state.step = "add_members_member_vcf";
   await ctx.editMessageText(
-    "👥 Step 5: Member VCF File\n\n" +
+    "👥 <b>Step 5: Member VCF File</b>\n\n" +
     "📁 Send Member VCF file (.vcf)\n\n" +
     "Agar member ka VCF nahi hai to Skip karo.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_members").text("❌ Cancel", "main_menu") }
@@ -13136,7 +13125,7 @@ bot.callbackQuery("am_skip_members", async (ctx) => {
   const totalAvailable = d.friendNumbers.length + d.adminContacts.length + d.navyContacts.length + d.memberContacts.length;
   if (totalAvailable === 0) {
     await ctx.editMessageText(
-      "❌ No contacts provided!\n\nAapne koi bhi friend number ya VCF file nahi diya. Kuch to dena padega add karne ke liye.",
+      "❌ <b>No contacts provided!</b>\n\nAapne koi bhi friend number ya VCF file nahi diya. Kuch to dena padega add karne ke liye.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Try Again", "add_members").text("🏠 Menu", "main_menu") }
     );
     return;
@@ -13148,11 +13137,11 @@ bot.callbackQuery("am_skip_members", async (ctx) => {
   if (d.navyContacts.length > 0) availLines.push(`⚓ Navy: ${d.navyContacts.length}`);
   if (d.memberContacts.length > 0) availLines.push(`👥 Members: ${d.memberContacts.length}`);
   await ctx.editMessageText(
-    "🔢 Step 6: Total Members to Add\n\n" +
+    "🔢 <b>Step 6: Total Members to Add</b>\n\n" +
     `📊 Available contacts:\n` +
     `${availLines.join("\n")}\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
-    `📋 Total available: ${totalAvailable}\n\n` +
+    `📋 Total available: <b>${totalAvailable}</b>\n\n` +
     `🔢 Kitna members add karna hai total? (Number bhejo)`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
@@ -13166,10 +13155,10 @@ bot.callbackQuery("am_mode_one_by_one", async (ctx) => {
   state.addMembersData.mode = "one_by_one";
   state.step = "add_members_set_delay";
   await ctx.editMessageText(
-    "⏱️ Set Adding Speed\n\n" +
+    "⏱️ <b>Set Adding Speed</b>\n\n" +
     "1 member add karne ke baad kitna wait karna hai?\n\n" +
-    "⚡ Recommended: 15 seconds (safe adding)\n\n" +
-    "Time in seconds bhejo (e.g. 15)\n" +
+    "⚡ Recommended: <b>15 seconds</b> (safe adding)\n\n" +
+    "Time in seconds bhejo (e.g. <code>15</code>)\n" +
     "Ya recommended use karo:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ 15s (Recommended)", "am_delay_15").text("❌ Cancel", "main_menu") }
   );
@@ -13195,7 +13184,7 @@ bot.callbackQuery("am_mode_together", async (ctx) => {
 });
 
 // ─── Custom Add Mode ───────────────────────────────────────────────────────
-function customCategoryOrder(d: NonNullable): Array<"friend" | "admin" | "navy" | "member"> {
+function customCategoryOrder(d: NonNullable<UserState["addMembersData"]>): Array<"friend" | "admin" | "navy" | "member"> {
   const order: Array<"friend" | "admin" | "navy" | "member"> = [];
   if (d.friendNumbers.length > 0) order.push("friend");
   if (d.adminContacts.length > 0) order.push("admin");
@@ -13208,7 +13197,7 @@ function categoryLabel(c: "friend" | "admin" | "navy" | "member"): string {
   return c === "friend" ? "👫 Friend" : c === "admin" ? "👑 Admin" : c === "navy" ? "⚓ Navy" : "👥 Member";
 }
 
-function categoryCount(d: NonNullable, c: "friend" | "admin" | "navy" | "member"): number {
+function categoryCount(d: NonNullable<UserState["addMembersData"]>, c: "friend" | "admin" | "navy" | "member"): number {
   return c === "friend" ? d.friendNumbers.length : c === "admin" ? d.adminContacts.length : c === "navy" ? d.navyContacts.length : d.memberContacts.length;
 }
 
@@ -13232,8 +13221,8 @@ async function showCustomBatchPrompt(ctx: any, userId: number) {
   state.step = "add_members_custom_batch";
   const cnt = categoryCount(d, nextCat);
   const text =
-    `🎯 Custom Pace — ${categoryLabel(nextCat)}\n\n` +
-    `Available: ${cnt} contacts\n\n` +
+    `🎯 <b>Custom Pace — ${categoryLabel(nextCat)}</b>\n\n` +
+    `Available: <b>${cnt}</b> contacts\n\n` +
     `Ek baar mein kitne add karein?`;
   const kb = new InlineKeyboard()
     .text("1-1", "am_cb_1").text("2-2", "am_cb_2").text("3-3", "am_cb_3").row()
@@ -13259,12 +13248,12 @@ bot.callbackQuery("am_mode_custom", async (ctx) => {
   await showCustomBatchPrompt(ctx, userId);
 });
 
-for (const [cb, val] of [\
-  ["am_cb_1", 1], ["am_cb_2", 2], ["am_cb_3", 3],\
-  ["am_cb_4", 4], ["am_cb_5", 5], ["am_cb_6", 6],\
-  ["am_cb_7", 7], ["am_cb_8", 8], ["am_cb_9", 9],\
-  ["am_cb_10", 10], ["am_cb_15", 15], ["am_cb_20", 20],\
-  ["am_cb_all", -1],\
+for (const [cb, val] of [
+  ["am_cb_1", 1], ["am_cb_2", 2], ["am_cb_3", 3],
+  ["am_cb_4", 4], ["am_cb_5", 5], ["am_cb_6", 6],
+  ["am_cb_7", 7], ["am_cb_8", 8], ["am_cb_9", 9],
+  ["am_cb_10", 10], ["am_cb_15", 15], ["am_cb_20", 20],
+  ["am_cb_all", -1],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -13322,19 +13311,19 @@ async function showAddMembersReview(ctx: any, userId: number) {
       const paceText = !batch ? "?" : batch >= cnt ? "All together" : `${batch}-${batch}`;
       parts.push(`  • ${categoryLabel(c)} (${cnt}) → ${paceText}`);
     }
-    customLines = `\n🎯 Custom pace:\n${parts.join("\n")}\n`;
+    customLines = `\n🎯 <b>Custom pace:</b>\n${parts.join("\n")}\n`;
   }
   let reviewText: string;
   if (d.multiGroup) {
     const groupList = d.groups.slice(0, 5).map(g => `• ${esc(g.name)}`).join("\n");
     const moreGroups = d.groups.length > 5 ? `\n... +${d.groups.length - 5} more` : "";
     reviewText =
-      "📋 Add Members — Final Review (Multi-Group)\n\n" +
-      `📋 Groups (${d.groups.length}):\n${groupList}${moreGroups}\n\n` +
+      "📋 <b>Add Members — Final Review (Multi-Group)</b>\n\n" +
+      `📋 <b>Groups (${d.groups.length}):</b>\n${groupList}${moreGroups}\n\n` +
       `👫 Friends: ${d.friendNumbers.length}\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `🔢 Per group: ${d.friendNumbers.length} friends\n` +
-      `⚙️ Mode: ${modeText}${customLines}\n\n` +
+      `🔢 Per group: <b>${d.friendNumbers.length}</b> friends\n` +
+      `⚙️ Mode: <b>${modeText}</b>${customLines}\n\n` +
       `⚠️ Confirm karke Start karo:`;
   } else {
     const catLines: string[] = [];
@@ -13343,13 +13332,13 @@ async function showAddMembersReview(ctx: any, userId: number) {
     if (d.navyContacts.length > 0) catLines.push(`⚓ Navy VCF: ${d.navyContacts.length}`);
     if (d.memberContacts.length > 0) catLines.push(`👥 Member VCF: ${d.memberContacts.length}`);
     reviewText =
-      "📋 Add Members — Final Review\n\n" +
-      `🔗 Group: ${esc(d.groupName)}\n` +
-      `📋 Group ID: ${esc(d.groupId)}\n\n` +
+      "📋 <b>Add Members — Final Review</b>\n\n" +
+      `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+      `📋 Group ID: <code>${esc(d.groupId)}</code>\n\n` +
       `${catLines.join("\n")}\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `🔢 Total to add: ${d.totalToAdd}\n` +
-      `⚙️ Mode: ${modeText}${customLines}\n\n` +
+      `🔢 Total to add: <b>${d.totalToAdd}</b>\n` +
+      `⚙️ Mode: <b>${modeText}</b>${customLines}\n\n` +
       `⚠️ Confirm karke Start karo:`;
   }
   const kb = {
@@ -13378,7 +13367,7 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
 
   if (d.multiGroup) {
     const statusMsg = await ctx.editMessageText(
-      `⏳ Multi-Group Adding Shuru...\n\n` +
+      `⏳ <b>Multi-Group Adding Shuru...</b>\n\n` +
       `📋 Groups: ${d.groups.length}\n` +
       `👫 Friends per group: ${d.friendNumbers.length}\n\n` +
       `⌛ Starting...`,
@@ -13391,7 +13380,7 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
   const inGroup = await isUserInGroup(String(userId), d.groupId);
   if (!inGroup) {
     await ctx.editMessageText(
-      "⏳ Bot is not in this group!\n\n" +
+      "⏳ <b>Bot is not in this group!</b>\n\n" +
       "🔗 Pehle group join request bhej raha hun...\n" +
       "⌛ Admin approval ka wait kar raha hun...",
       { parse_mode: "HTML" }
@@ -13400,7 +13389,7 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
     const joinResult = await joinGroupWithLink(String(userId), d.groupLink);
     if (!joinResult.success) {
       await ctx.editMessageText(
-        `❌ Group join nahi ho paya!\n\nError: ${esc(joinResult.error || "Unknown")}\n\n` +
+        `❌ <b>Group join nahi ho paya!</b>\n\nError: ${esc(joinResult.error || "Unknown")}\n\n` +
         "Group admin se approval lein ya check karein ki link sahi hai.",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Retry", "am_start_adding").text("🏠 Menu", "main_menu") }
       );
@@ -13438,10 +13427,10 @@ async function startAddMembersMultiGroup(
       lines.push(`⛔ Cancelled — ${esc(group.name)} aur remaining skip.`);
       break;
     }
-    lines.push(`\n⏳ ${esc(group.name)} — Adding...`);
+    lines.push(`\n⏳ <b>${esc(group.name)}</b> — Adding...`);
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ Multi-Group Adding...\n${lines.join("\n")}`,
+        `⏳ <b>Multi-Group Adding...</b>\n${lines.join("\n")}`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
       );
     } catch {}
@@ -13450,7 +13439,7 @@ async function startAddMembersMultiGroup(
     if (!inGroup) {
       const joinResult = await joinGroupWithLink(String(userId), group.link);
       if (!joinResult.success) {
-        lines[lines.length - 1] = `❌ ${esc(group.name)} — Join fail: ${esc(joinResult.error || "Unknown")}`;
+        lines[lines.length - 1] = `❌ <b>${esc(group.name)}</b> — Join fail: ${esc(joinResult.error || "Unknown")}`;
         continue;
       }
       await new Promise(r => setTimeout(r, 2000));
@@ -13461,11 +13450,11 @@ async function startAddMembersMultiGroup(
     if (addedCount === 0) {
       const firstFail = Array.isArray(result) ? result.find(r => !r.success) : null;
       const reason = firstFail?.error || "Unknown reason";
-      lines[lines.length - 1] = `❌ ${esc(group.name)} — 0/${contacts.length} added (${esc(reason)})`;
+      lines[lines.length - 1] = `❌ <b>${esc(group.name)}</b> — 0/${contacts.length} added (${esc(reason)})`;
     } else if (addedCount < contacts.length) {
-      lines[lines.length - 1] = `⚠️ ${esc(group.name)} — ${addedCount}/${contacts.length} added`;
+      lines[lines.length - 1] = `⚠️ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
     } else {
-      lines[lines.length - 1] = `✅ ${esc(group.name)} — ${addedCount}/${contacts.length} added`;
+      lines[lines.length - 1] = `✅ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
     }
 
     if (delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
@@ -13477,12 +13466,12 @@ async function startAddMembersMultiGroup(
   const summary = lines.join("\n");
   try {
     await bot.api.editMessageText(chatId, msgId,
-      `🎉 Multi-Group Adding Done!\n\n${summary}`,
+      `🎉 <b>Multi-Group Adding Done!</b>\n\n${summary}`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
   } catch {
     await bot.api.sendMessage(chatId,
-      `🎉 Multi-Group Adding Done!\n\n${summary}`,
+      `🎉 <b>Multi-Group Adding Done!</b>\n\n${summary}`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
   }
@@ -13496,8 +13485,8 @@ function normalizePhoneForJid(raw: string): string {
   return digits.startsWith("0") && digits.length > 10 ? digits.slice(1) : digits;
 }
 
-function buildAddMembersList(d: NonNullable): Array<{ phone: string; category: string }> {
-  const seen = new Set();
+function buildAddMembersList(d: NonNullable<UserState["addMembersData"]>): Array<{ phone: string; category: string }> {
+  const seen = new Set<string>();
   const list: Array<{ phone: string; category: string }> = [];
 
   function addIfUnique(raw: string, category: string) {
@@ -13525,7 +13514,7 @@ async function startAddMembersOneByOne(ctx: any, userId: number, chatId: number)
   const totalToAdd = Math.min(d.totalToAdd, allContacts.length);
 
   const statusMsg = await ctx.editMessageText(
-    `⏳ Adding Members 1 by 1...\n\n` +
+    `⏳ <b>Adding Members 1 by 1...</b>\n\n` +
     `🔢 0/${totalToAdd} done\n` +
     `✅ Added: 0 | ❌ Skipped: 0\n\n` +
     `⌛ Starting...`,
@@ -13573,7 +13562,7 @@ async function startAddMembersOneByOne(ctx: any, userId: number, chatId: number)
       const lastResults = results.slice(-8).join("\n");
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ Adding Members 1 by 1...\n\n` +
+          `⏳ <b>Adding Members 1 by 1...</b>\n\n` +
           `🔢 Progress: ${added}/${totalToAdd} added\n` +
           `✅ Added: ${added} | ⏭️ Skipped: ${skipped} | 📊 Tried: ${attempted}\n\n` +
           `📋 Recent:\n${lastResults}\n\n` +
@@ -13591,12 +13580,12 @@ async function startAddMembersOneByOne(ctx: any, userId: number, chatId: number)
     userStates.delete(userId);
 
     const summary =
-      `${cancelled ? "⛔" : "✅"} Add Members ${cancelled ? "Cancelled" : "Complete"}!\n\n` +
-      `🔗 Group: ${esc(d.groupName)}\n` +
-      `✅ Successfully Added: ${added}\n` +
-      `⏭️ Skipped: ${skipped}\n` +
-      `📊 Total Attempted: ${attempted}\n` +
-      (cancelled ? `\n⛔ User ne adding cancel kar diya.` : "");
+      `${cancelled ? "⛔" : "✅"} <b>Add Members ${cancelled ? "Cancelled" : "Complete"}!</b>\n\n` +
+      `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+      `✅ Successfully Added: <b>${added}</b>\n` +
+      `⏭️ Skipped: <b>${skipped}</b>\n` +
+      `📊 Total Attempted: <b>${attempted}</b>\n` +
+      (cancelled ? `\n⛔ <b>User ne adding cancel kar diya.</b>` : "");
 
     try {
       await bot.api.editMessageText(chatId, msgId, summary, {
@@ -13618,7 +13607,7 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
   const phoneNumbers = contactsToAdd.map(c => c.phone);
 
   const statusMsg = await ctx.editMessageText(
-    `⏳ Adding ${totalToAdd} Members Together...\n\n` +
+    `⏳ <b>Adding ${totalToAdd} Members Together...</b>\n\n` +
     `🔢 Sending bulk add request...\n` +
     `⌛ Please wait... (background mein chal raha hai)`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
@@ -13632,7 +13621,7 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
         addMembersCancelRequests.delete(userId);
         userStates.delete(userId);
         try {
-          await bot.api.editMessageText(chatId, msgId, "⛔ Adding cancelled.", {
+          await bot.api.editMessageText(chatId, msgId, "⛔ <b>Adding cancelled.</b>", {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
           });
@@ -13644,7 +13633,7 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
         userStates.delete(userId);
         try {
           await bot.api.editMessageText(chatId, msgId,
-            "❌ WhatsApp disconnected!\n\nPlease reconnect and try again.",
+            "❌ <b>WhatsApp disconnected!</b>\n\nPlease reconnect and try again.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
           );
         } catch {}
@@ -13682,11 +13671,11 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
 
       const lastLines = resultLines.slice(-15).join("\n");
       const summary =
-        `✅ Add Members Together — Complete!\n\n` +
-        `🔗 Group: ${esc(d.groupName)}\n` +
-        `✅ Successfully Added: ${added}\n` +
-        `⏭️ Skipped: ${skipped}\n` +
-        `📊 Total: ${results.length}\n\n` +
+        `✅ <b>Add Members Together — Complete!</b>\n\n` +
+        `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+        `✅ Successfully Added: <b>${added}</b>\n` +
+        `⏭️ Skipped: <b>${skipped}</b>\n` +
+        `📊 Total: <b>${results.length}</b>\n\n` +
         `📋 Results:\n${lastLines}` +
         (resultLines.length > 15 ? `\n... +${resultLines.length - 15} more` : "");
 
@@ -13701,7 +13690,7 @@ async function startAddMembersTogether(ctx: any, userId: number, chatId: number)
       addMembersCancelRequests.delete(userId);
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `❌ Error: ${esc(err?.message || "Unknown error")}`,
+          `❌ <b>Error:</b> ${esc(err?.message || "Unknown error")}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
         );
       } catch {}
@@ -13715,7 +13704,7 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
   const d = state.addMembersData;
 
   // Build per-category contact lists, preserving uniqueness across the whole flow
-  const seen = new Set();
+  const seen = new Set<string>();
   function buildList(rawList: string[], category: string): Array<{ phone: string; category: string }> {
     const out: Array<{ phone: string; category: string }> = [];
     for (const raw of rawList) {
@@ -13750,7 +13739,7 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
   const totalToAdd = Math.min(d.totalToAdd, totalAvailable);
 
   const statusMsg = await ctx.editMessageText(
-    `⏳ Custom Adding Shuru...\n\n` +
+    `⏳ <b>Custom Adding Shuru...</b>\n\n` +
     `🔢 Target: 0/${totalToAdd}\n` +
     `⌛ Starting...`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "am_cancel_adding") }
@@ -13767,7 +13756,7 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
     outer: for (const cd of categoryData) {
       if (added >= totalToAdd) break;
       if (cd.contacts.length === 0) continue;
-      results.push(`\n🔹 ${cd.cat} (${cd.contacts.length}, batch=${cd.batch >= cd.contacts.length ? "all" : cd.batch})`);
+      results.push(`\n🔹 <b>${cd.cat}</b> (${cd.contacts.length}, batch=${cd.batch >= cd.contacts.length ? "all" : cd.batch})`);
       let i = 0;
       while (i < cd.contacts.length && added < totalToAdd) {
         if (addMembersCancelRequests.has(userId)) { cancelled = true; break outer; }
@@ -13801,7 +13790,7 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
         const lastResults = results.slice(-10).join("\n");
         try {
           await bot.api.editMessageText(chatId, msgId,
-            `⏳ Custom Adding...\n\n` +
+            `⏳ <b>Custom Adding...</b>\n\n` +
             `🔢 Progress: ${added}/${totalToAdd}\n` +
             `✅ Added: ${added} | ⏭️/❌ Skipped: ${skipped} | 📊 Tried: ${attempted}\n\n` +
             `📋 Recent:\n${lastResults}\n\n` +
@@ -13820,12 +13809,12 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
     userStates.delete(userId);
 
     const summary =
-      `${cancelled ? "⛔" : "✅"} Custom Add ${cancelled ? "Cancelled" : "Complete"}!\n\n` +
-      `🔗 Group: ${esc(d.groupName)}\n` +
-      `✅ Successfully Added: ${added}\n` +
-      `⏭️/❌ Skipped/Failed: ${skipped}\n` +
-      `📊 Total Attempted: ${attempted}\n` +
-      (cancelled ? `\n⛔ User ne adding cancel kar diya.` : "");
+      `${cancelled ? "⛔" : "✅"} <b>Custom Add ${cancelled ? "Cancelled" : "Complete"}!</b>\n\n` +
+      `🔗 Group: <b>${esc(d.groupName)}</b>\n` +
+      `✅ Successfully Added: <b>${added}</b>\n` +
+      `⏭️/❌ Skipped/Failed: <b>${skipped}</b>\n` +
+      `📊 Total Attempted: <b>${attempted}</b>\n` +
+      (cancelled ? `\n⛔ <b>User ne adding cancel kar diya.</b>` : "");
 
     try {
       await bot.api.editMessageText(chatId, msgId, summary, {
@@ -13854,7 +13843,7 @@ bot.on("message:text", async (ctx) => {
           await sendReferRequired(ctx, userId);
         } else {
           await ctx.reply(
-            `🔒 Subscription Required!\n\n👤 Contact owner: ${OWNER_USERNAME}`,
+            `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
             { parse_mode: "HTML" }
           );
         }
@@ -13885,7 +13874,7 @@ bot.on("message:text", async (ctx) => {
     const data = state.changeGroupNameData;
     const count = (data.selectedGroupIds || []).length;
     if (!text) {
-      await ctx.reply("⚠️ Empty name. Send a base name like Spidy.", { parse_mode: "HTML" });
+      await ctx.reply("⚠️ Empty name. Send a base name like <code>Spidy</code>.", { parse_mode: "HTML" });
       return;
     }
     data.baseName = text;
@@ -13899,7 +13888,7 @@ bot.on("message:text", async (ctx) => {
     const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
     if (lines.length !== count) {
       await ctx.reply(
-        `⚠️ Got ${lines.length} name(s) but selected ${count} group(s). Send exactly ${count} names, one per line.`,
+        `⚠️ Got <b>${lines.length}</b> name(s) but selected <b>${count}</b> group(s). Send exactly ${count} names, one per line.`,
         { parse_mode: "HTML" }
       );
       return;
@@ -13911,7 +13900,7 @@ bot.on("message:text", async (ctx) => {
   if (state.step === "cgn_auto_custom_prefix_input" && state.changeGroupNameData) {
     const data = state.changeGroupNameData;
     if (!text) {
-      await ctx.reply("⚠️ Empty prefix. Send the prefix text (e.g. SPIDY 酒店EMPIRE動FL_).", { parse_mode: "HTML" });
+      await ctx.reply("⚠️ Empty prefix. Send the prefix text (e.g. <code>SPIDY 酒店EMPIRE動FL_</code>).", { parse_mode: "HTML" });
       return;
     }
     data.customPrefix = text;
@@ -13927,8 +13916,8 @@ bot.on("message:text", async (ctx) => {
     const previewGroups = selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
     const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
     await ctx.reply(
-      `✅ Message Set!\n\n` +
-      `📝 Message: ${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}\n\n` +
+      `✅ <b>Message Set!</b>\n\n` +
+      `📝 Message: <i>${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}</i>\n\n` +
       `📋 Groups (${selectedGroups.length}):\n${previewGroups}${moreText}\n\n` +
       `⏱️ Delay: ${data.delaySeconds}s per group\n` +
       `🤖 Dono WhatsApp se bhejnha hai\n\n` +
@@ -13946,11 +13935,11 @@ bot.on("message:text", async (ctx) => {
   if (state.step === "awaiting_phone") {
     const phone = "+" + text.replace(/[^0-9]/g, "");
     if (!/^\+\d{10,15}$/.test(phone)) {
-      await ctx.reply("❌ Invalid phone number.\nExample: +919942222222\nYa: +91 (9999) 222222", { parse_mode: "HTML" }); return;
+      await ctx.reply("❌ Invalid phone number.\nExample: <code>+919942222222</code>\nYa: <code>+91 (9999) 222222</code>", { parse_mode: "HTML" }); return;
     }
     userStates.delete(userId);
     const statusMsg = await ctx.reply(
-      `⏳ Connecting...\n\n📱 Phone: ${esc(phone)}\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
+      `⏳ <b>Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
       { parse_mode: "HTML" }
     );
     try {
@@ -13958,10 +13947,10 @@ bot.on("message:text", async (ctx) => {
         async (code) => {
           try {
             await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `🔑 Pairing Code:\n\n${esc(code)}\n\n` +
-              `📋 Steps:\n1️⃣ Open WhatsApp on your phone\n2️⃣ Settings → Linked Devices\n` +
+              `🔑 <b>Pairing Code:</b>\n\n<code>${esc(code)}</code>\n\n` +
+              `📋 <b>Steps:</b>\n1️⃣ Open WhatsApp on your phone\n2️⃣ Settings → Linked Devices\n` +
               `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
-              `5️⃣ Enter code: ${esc(code)}\n\n⌛ Waiting for confirmation...`,
+              `5️⃣ Enter code: <code>${esc(code)}</code>\n\n⌛ Waiting for confirmation...`,
               { parse_mode: "HTML" }
             );
           } catch {}
@@ -13977,7 +13966,7 @@ bot.on("message:text", async (ctx) => {
         async (reason) => {
           try {
             await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `⚠️ WhatsApp Disconnected\n\nReason: ${esc(reason)}\n\n🔄 Try connecting again.`,
+              `⚠️ <b>WhatsApp Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Try connecting again.`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect Again", "connect_wa").text("🏠 Menu", "main_menu") }
             );
           } catch {}
@@ -13987,7 +13976,7 @@ bot.on("message:text", async (ctx) => {
       console.error(`[BOT] connectWhatsApp threw for user ${userId}:`, err?.message);
       try {
         await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-          `❌ Connection Failed\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
+          `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Try Again", "connect_wa").text("🏠 Menu", "main_menu") }
         );
       } catch {}
@@ -13998,12 +13987,12 @@ bot.on("message:text", async (ctx) => {
   if (state.step === "auto_connect_phone") {
     const phone = text.replace(/\s/g, "");
     if (!/^\+?\d{10,15}$/.test(phone)) {
-      await ctx.reply("❌ Invalid phone number.\nExample: 919876543210", { parse_mode: "HTML" }); return;
+      await ctx.reply("❌ Invalid phone number.\nExample: <code>919876543210</code>", { parse_mode: "HTML" }); return;
     }
     userStates.delete(userId);
     const autoUserId = getAutoUserId(String(userId));
     const statusMsg = await ctx.reply(
-      `⏳ Auto Chat WA Connecting...\n\n📱 Phone: ${esc(phone)}\n\n⌛ Pairing code aa raha hai, 10-20 seconds wait karo...`,
+      `⏳ <b>Auto Chat WA Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Pairing code aa raha hai, 10-20 seconds wait karo...`,
       { parse_mode: "HTML" }
     );
     try {
@@ -14011,10 +14000,10 @@ bot.on("message:text", async (ctx) => {
         async (code) => {
           try {
             await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `🔑 Auto Chat WA Pairing Code:\n\n${esc(code)}\n\n` +
-              `📋 Steps:\n1️⃣ 2nd WhatsApp open karo\n2️⃣ Settings → Linked Devices\n` +
+              `🔑 <b>Auto Chat WA Pairing Code:</b>\n\n<code>${esc(code)}</code>\n\n` +
+              `📋 <b>Steps:</b>\n1️⃣ 2nd WhatsApp open karo\n2️⃣ Settings → Linked Devices\n` +
               `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
-              `5️⃣ Code enter karo: ${esc(code)}\n\n⌛ Confirm hone ka wait kar raha hun...`,
+              `5️⃣ Code enter karo: <code>${esc(code)}</code>\n\n⌛ Confirm hone ka wait kar raha hun...`,
               { parse_mode: "HTML" }
             );
           } catch {}
@@ -14023,8 +14012,8 @@ bot.on("message:text", async (ctx) => {
           try {
             const autoNumber = getAutoConnectedNumber(String(userId));
             await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `✅ Auto Chat WhatsApp Connected!\n\n` +
-              (autoNumber ? `📞 Auto Number: ${esc(autoNumber)}\n\n` : "") +
+              `✅ <b>Auto Chat WhatsApp Connected!</b>\n\n` +
+              (autoNumber ? `📞 Auto Number: <code>${esc(autoNumber)}</code>\n\n` : "") +
               `🎉 Ab Auto Chat use kar sakte ho!`,
               { parse_mode: "HTML", reply_markup: mainMenu(userId) }
             );
@@ -14033,7 +14022,7 @@ bot.on("message:text", async (ctx) => {
         async (reason) => {
           try {
             await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `⚠️ Auto Chat WA Disconnected\n\nReason: ${esc(reason)}\n\n🔄 Dobara try karo.`,
+              `⚠️ <b>Auto Chat WA Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Dobara try karo.`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Connect Auto WA", "connect_auto_wa").text("🏠 Menu", "main_menu") }
             );
           } catch {}
@@ -14043,7 +14032,7 @@ bot.on("message:text", async (ctx) => {
       console.error(`[BOT] auto connectWhatsApp threw for user ${userId}:`, err?.message);
       try {
         await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-          `❌ Connection Failed\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
+          `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Connect Auto WA", "connect_auto_wa").text("🏠 Menu", "main_menu") }
         );
       } catch {}
@@ -14059,8 +14048,8 @@ bot.on("message:text", async (ctx) => {
     const previewGroups = selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
     const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
     await ctx.reply(
-      `✅ Message Set!\n\n` +
-      `📝 Message: ${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}\n\n` +
+      `✅ <b>Message Set!</b>\n\n` +
+      `📝 Message: <i>${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}</i>\n\n` +
       `📋 Groups (${selectedGroups.length}):\n${previewGroups}${moreText}\n\n` +
       `⏱️ Delay: ${data.delaySeconds}s per group\n\n` +
       `Message bhejun?`,
@@ -14082,8 +14071,8 @@ bot.on("message:text", async (ctx) => {
     const previewGroups = selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
     const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
     await ctx.reply(
-      `✅ Auto Chat Setup Ready!\n\n` +
-      `📝 Message: ${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}\n\n` +
+      `✅ <b>Auto Chat Setup Ready!</b>\n\n` +
+      `📝 Message: <i>${esc(text.substring(0, 100))}${text.length > 100 ? "..." : ""}</i>\n\n` +
       `📋 Groups (${selectedGroups.length}):\n${previewGroups}${moreText}\n\n` +
       `⏱️ Delay: ${data.delaySeconds}s\n\n` +
       `Auto Chat shuru karoon?`,
@@ -14101,7 +14090,7 @@ bot.on("message:text", async (ctx) => {
     if (!state.groupSettings) return;
     state.groupSettings.name = text;
     state.step = "group_enter_count";
-    await ctx.reply("🔢 How many groups?\n\nEnter number (1-50):", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
+    await ctx.reply("🔢 <b>How many groups?</b>\n\nEnter number (1-50):", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
     return;
   }
 
@@ -14113,11 +14102,11 @@ bot.on("message:text", async (ctx) => {
     if (count === 1) {
       state.groupSettings.finalNames = [state.groupSettings.name];
       state.step = "group_enter_description";
-      await ctx.reply("📄 Group Description\n\nSend description or type skip:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
+      await ctx.reply("📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
     } else {
       state.step = "group_naming_mode";
       await ctx.reply(
-        `🏷️ Naming Mode\n\nCreating ${count} groups. How to name them?`,
+        `🏷️ <b>Naming Mode</b>\n\nCreating <b>${count} groups</b>. How to name them?`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔢 Auto-numbered", "naming_auto").text("✏️ Custom Names", "naming_custom").row().text("❌ Cancel", "main_menu") }
       );
     }
@@ -14128,13 +14117,13 @@ bot.on("message:text", async (ctx) => {
     if (!state.groupSettings) return;
     const names = text.split("\n").map((n) => n.trim()).filter((n) => n.length > 0);
     if (names.length !== state.groupSettings.count) {
-      await ctx.reply(`❌ Need ${state.groupSettings.count} names, got ${names.length}.\n\nSend exactly ${state.groupSettings.count} names, one per line.`, { parse_mode: "HTML" }); return;
+      await ctx.reply(`❌ Need <b>${state.groupSettings.count}</b> names, got <b>${names.length}</b>.\n\nSend exactly ${state.groupSettings.count} names, one per line.`, { parse_mode: "HTML" }); return;
     }
     state.groupSettings.finalNames = names;
     state.step = "group_enter_description";
     const preview = names.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
     await ctx.reply(
-      `✅ Names saved:\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 Group Description\n\nSend description or type skip:`,
+      `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
     );
     return;
@@ -14166,7 +14155,7 @@ bot.on("message:text", async (ctx) => {
     if (numbers.length === 0) {
       await ctx.reply(
         "❌ No valid number found.\n\nAccepted formats:\n" +
-        "919912345678\n+919912345678\n+91 9912 345678\n+91 (9912) 345678\n\n" +
+        "<code>919912345678\n+919912345678\n+91 9912 345678\n+91 (9912) 345678</code>\n\n" +
         "Country code (e.g. 91 for India) is required. Or tap Skip.",
         {
           parse_mode: "HTML",
@@ -14176,7 +14165,7 @@ bot.on("message:text", async (ctx) => {
       return;
     }
     state.groupSettings.friendNumbers = numbers;
-    await ctx.reply(`✅ ${numbers.length} friend number(s) saved!`, { parse_mode: "HTML" });
+    await ctx.reply(`✅ <b>${numbers.length} friend number(s) saved!</b>`, { parse_mode: "HTML" });
     await showGroupFriendAdminStep(ctx);
     return;
   }
@@ -14186,7 +14175,7 @@ bot.on("message:text", async (ctx) => {
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) {
       await ctx.reply(
-        "❌ No valid WhatsApp group links found.\nExample:\nhttps://chat.whatsapp.com/ABC123",
+        "❌ No valid WhatsApp group links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>",
         { parse_mode: "HTML" }
       );
       return;
@@ -14200,11 +14189,11 @@ bot.on("message:text", async (ctx) => {
     if (collectMsgId) {
       try {
         await bot.api.editMessageText(ctx.chat.id, collectMsgId,
-          "🔗 Reset by Group Link\n\n" +
-          `📎 ${total} link(s) collected\n\n` +
+          "🔗 <b>Reset by Group Link</b>\n\n" +
+          `📎 <b>${total} link(s) collected</b>\n\n` +
           "Send more links or click Done when finished:\n" +
-          "https://chat.whatsapp.com/ABC123\n\n" +
-          "Click Done to proceed with resolving and resetting.",
+          "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
+          "<i>Click Done to proceed with resolving and resetting.</i>",
           {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard()
@@ -14221,7 +14210,7 @@ bot.on("message:text", async (ctx) => {
     if (!state.joinData) return;
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) {
-      await ctx.reply("❌ No valid WhatsApp links found.\nExample:\nhttps://chat.whatsapp.com/ABC123", { parse_mode: "HTML" });
+      await ctx.reply("❌ No valid WhatsApp links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" });
       return;
     }
 
@@ -14231,10 +14220,10 @@ bot.on("message:text", async (ctx) => {
       existing.queue.push(...cleanLinks);
       const total = existing.done + existing.queue.length;
       await ctx.reply(
-        `➕ ${cleanLinks.length} link(s) added to queue!\n\n` +
-        `✅ Already done: ${existing.done}\n` +
-        `⌛ Remaining in queue: ${existing.queue.length}\n` +
-        `📋 Total: ${total}`,
+        `➕ <b>${cleanLinks.length} link(s) added to queue!</b>\n\n` +
+        `✅ Already done: <b>${existing.done}</b>\n` +
+        `⌛ Remaining in queue: <b>${existing.queue.length}</b>\n` +
+        `📋 Total: <b>${total}</b>`,
         { parse_mode: "HTML" }
       );
       // Wake up the runner in case it finished and new links arrived
@@ -14246,7 +14235,7 @@ bot.on("message:text", async (ctx) => {
     joinCancelRequests.delete(userId);
     // Keep user in join_enter_links step so they can send more links mid-run
     const statusMsg = await ctx.reply(
-      `⏳ Joining ${cleanLinks.length} group(s)...\n\n` +
+      `⏳ <b>Joining ${cleanLinks.length} group(s)...</b>\n\n` +
       buildJoinProgressBar(0, cleanLinks.length),
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
     );
@@ -14273,13 +14262,13 @@ bot.on("message:text", async (ctx) => {
     state.ctcData.currentPairIndex = 0;
     state.step = "ctc_enter_vcf";
     await ctx.reply(
-      `✅ ${cleanLinks.length} group link(s) saved!\n\n` +
-      `📁 Step 2: Send VCF file(s)\n\n` +
+      `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
+      `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
       `You can send:\n` +
       `• One VCF for all groups\n` +
       `• Multiple VCFs one by one (one per group in order)\n\n` +
-      `Send VCF for Group 1/${cleanLinks.length}:\n${esc(cleanLinks[0])}\n\n` +
-      `When ready, tap Start Check:`,
+      `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
+      `When ready, tap <b>Start Check</b>:`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
     );
     return;
@@ -14289,8 +14278,8 @@ bot.on("message:text", async (ctx) => {
   if (state.step === "remove_exclude_numbers") {
     if (!state.removeExcludeData) return;
     const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    const excludeNumbers = new Set();
-    const excludePrefixes = new Set();
+    const excludeNumbers = new Set<string>();
+    const excludePrefixes = new Set<string>();
     for (const line of lines) {
       const digits = line.replace(/[^0-9]/g, "");
       if (digits.length === 0) continue;
@@ -14309,8 +14298,8 @@ bot.on("message:text", async (ctx) => {
     if (excludeNumbers.size === 0 && excludePrefixes.size === 0) {
       await ctx.reply(
         "❌ Koi valid input nahi mila.\n\n" +
-        "• Pura number bhejo with country code (e.g. +919912345678), ya\n" +
-        "• Sirf country code bhejo (1-4 digits, e.g. +91 ya 91)\n\n" +
+        "• Pura number bhejo with country code (e.g. <code>+919912345678</code>), ya\n" +
+        "• Sirf country code bhejo (1-4 digits, e.g. <code>+91</code> ya <code>91</code>)\n\n" +
         "Ya Skip dabao to kuch bhi exclude nahi hoga.",
         {
           parse_mode: "HTML",
@@ -14323,11 +14312,11 @@ bot.on("message:text", async (ctx) => {
     const sections: string[] = [];
     if (excludeNumbers.size > 0) {
       const numList = Array.from(excludeNumbers).map(n => `• ${esc(n)}`).join("\n");
-      sections.push(`✅ ${excludeNumbers.size} number(s) will be excluded:\n\n${numList}`);
+      sections.push(`✅ <b>${excludeNumbers.size} number(s) will be excluded:</b>\n\n${numList}`);
     }
     if (excludePrefixes.size > 0) {
-      const prefList = Array.from(excludePrefixes).map(p => `• +${esc(p)} (saare numbers iss country code se)`).join("\n");
-      sections.push(`🌐 ${excludePrefixes.size} country code(s) will be excluded:\n\n${prefList}`);
+      const prefList = Array.from(excludePrefixes).map(p => `• +${esc(p)} <i>(saare numbers iss country code se)</i>`).join("\n");
+      sections.push(`🌐 <b>${excludePrefixes.size} country code(s) will be excluded:</b>\n\n${prefList}`);
     }
 
     await ctx.reply(
@@ -14370,7 +14359,7 @@ bot.on("message:text", async (ctx) => {
       if (cleaned.length >= 7) phoneNumbers.push(cleaned.replace(/^\+/, ""));
     }
     if (!phoneNumbers.length) {
-      await ctx.reply("❌ No valid phone numbers found. Send numbers with country code, e.g.\n919912345678\n919898765432",
+      await ctx.reply("❌ No valid phone numbers found. Send numbers with country code, e.g.\n<code>919912345678\n919898765432</code>",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
       );
       return;
@@ -14382,9 +14371,9 @@ bot.on("message:text", async (ctx) => {
     const numList = phoneNumbers.slice(0, 15).map((p) => `• +${p}`).join("\n");
     const moreNums = phoneNumbers.length > 15 ? `\n... +${phoneNumbers.length - 15} more` : "";
     await ctx.reply(
-      `📱 Demote Selected Numbers — Confirm\n\n` +
-      `${selectedGroups.length} group(s):\n${groupList}${moreGroups}\n\n` +
-      `${phoneNumbers.length} number(s) to demote:\n${numList}${moreNums}\n\n` +
+      `📱 <b>Demote Selected Numbers — Confirm</b>\n\n` +
+      `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+      `<b>${phoneNumbers.length} number(s) to demote:</b>\n${numList}${moreNums}\n\n` +
       `⚠️ Only numbers currently admin in each group will be demoted.\n\nConfirm?`,
       {
         parse_mode: "HTML",
@@ -14418,7 +14407,7 @@ bot.on("message:text", async (ctx) => {
 
     makeAdminCancelRequests.delete(userId);
     const statusMsg = await ctx.reply(
-      `⏳ Making ${phoneNumbers.length} number(s) admin in ${selectedGroups.length} group(s)...\n\n⌛ Please wait...`,
+      `⏳ <b>Making ${phoneNumbers.length} number(s) admin in ${selectedGroups.length} group(s)...</b>\n\n⌛ Please wait...`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ma_cancel_request") }
     );
 
@@ -14430,12 +14419,12 @@ bot.on("message:text", async (ctx) => {
     if (!state.addMembersData) return;
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) {
-      await ctx.reply("❌ No valid WhatsApp group link found.\nExample: https://chat.whatsapp.com/ABC123", { parse_mode: "HTML" });
+      await ctx.reply("❌ No valid WhatsApp group link found.\nExample: <code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" });
       return;
     }
     const isMulti = cleanLinks.length > 1;
     const statusMsg = await ctx.reply(
-      `⏳ Fetching group info...\n\n📊 0/${cleanLinks.length} processed`,
+      `⏳ <b>Fetching group info...</b>\n\n📊 0/${cleanLinks.length} processed`,
       { parse_mode: "HTML" }
     );
     const amChatId = ctx.chat.id;
@@ -14457,7 +14446,7 @@ bot.on("message:text", async (ctx) => {
         const preview = fetchedLines.slice(-10).join("\n");
         const extra = fetchedLines.length > 10 ? `\n... +${fetchedLines.length - 10} more` : "";
         await bot.api.editMessageText(amChatId, amMsgId,
-          `⏳ Fetching group info...\n\n📊 ${li + 1}/${cleanLinks.length} processed | ✅ ${groups.length} found\n\n${preview}${extra}`,
+          `⏳ <b>Fetching group info...</b>\n\n📊 ${li + 1}/${cleanLinks.length} processed | ✅ ${groups.length} found\n\n${preview}${extra}`,
           { parse_mode: "HTML" }
         );
       } catch {}
@@ -14466,7 +14455,7 @@ bot.on("message:text", async (ctx) => {
     try { await ctx.api.deleteMessage(amChatId, amMsgId); } catch {}
     if (!groups.length) {
       await ctx.reply(
-        "❌ No group info found!\n\nCheck:\n• Links are valid\n• WhatsApp is connected\n• Links are not expired",
+        "❌ <b>No group info found!</b>\n\nCheck:\n• Links are valid\n• WhatsApp is connected\n• Links are not expired",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Try Again", "add_members").text("🏠 Menu", "main_menu") }
       );
       return;
@@ -14480,10 +14469,10 @@ bot.on("message:text", async (ctx) => {
     const groupPreview = groups.map(g => `✅ ${esc(g.name)}`).join("\n");
     const failNote = failedLinks > 0 ? `\n⚠️ ${failedLinks} link(s) could not be fetched.` : "";
     await ctx.reply(
-      `✅ ${groups.length} Group(s) found!${failNote}\n\n${groupPreview}\n\n` +
-      `👫 Step 2: Friend Numbers\n\n` +
+      `✅ <b>${groups.length} Group(s) found!</b>${failNote}\n\n${groupPreview}\n\n` +
+      `👫 <b>Step 2: Friend Numbers</b>\n\n` +
       `Send friend contact numbers (one per line)\n` +
-      `Example:\n919912345678\n919898765432\n\n` +
+      `Example:\n<code>919912345678\n919898765432</code>\n\n` +
       (isMulti ? `⚠️ Multiple groups mode: Only friend numbers are supported (will be added to all groups).\n\n` : "") +
       `Tap Skip if you don't want to add friend numbers.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_friends").text("❌ Cancel", "main_menu") }
@@ -14513,13 +14502,13 @@ bot.on("message:text", async (ctx) => {
       state.step = "add_members_choose_mode";
       const groupList = d.groups.map(g => `• ${esc(g.name)}`).join("\n");
       await ctx.reply(
-        `✅ ${numbers.length} friend number(s) saved!\n\n` +
-        `📋 Groups (${d.groups.length}):\n${groupList}\n\n` +
-        `🔢 Total friends to add: ${numbers.length} (har group mein)\n\n` +
+        `✅ <b>${numbers.length} friend number(s) saved!</b>\n\n` +
+        `📋 <b>Groups (${d.groups.length}):</b>\n${groupList}\n\n` +
+        `🔢 Total friends to add: <b>${numbers.length}</b> (har group mein)\n\n` +
         `⚙️ Adding mode choose karo:\n\n` +
-        `👆 Add 1 by 1 — Ek ek karke (safe)\n` +
-        `👥 Add Together — Sab ek saath (fast)\n` +
-        `🎯 Custom — Apni pace set karo (1-1, 2-2, ya all)`,
+        `👆 <b>Add 1 by 1</b> — Ek ek karke (safe)\n` +
+        `👥 <b>Add Together</b> — Sab ek saath (fast)\n` +
+        `🎯 <b>Custom</b> — Apni pace set karo (1-1, 2-2, ya all)`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard()
           .text("👆 Add 1 by 1", "am_mode_one_by_one").text("👥 Together", "am_mode_together").row()
           .text("🎯 Custom", "am_mode_custom").text("❌ Cancel", "main_menu") }
@@ -14527,8 +14516,8 @@ bot.on("message:text", async (ctx) => {
     } else {
       state.step = "add_members_admin_vcf";
       await ctx.reply(
-        `✅ ${numbers.length} friend number(s) saved!\n\n` +
-        `👑 Step 3: Admin VCF File\n\n` +
+        `✅ <b>${numbers.length} friend number(s) saved!</b>\n\n` +
+        `👑 <b>Step 3: Admin VCF File</b>\n\n` +
         `📁 Send Admin VCF file (.vcf)\n\n` +
         `Agar admin ka VCF nahi hai to Skip karo.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_admin").text("❌ Cancel", "main_menu") }
@@ -14553,11 +14542,11 @@ bot.on("message:text", async (ctx) => {
     d.totalToAdd = count;
     state.step = "add_members_choose_mode";
     await ctx.reply(
-      `🔢 Total ${count} members add honge.\n\n` +
+      `🔢 <b>Total ${count} members add honge.</b>\n\n` +
       `⚙️ Adding mode choose karo:\n\n` +
-      `👆 Add 1 by 1 — Ek ek karke add karega (safe, slow)\n` +
-      `👥 Add Together — Sab ek saath add karega (fast)\n` +
-      `🎯 Custom — Per category pace set karo (1-1, 2-2, 3-3 ya All)\n`,
+      `👆 <b>Add 1 by 1</b> — Ek ek karke add karega (safe, slow)\n` +
+      `👥 <b>Add Together</b> — Sab ek saath add karega (fast)\n` +
+      `🎯 <b>Custom</b> — Per category pace set karo (1-1, 2-2, 3-3 ya All)\n`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
@@ -14609,7 +14598,7 @@ bot.on("message:photo", async (ctx) => {
     try {
       const maxDps = state.groupSettings.count;
       if (state.groupSettings.dpBuffers.length >= maxDps) {
-        await ctx.reply(`⚠️ Max ${maxDps} DP${maxDps === 1 ? "" : "s"} reached. Tum ${maxDps} group bana rahe ho, isliye max ${maxDps} DP. Done dabake aage badho.`, {
+        await ctx.reply(`⚠️ <b>Max ${maxDps} DP${maxDps === 1 ? "" : "s"} reached.</b> Tum ${maxDps} group bana rahe ho, isliye max ${maxDps} DP. Done dabake aage badho.`, {
           parse_mode: "HTML",
           reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
         });
@@ -14622,9 +14611,9 @@ bot.on("message:photo", async (ctx) => {
       state.groupSettings.dpBuffers.push(buf);
       const count = state.groupSettings.dpBuffers.length;
       await ctx.reply(
-        `✅ DP ${count} saved!\n\n` +
-        `Aur photos bhej sakte ho (max ${maxDps}), ya ✅ Done dabake aage badho.\n` +
-        `Total ab tak: ${count}/${maxDps}`,
+        `✅ <b>DP ${count} saved!</b>\n\n` +
+        `Aur photos bhej sakte ho (max ${maxDps}), ya <b>✅ Done</b> dabake aage badho.\n` +
+        `Total ab tak: <b>${count}/${maxDps}</b>`,
         {
           parse_mode: "HTML",
           reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
@@ -14644,7 +14633,7 @@ bot.on("message:photo", async (ctx) => {
       const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       state.editSettingsData.settings.dpBuffers = [buf];
       state.step = "edit_settings_desc";
-      await ctx.reply("✅ DP saved!\n\n📄 Description\n\nDescription bhejo ya skip karo.", {
+      await ctx.reply("✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nDescription bhejo ya skip karo.", {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu"),
       });
@@ -14733,8 +14722,8 @@ bot.on("message:document", async (ctx) => {
         state.addMembersData.adminContacts = rawContacts;
         state.step = "add_members_navy_vcf";
         await ctx.reply(
-          `✅ ${rawContacts.length} admin contacts saved!\n\n` +
-          `⚓ Step 4: Navy VCF File\n\n` +
+          `✅ <b>${rawContacts.length} admin contacts saved!</b>\n\n` +
+          `⚓ <b>Step 4: Navy VCF File</b>\n\n` +
           `📁 Send Navy VCF file (.vcf)\n\n` +
           `Agar navy ka VCF nahi hai to Skip karo.`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_navy").text("❌ Cancel", "main_menu") }
@@ -14743,8 +14732,8 @@ bot.on("message:document", async (ctx) => {
         state.addMembersData.navyContacts = rawContacts;
         state.step = "add_members_member_vcf";
         await ctx.reply(
-          `✅ ${rawContacts.length} navy contacts saved!\n\n` +
-          `👥 Step 5: Member VCF File\n\n` +
+          `✅ <b>${rawContacts.length} navy contacts saved!</b>\n\n` +
+          `👥 <b>Step 5: Member VCF File</b>\n\n` +
           `📁 Send Member VCF file (.vcf)\n\n` +
           `Agar member ka VCF nahi hai to Skip karo.`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "am_skip_members").text("❌ Cancel", "main_menu") }
@@ -14755,15 +14744,15 @@ bot.on("message:document", async (ctx) => {
         const totalAvailable = d.friendNumbers.length + d.adminContacts.length + d.navyContacts.length + d.memberContacts.length;
         state.step = "add_members_total_count";
         await ctx.reply(
-          `✅ ${rawContacts.length} member contacts saved!\n\n` +
-          `🔢 Step 6: Total Members to Add\n\n` +
+          `✅ <b>${rawContacts.length} member contacts saved!</b>\n\n` +
+          `🔢 <b>Step 6: Total Members to Add</b>\n\n` +
           `📊 Available contacts:\n` +
           `👫 Friends: ${d.friendNumbers.length}\n` +
           `👑 Admin: ${d.adminContacts.length}\n` +
           `⚓ Navy: ${d.navyContacts.length}\n` +
           `👥 Members: ${d.memberContacts.length}\n` +
           `━━━━━━━━━━━━━━━━━━\n` +
-          `📋 Total available: ${totalAvailable}\n\n` +
+          `📋 Total available: <b>${totalAvailable}</b>\n\n` +
           `🔢 Kitna members add karna hai total? (Number bhejo)`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
         );
@@ -14794,7 +14783,7 @@ bot.on("message:document", async (ctx) => {
       if (!file.file_path) { await ctx.reply("❌ Could not download file. Please resend it."); return; }
       const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       const rawContacts = parseVCF(content);
-      if (!rawContacts.length) { await ctx.reply(`❌ No contacts found in ${esc(docFileName)}.`, { parse_mode: "HTML" }); return; }
+      if (!rawContacts.length) { await ctx.reply(`❌ No contacts found in <b>${esc(docFileName)}</b>.`, { parse_mode: "HTML" }); return; }
 
       const vcfFileName = docFileName;
       const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
@@ -14807,7 +14796,7 @@ bot.on("message:document", async (ctx) => {
         s.ctcData.pairs[lastIdx].vcfContacts.push(...contacts);
         const total = s.ctcData.pairs[lastIdx].vcfContacts.length;
         await ctx.reply(
-          `✅ ${contacts.length} contacts added to Group ${lastIdx + 1} (total: ${total})\n\n🚀 Ready to check!`,
+          `✅ <b>${contacts.length} contacts added to Group ${lastIdx + 1}</b> (total: ${total})\n\n🚀 Ready to check!`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
         return;
@@ -14821,25 +14810,25 @@ bot.on("message:document", async (ctx) => {
 
       if (nextIdx < s.ctcData.pairs.length) {
         await ctx.reply(
-          `✅ ${contacts.length} contacts added to Group ${idx + 1} (total: ${total})\n\n📁 Send VCF for Group ${nextIdx + 1}/${s.ctcData.pairs.length}:\n${esc(s.ctcData.pairs[nextIdx].link)}\n\nOr tap Start Check if you want to use the same VCF for remaining groups`,
+          `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n<code>${esc(s.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       } else {
         await ctx.reply(
-          `✅ ${contacts.length} contacts for Group ${idx + 1} (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
+          `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       }
     } catch (err: any) {
       const msg = err?.message || err?.description || String(err) || "Unknown error";
-      await ctx.reply(`❌ Error processing ${esc(docFileName)}: ${esc(msg)}\n\nPlease resend this file.`, { parse_mode: "HTML" });
+      await ctx.reply(`❌ Error processing <b>${esc(docFileName)}</b>: ${esc(msg)}\n\nPlease resend this file.`, { parse_mode: "HTML" });
     }
   });
 });
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
-function downloadText(url: string): Promise {
+function downloadText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
     client.get(url, (res) => {
@@ -14857,7 +14846,7 @@ function downloadText(url: string): Promise {
   });
 }
 
-function downloadBuffer(url: string): Promise {
+function downloadBuffer(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
     client.get(url, (res) => {
@@ -14877,7 +14866,7 @@ function downloadBuffer(url: string): Promise {
 // Retry wrapper for ctx.api.getFile — network hiccups (especially when
 // multiple VCFs are uploaded at once) can cause transient failures.
 // Retries up to 3 times with exponential back-off before giving up.
-async function retryGetFile(api: any, fileId: string, maxRetries = 3): Promise {
+async function retryGetFile(api: any, fileId: string, maxRetries = 3): Promise<any> {
   let lastErr: any;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -14898,8 +14887,8 @@ async function retryGetFile(api: any, fileId: string, maxRetries = 3): Promise {
 // advance it to the same next value, causing contacts to land in the wrong
 // group and silently dropping one file.  The queue ensures they are
 // processed one-at-a-time, in arrival order.
-const vcfProcessingQueue: Map> = new Map();
-function enqueueVcfProcessing(userId: number, task: () => Promise): Promise {
+const vcfProcessingQueue: Map<number, Promise<void>> = new Map();
+function enqueueVcfProcessing(userId: number, task: () => Promise<void>): Promise<void> {
   const prev = vcfProcessingQueue.get(userId) ?? Promise.resolve();
   const next = prev.then(() => task()).catch(() => {});
   vcfProcessingQueue.set(userId, next);
@@ -14931,7 +14920,7 @@ function splitMessage(msg: string, maxLen: number): string[] {
  * Silently resumes each job — no message is sent to the user.
  * Expired jobs are cleaned from MongoDB without restarting.
  */
-async function restoreAutoAccepterJobs(): Promise {
+async function restoreAutoAccepterJobs(): Promise<void> {
   try {
     const jobs = await loadAllAutoAccepterJobs();
     if (!jobs.length) return;
@@ -14943,7 +14932,7 @@ async function restoreAutoAccepterJobs(): Promise {
         if (remaining <= 0) {
           console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing.`);
           await deleteAutoAccepterJob(saved.userId);
-          // Session expired before restart — user already received notification, skip re-notifying
+          // Session already expired before restart — user was already notified, skip re-notifying
           continue;
         }
 
@@ -14985,12 +14974,12 @@ async function restoreAutoAccepterJobs(): Promise {
         try {
           await bot.api.sendMessage(
             saved.chatId,
-            `🔄 Auto Request Accepter — Resumed\n\n` +
+            `🔄 <b>Auto Request Accepter — Resumed</b>\n\n` +
             `The bot was restarted and your Auto Request Accepter has been automatically resumed.\n\n` +
-            `✅ Accepted so far: ${saved.totalAccepted}\n` +
-            `⏰ Time remaining: ~${remainMins} min\n` +
-            `📋 Groups: ${saved.groupIds.length}\n\n` +
-            `No action needed — it is running in the background.`,
+            `✅ <b>Accepted so far:</b> ${saved.totalAccepted}\n` +
+            `⏰ <b>Time remaining:</b> ~${remainMins} min\n` +
+            `📋 <b>Groups:</b> ${saved.groupIds.length}\n\n` +
+            `<i>No action needed — it is running in the background.</i>`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job").text("🏠 Menu", "main_menu") }
           );
         } catch {}
@@ -15003,7 +14992,7 @@ async function restoreAutoAccepterJobs(): Promise {
   }
 }
 
-async function restoreAutoWaSessionsOnStartup(): Promise {
+async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
     const autoSessions = allSessions.filter((s) => s.userId.endsWith("_auto"));
@@ -15022,7 +15011,7 @@ async function restoreAutoWaSessionsOnStartup(): Promise {
   }
 }
 
-async function restorePersistedAutoChatSessions(): Promise {
+async function restorePersistedAutoChatSessions(): Promise<void> {
   try {
     const sessions = await loadAllAutoChatSessions();
     if (!sessions.length) return;
@@ -15041,7 +15030,7 @@ async function restorePersistedAutoChatSessions(): Promise {
           await deleteAutoChatSession(s.userId).catch(() => {});
           try {
             await bot.api.sendMessage(s.userId,
-              "⏰ Auto Chat Expired\n\n" +
+              "⏰ <b>Auto Chat Expired</b>\n\n" +
               "Your Auto Chat session had expired by the time the bot restarted.\n" +
               "Start a new Auto Chat session from the menu.",
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🤖 Auto Chat", "auto_chat_menu") }
@@ -15092,19 +15081,19 @@ async function restorePersistedAutoChatSessions(): Promise {
             continue;
           }
           const expiryLabel = s.autoChatExpiresAt
-            ? `\n⏳ Time Remaining: ${formatRemaining(s.autoChatExpiresAt)}`
+            ? `\n⏳ Time Remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
             : "";
           const restoredSent = s.sentCount ?? 0;
           const restoredAcc1 = s.sentByAccount1 ?? 0;
           const restoredAcc2 = s.sentByAccount2 ?? 0;
           const restoredFailed = s.failedCount ?? 0;
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "🤖 Chat In Group Chal Raha Hai...\n\n" +
-            `📋 Groups: ${groups.length}\n` +
-            `📱 Account 1: ${restoredAcc1} messages\n` +
-            `📱 Account 2: ${restoredAcc2} messages\n` +
-            `📤 Total Sent: ${restoredSent}\n` +
-            `❌ Failed: ${restoredFailed}` +
+            "🤖 <b>Chat In Group Chal Raha Hai...</b>\n\n" +
+            `📋 Groups: <b>${groups.length}</b>\n` +
+            `📱 Account 1: <b>${restoredAcc1} messages</b>\n` +
+            `📱 Account 2: <b>${restoredAcc2} messages</b>\n` +
+            `📤 Total Sent: <b>${restoredSent}</b>\n` +
+            `❌ Failed: <b>${restoredFailed}</b>` +
             expiryLabel + "\n\nPress Stop to stop the chat.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "cig_refresh").text("⏹️ Stop", "cig_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
@@ -15119,14 +15108,14 @@ async function restorePersistedAutoChatSessions(): Promise {
             continue;
           }
           const expiryLabel = s.autoChatExpiresAt
-            ? `\n⏳ Time Remaining: ${formatRemaining(s.autoChatExpiresAt)}`
+            ? `\n⏳ Time Remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
             : "";
           const restoredSent = s.sentCount ?? 0;
           const restoredFailed = s.failedCount ?? 0;
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "👫 Chat Friend Chal Raha Hai...\n\n" +
-            `📤 Sent: ${restoredSent}\n` +
-            `❌ Failed: ${restoredFailed}` +
+            "👫 <b>Chat Friend Chal Raha Hai...</b>\n\n" +
+            `📤 Sent: <b>${restoredSent}</b>\n` +
+            `❌ Failed: <b>${restoredFailed}</b>` +
             expiryLabel + "\n\nPress Stop to end it.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "acf_refresh").text("⏹️ Stop", "acf_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
@@ -15139,7 +15128,7 @@ async function restorePersistedAutoChatSessions(): Promise {
           const groupIds = s.groupIds ?? [];
           if (!groupIds.length) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "🤖 Auto Chat Chal Raha Hai...\n\n⏳ Please wait...",
+            "🤖 <b>Auto Chat Chal Raha Hai...</b>\n\n⏳ Please wait...",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "auto_chat_refresh").text("⏹️ Stop", "auto_chat_stop").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
@@ -15184,12 +15173,12 @@ export async function startBot() {
     let reconnectHint = `Please reconnect to continue using the bot.`;
     if (isQrExpiry) {
       reconnectHint = `Your QR session is no longer valid.\n\n` +
-        `Tap Reconnect WhatsApp → 📷 Pair QR to scan a new QR code and reconnect.`;
+        `Tap <b>Reconnect WhatsApp</b> → <b>📷 Pair QR</b> to scan a new QR code and reconnect.`;
     }
 
     const message =
-      `⚠️ ${accountLabel} Disconnected\n\n` +
-      `Your ${accountLabel} number ${esc(phoneText)} has been disconnected from the bot.\n\n` +
+      `⚠️ <b>${accountLabel} Disconnected</b>\n\n` +
+      `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
       `Reason: ${esc(reason || "Unknown")}\n\n` +
       reconnectHint;
     void bot.api.sendMessage(telegramId, message, {
@@ -15314,4 +15303,3 @@ export async function startBot() {
 }
 
 export { bot };
-```
