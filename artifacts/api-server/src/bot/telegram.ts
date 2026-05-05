@@ -49,6 +49,7 @@ import {
   protectSessionFromEviction,
   unprotectSession,
   markSessionActive,
+  sendSocketPresence,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -964,6 +965,16 @@ interface UserState {
     patterns: SimilarGroup[];
     allGroups: Array<{ id: string; subject: string }>;
   };
+  glData?: {
+    groupsPool: Array<{ id: string; subject: string }>;
+    selectedIndices: Set<number>;
+    page: number;
+    mode: "similar" | "all";
+    patternBase?: string;
+    patterns: SimilarGroup[];
+    allGroups: Array<{ id: string; subject: string }>;
+  };
+  rlLinkBuffer?: string[];
   pendingListData?: {
     patterns: SimilarGroup[];
     allPending: Array<{ groupId: string; groupName: string; pendingCount: number }>;
@@ -1345,6 +1356,7 @@ interface RlResolveSession {
 }
 
 const rlResolveSessions = new Map<number, RlResolveSession>();
+const rlLinkCollectMsgId = new Map<number, number>();
 
 function buildRlProgressBar(done: number, total: number): string {
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
@@ -1435,18 +1447,16 @@ async function runRlResolveBackground(userId: number): Promise<void> {
     };
     state.step = "reset_link_select";
 
-    const groupList = session.resolved.slice(0, 30).map(r => `• ${esc(r.subject)}`).join("\n");
-    const more = session.resolved.length > 30 ? `\n... +${session.resolved.length - 30} more` : "";
     let reviewText =
-      `🔗 <b>Reset Invite Links — Review</b>\n\n` +
-      `<b>${session.resolved.length} group(s) will be reset:</b>\n\n${groupList}${more}\n\n`;
+      `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
+      `✅ <b>${session.resolved.length} group(s) resolved</b> — invite links reset ho jayenge.\n`;
     if (session.failed.length > 0) {
-      reviewText += `⚠️ <b>${session.failed.length} link(s) could not be resolved (will be skipped).</b>\n\n`;
+      reviewText += `⚠️ <b>${session.failed.length} link(s) resolve nahi hue</b> (skip ho jayenge).\n`;
     }
     reviewText +=
-      `⚠️ <b>This will revoke all current invite links</b> and generate new ones.\n` +
-      `Anyone with the old link will NOT be able to join.\n\n` +
-      `Are you sure you want to proceed?`;
+      `\n⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
+      `Old link se koi join nahi kar payega.\n\n` +
+      `Aage badhna chahte ho?`;
 
     try {
       await bot.api.editMessageText(session.chatId, session.msgId, reviewText, {
@@ -5654,24 +5664,71 @@ bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
 
 // ─── Get Link ────────────────────────────────────────────────────────────────
 
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const temp = dp[j];
+      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1]);
+      prev = temp;
+    }
+  }
+  return dp[n];
+}
+
 function detectSimilarGroups(groups: Array<{ id: string; subject: string }>): SimilarGroup[] {
-  const map = new Map<string, Array<{ id: string; subject: string }>>();
+  const results: SimilarGroup[] = [];
+  const usedIds = new Set<string>();
+
+  // Phase 1: trailing-number clusters (e.g. "Spidy 1", "Spidy 2")
+  const numberMap = new Map<string, Array<{ id: string; subject: string }>>();
   for (const g of groups) {
     const name = g.subject.trim();
     const match = name.match(/^(.*?)\s*\d+\s*$/);
     if (match && match[1].trim().length > 0) {
       const base = match[1].trim().toLowerCase();
-      if (!map.has(base)) map.set(base, []);
-      map.get(base)!.push(g);
+      if (!numberMap.has(base)) numberMap.set(base, []);
+      numberMap.get(base)!.push(g);
     }
   }
-  return Array.from(map.entries())
-    .filter(([, items]) => items.length >= 2)
-    .map(([, items]) => {
+  for (const [, items] of numberMap) {
+    if (items.length >= 2) {
       const sorted = items.sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
-      return { base: sorted[0].subject.replace(/\s*\d+\s*$/, "").trim(), groups: sorted };
-    })
-    .sort((a, b) => a.base.localeCompare(b.base));
+      results.push({ base: sorted[0].subject.replace(/\s*\d+\s*$/, "").trim(), groups: sorted });
+      for (const g of items) usedIds.add(g.id);
+    }
+  }
+
+  // Phase 2: fuzzy matching for remaining groups (catches typos like "spidy"/"spdiy"/"Spidy")
+  const remaining = groups.filter(g => !usedIds.has(g.id));
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const assigned = new Set<number>();
+  for (let i = 0; i < remaining.length; i++) {
+    if (assigned.has(i)) continue;
+    const na = normalize(remaining[i].subject);
+    if (na.length < 3) continue;
+    const cluster: number[] = [i];
+    for (let j = i + 1; j < remaining.length; j++) {
+      if (assigned.has(j)) continue;
+      const nb = normalize(remaining[j].subject);
+      if (nb.length < 3) continue;
+      const maxLen = Math.max(na.length, nb.length);
+      const dist = levenshtein(na, nb);
+      if ((maxLen - dist) / maxLen >= 0.75) cluster.push(j);
+    }
+    if (cluster.length >= 2) {
+      const items = cluster.map(i => remaining[i]).sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+      results.push({ base: items[0].subject.trim(), groups: items });
+      for (const idx of cluster) assigned.add(idx);
+    }
+  }
+
+  return results.sort((a, b) => a.base.localeCompare(b.base));
 }
 
 bot.callbackQuery("get_link", async (ctx) => {
@@ -5715,6 +5772,29 @@ bot.callbackQuery("get_link", async (ctx) => {
   );
 });
 
+const GL_SEL_PAGE_SIZE = 8;
+
+function buildGlKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const d = state.glData!;
+  const totalPages = Math.max(1, Math.ceil(d.groupsPool.length / GL_SEL_PAGE_SIZE));
+  const start = d.page * GL_SEL_PAGE_SIZE;
+  const end = Math.min(start + GL_SEL_PAGE_SIZE, d.groupsPool.length);
+  for (let i = start; i < end; i++) {
+    const g = d.groupsPool[i];
+    const label = d.selectedIndices.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `gl_tog_${i}`).row();
+  }
+  const prev = d.page > 0 ? "⬅️ Prev" : " ";
+  const next = d.page < totalPages - 1 ? "Next ➡️" : " ";
+  kb.text(prev, "gl_prev_page").text(`📄 ${d.page + 1}/${totalPages}`, "gl_page_info").text(next, "gl_next_page").row();
+  kb.text("☑️ Select All", "gl_select_all").text("🧹 Clear All", "gl_clear_all").row();
+  if (d.selectedIndices.size > 0) kb.text(`🔗 Get Links (${d.selectedIndices.size} selected)`, "gl_proceed").row();
+  const backTarget = d.mode === "similar" ? "gl_similar" : "get_link";
+  kb.text("🔙 Back", backTarget).text("🏠 Menu", "main_menu");
+  return kb;
+}
+
 bot.callbackQuery("gl_similar", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -5731,13 +5811,12 @@ bot.callbackQuery("gl_similar", async (ctx) => {
   const kb = new InlineKeyboard();
   for (let i = 0; i < patterns.length; i++) {
     const p = patterns[i];
-    kb.text(`🔗 ${p.base} (${p.groups.length})`, `gl_sim_${i}`).row();
+    kb.text(`📌 ${p.base} (${p.groups.length})`, `gl_sim_${i}`).row();
   }
   kb.text("🔙 Back", "get_link").text("🏠 Menu", "main_menu");
 
   await ctx.editMessageText(
-    "🔍 <b>Similar Group Patterns</b>\n\n" +
-    "Tap a pattern to get all its group links:",
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select its groups:",
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -5752,17 +5831,24 @@ bot.callbackQuery(/^gl_sim_(\d+)$/, async (ctx) => {
   const pattern = state.similarData.patterns[idx];
   if (!pattern) return;
 
-  const chatId = ctx.callbackQuery.message?.chat.id;
-  const msgId = ctx.callbackQuery.message?.message_id;
-  if (!chatId || !msgId) return;
+  const patternIds = new Set(pattern.groups.map(g => g.id));
+  const pool = state.similarData.allGroups.filter(g => patternIds.has(g.id));
+  const preSelected = new Set(pool.map((_, i) => i));
+  state.glData = {
+    groupsPool: pool,
+    selectedIndices: preSelected,
+    page: 0,
+    mode: "similar",
+    patternBase: pattern.base,
+    patterns: state.similarData.patterns,
+    allGroups: state.similarData.allGroups,
+  };
 
   await ctx.editMessageText(
-    `⏳ <b>Fetching links for "${esc(pattern.base)}" groups...</b>\n\n📊 0/${pattern.groups.length} fetched...`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request") }
+    `🔍 <b>Similar Groups — "${esc(pattern.base)}"</b>\n\n` +
+    `<b>${pool.length} group(s)</b> — select which to get links for:\n<i>${preSelected.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
   );
-
-  getLinkCancelRequests.delete(userId);
-  void fetchGroupLinksBackground(String(userId), pattern.groups, chatId, msgId, "similar", pattern.base);
 });
 
 bot.callbackQuery("gl_all", async (ctx) => {
@@ -5771,18 +5857,123 @@ bot.callbackQuery("gl_all", async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.similarData) return;
 
-  const { allGroups } = state.similarData;
+  const { allGroups, patterns } = state.similarData;
+  state.glData = {
+    groupsPool: allGroups,
+    selectedIndices: new Set(),
+    page: 0,
+    mode: "all",
+    patterns,
+    allGroups,
+  };
+
+  await ctx.editMessageText(
+    `📋 <b>All Admin Groups — Select for Link Fetch</b>\n\n` +
+    `<b>${allGroups.length} group(s)</b>\n<i>None selected yet</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery(/^gl_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.glData) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.glData.groupsPool.length) return;
+  if (state.glData.selectedIndices.has(idx)) state.glData.selectedIndices.delete(idx);
+  else state.glData.selectedIndices.add(idx);
+  const label = state.glData.mode === "similar"
+    ? `Similar Groups — "${esc(state.glData.patternBase || "")}"`
+    : "All Admin Groups";
+  await ctx.editMessageText(
+    `🔍 <b>${label}</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("gl_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.glData) return;
+  if (state.glData.page > 0) state.glData.page--;
+  await ctx.editMessageText(
+    `🔍 <b>Select Groups</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("gl_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.glData) return;
+  const totalPages = Math.ceil(state.glData.groupsPool.length / GL_SEL_PAGE_SIZE);
+  if (state.glData.page < totalPages - 1) state.glData.page++;
+  await ctx.editMessageText(
+    `🔍 <b>Select Groups</b>\n\n<i>${state.glData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("gl_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Prev / Next to change page" });
+});
+
+bot.callbackQuery("gl_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.glData) return;
+  for (let i = 0; i < state.glData.groupsPool.length; i++) state.glData.selectedIndices.add(i);
+  await ctx.editMessageText(
+    `🔍 <b>Select Groups</b>\n\n✅ All <b>${state.glData.groupsPool.length}</b> groups selected`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("gl_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.glData) return;
+  state.glData.selectedIndices.clear();
+  await ctx.editMessageText(
+    `🔍 <b>Select Groups</b>\n\n<i>None selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildGlKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("gl_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.glData || state.glData.selectedIndices.size === 0) return;
+
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
-  await ctx.editMessageText(
-    `⏳ <b>Fetching all group links...</b>\n\n📊 0/${allGroups.length} fetched...`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request") }
-  );
+  const selectedGroups = Array.from(state.glData.selectedIndices)
+    .sort((a, b) => a - b)
+    .map(i => state.glData!.groupsPool[i]);
+
+  const isSimMode = state.glData.mode === "similar";
+  const progressText = isSimMode
+    ? `⏳ <b>Fetching links for "${esc(state.glData.patternBase || "")}" groups...</b>\n\n📊 0/${selectedGroups.length} fetched...`
+    : `⏳ <b>Fetching ${selectedGroups.length} group links...</b>\n\n📊 0/${selectedGroups.length} fetched...`;
+
+  await ctx.editMessageText(progressText, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request"),
+  });
 
   getLinkCancelRequests.delete(userId);
-  void fetchGroupLinksBackground(String(userId), allGroups, chatId, msgId, "all");
+  void fetchGroupLinksBackground(
+    String(userId),
+    selectedGroups,
+    chatId,
+    msgId,
+    isSimMode ? "similar" : "all",
+    state.glData.patternBase
+  );
 });
 
 bot.callbackQuery("gl_cancel_request", async (ctx) => {
@@ -6227,6 +6418,7 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
   // lastActivityAt even when the WA socket is briefly disconnected, so the
   // idle-eviction sweep never closes our protected session.
   markSessionActive(userIdStr);
+  void sendSocketPresence(userIdStr);
 
   // Stop immediately if the user's access has expired or they've been banned.
   const [banned, access] = await Promise.all([isBanned(userId), hasAccess(userId)]);
@@ -9058,18 +9250,17 @@ bot.callbackQuery("rl_proceed", async (ctx) => {
   if (!state?.resetLinkData || state.resetLinkData.selectedIndices.size === 0) return;
 
   const selectedGroups = Array.from(state.resetLinkData.selectedIndices).map(i => state.resetLinkData!.allGroups[i]);
-  const groupList = selectedGroups.slice(0, 30).map(g => `• ${esc(g.subject)}`).join("\n");
-  const more = selectedGroups.length > 30 ? `\n... +${selectedGroups.length - 30} more` : "";
 
   await ctx.editMessageText(
-    `🔗 <b>Reset Invite Links</b>\n\n` +
-    `<b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}${more}\n\n` +
-    `⚠️ <b>This will revoke all current invite links</b> for the selected groups and generate new ones.\n\n` +
-    `Anyone with the old link will NOT be able to join. Are you sure?`,
+    `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
+    `✅ <b>${selectedGroups.length} group(s) selected</b>\n\n` +
+    `⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
+    `Old link se koi join nahi kar payega.\n\n` +
+    `Aage badhna chahte ho?`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Yes, Reset Links", "rl_proceed_confirm")
+        .text("✅ Haan, Reset Karo", "rl_proceed_confirm")
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -9096,15 +9287,181 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
   state.step = "rl_enter_links";
-  await ctx.editMessageText(
+  state.rlLinkBuffer = [];
+  rlLinkCollectMsgId.delete(userId);
+
+  const sent = await ctx.editMessageText(
     "🔗 <b>Reset by Group Link</b>\n\n" +
-    "Send one or more WhatsApp group invite links, one per line:\n\n" +
-    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>\n\n" +
+    "📎 <b>0 links collected</b>\n\n" +
+    "Send WhatsApp group invite links (one per message or multiple at once):\n" +
+    "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
     "⚠️ You must be an admin in those groups.\n" +
-    "Bot will resolve each link, show a review, and reset only after your confirmation.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    "<i>Click Done when you have sent all links.</i>",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Done", "rl_link_done").row()
+        .text("❌ Cancel", "main_menu"),
+    }
   );
+  if (sent && "message_id" in sent) rlLinkCollectMsgId.set(userId, sent.message_id);
 });
+
+bot.callbackQuery("rl_link_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "rl_enter_links") return;
+
+  const buffer = state.rlLinkBuffer || [];
+  if (!buffer.length) {
+    await ctx.answerCallbackQuery({ text: "❌ Pehle koi link bhejo!" });
+    return;
+  }
+
+  rlLinkCollectMsgId.delete(userId);
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+
+  await ctx.editMessageText(
+    `🔗 <b>Reset by Group Link — Confirm</b>\n\n` +
+    `📎 <b>${buffer.length} link(s)</b> collect kiye hain.\n\n` +
+    `Bot in links ko resolve karke invite links reset karega.\n\n` +
+    `⚠️ <b>Current invite links revoke ho jayenge.</b> Old link se koi join nahi kar payega.\n\n` +
+    `Aage badhna chahte ho?`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Haan, Reset Karo", "rl_link_pipeline_start")
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+  state.step = "rl_link_confirm";
+  state.rlLinkBuffer = buffer;
+  // Save chatId/msgId for the pipeline
+  if (!state.resetLinkData) state.resetLinkData = { allGroups: [], patterns: [], selectedIndices: new Set(), page: 0 };
+  (state as any)._rlPipelineChatId = chatId;
+  (state as any)._rlPipelineMsgId = msgId;
+});
+
+bot.callbackQuery("rl_link_pipeline_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || !state.rlLinkBuffer?.length) return;
+
+  const links = [...state.rlLinkBuffer];
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+
+  userStates.delete(userId);
+  resetLinkCancelRequests.delete(userId);
+
+  void runRlResolvePipelineBackground(userId, links, chatId, msgId);
+});
+
+async function runRlResolvePipelineBackground(
+  userIdNum: number,
+  links: string[],
+  chatId: number,
+  msgId: number
+): Promise<void> {
+  const userId = String(userIdNum);
+  const total = links.length;
+  let done = 0;
+  let resetOk = 0;
+  let wasCancelled = false;
+  const results: Array<{ subject: string; newLink?: string; resolveErr?: string; resetErr?: string }> = [];
+
+  const buildProgress = () => {
+    const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+    const filled = Math.round((done / Math.max(total, 1)) * 20);
+    const bar = `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
+    return (
+      `⏳ <b>Resolving & Resetting Links...</b>\n\n` +
+      `${bar}\n\n` +
+      `✅ Reset: <b>${resetOk}</b> | ❌ Failed: <b>${done - resetOk}</b>\n` +
+      (done < total ? `⌛ <b>${total - done}</b> remaining...` : `⏳ Finishing up...`)
+    );
+  };
+
+  try {
+    await bot.api.editMessageText(chatId, msgId, buildProgress(), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request"),
+    });
+  } catch {}
+
+  for (let i = 0; i < links.length; i++) {
+    if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+
+    const link = links[i];
+
+    // Step 1: Resolve the link
+    const info = await getGroupIdFromLink(userId, link);
+    if (!info) {
+      results.push({ subject: link, resolveErr: "Could not resolve link" });
+      done++;
+      try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
+      await new Promise(r => setTimeout(r, 300));
+      continue;
+    }
+
+    // Step 2: Immediately reset the invite link
+    let res = await resetGroupInviteLink(userId, info.id);
+    if (!res.success && res.error) {
+      const errLower = res.error.toLowerCase();
+      if (errLower.includes("owner") || errLower.includes("rate") || errLower.includes("not-authorized") || errLower.includes("forbidden") || errLower.includes("405")) {
+        await new Promise(r => setTimeout(r, 6000));
+        if (!resetLinkCancelRequests.has(userIdNum)) res = await resetGroupInviteLink(userId, info.id);
+      }
+    }
+
+    if (res.success && res.newLink) {
+      results.push({ subject: info.subject, newLink: res.newLink });
+      resetOk++;
+    } else {
+      results.push({ subject: info.subject, resetErr: res.error || "Failed" });
+    }
+    done++;
+    try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
+    if (i < links.length - 1) await new Promise(r => setTimeout(r, 1200));
+  }
+
+  resetLinkCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  const successResults = results.filter(r => r.newLink);
+  const failedResults = results.filter(r => !r.newLink);
+
+  let resultText = `🔗 <b>Reset by Link — Result</b>\n\n`;
+  if (wasCancelled) resultText += `⛔ <b>Cancelled after ${done}/${total}.</b>\n\n`;
+
+  for (const r of successResults) {
+    resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
+  }
+  if (failedResults.length > 0) {
+    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed (${failedResults.length}):</b>\n`;
+    for (const r of failedResults) {
+      const reason = r.resolveErr ? "Link resolve nahi hua" : (r.resetErr || "Failed");
+      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(reason)}\n`;
+    }
+  }
+
+  const chunks = splitMessage(resultText, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  }
+}
 
 bot.callbackQuery("rl_cancel_request", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -13820,44 +14177,28 @@ bot.on("message:text", async (ctx) => {
       return;
     }
 
-    const existing = rlResolveSessions.get(userId);
-    if (existing && !existing.cancelled) {
-      // ── Batch mode: append new links to the running resolve session ─────────
-      existing.queue.push(...cleanLinks);
-      const total = existing.done + existing.queue.length;
-      await ctx.reply(
-        `➕ <b>${cleanLinks.length} link(s) added to resolve queue!</b>\n\n` +
-        `✅ Already resolved: <b>${existing.resolved.length}</b>\n` +
-        `⌛ Remaining in queue: <b>${existing.queue.length}</b>\n` +
-        `📋 Total: <b>${total}</b>\n\n` +
-        `<i>Progress bar in the resolving message will update automatically.</i>`,
-        { parse_mode: "HTML" }
-      );
-      // Wake the runner in case it paused after draining the previous queue
-      void runRlResolveBackground(userId);
-      return;
+    // ── Collect mode: buffer links until user clicks Done ───────────────────
+    if (!state.rlLinkBuffer) state.rlLinkBuffer = [];
+    state.rlLinkBuffer.push(...cleanLinks);
+    const total = state.rlLinkBuffer.length;
+    const collectMsgId = rlLinkCollectMsgId.get(userId);
+    if (collectMsgId) {
+      try {
+        await bot.api.editMessageText(ctx.chat.id, collectMsgId,
+          "🔗 <b>Reset by Group Link</b>\n\n" +
+          `📎 <b>${total} link(s) collected</b>\n\n` +
+          "Send more links or click Done when finished:\n" +
+          "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
+          "<i>Click Done to proceed with resolving and resetting.</i>",
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("✅ Done", "rl_link_done").row()
+              .text("❌ Cancel", "main_menu"),
+          }
+        );
+      } catch {}
     }
-
-    // ── New resolve session ─────────────────────────────────────────────────
-    const statusMsg = await ctx.reply(
-      `🔍 <b>Resolving ${cleanLinks.length} link(s)...</b>\n\n` +
-      buildRlProgressBar(0, cleanLinks.length),
-      { parse_mode: "HTML" }
-    );
-    const session: RlResolveSession = {
-      chatId: ctx.chat.id,
-      msgId: statusMsg.message_id,
-      queue: [...cleanLinks],
-      resolved: [],
-      failed: [],
-      done: 0,
-      running: false,
-      cancelled: false,
-      patterns: state.resetLinkData.patterns || [],
-      patternPage: state.resetLinkData.patternPage,
-    };
-    rlResolveSessions.set(userId, session);
-    void runRlResolveBackground(userId);
     return;
   }
 
