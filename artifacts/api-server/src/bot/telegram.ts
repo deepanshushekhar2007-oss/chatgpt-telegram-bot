@@ -2536,7 +2536,12 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
   if (isFirstPick && !isAdmin(userId)) {
     try {
       const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
-      if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
+      if (trial.created) {
+        trialJustStarted = { expiresAt: trial.expiresAt };
+        // Free trial just started → user now has access. Bust the cache so
+        // every subsequent check picks up the new state immediately.
+        accessCache.del(userId);
+      }
     } catch (err: any) {
       console.error(`[TRIAL] ensureFreeTrial after lang pick failed for ${userId}:`, err?.message);
     }
@@ -3404,8 +3409,11 @@ bot.command("access", async (ctx) => {
     const data = await loadBotData();
     data.accessList[String(targetId)] = { expiresAt: Date.now() + days * 86400000, grantedBy: ctx.from!.id };
     await saveBotData(data);
+    // Immediately drop the cached access status for this user so their very
+    // next interaction picks up the fresh value instead of the stale false.
+    accessCache.del(targetId);
     const exp = new Date(data.accessList[String(targetId)].expiresAt).toUTCString();
-    await ctx.reply(`✅ <b>Access Granted!</b>\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
+    await ctx.reply(`✅ <b>Access Granted!</\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
 
     // Notify the user that admin has granted them access. Lists every
     // feature that's unlocked so they know exactly what they got. Auto
@@ -3456,6 +3464,8 @@ bot.command("revoke", async (ctx) => {
   if (!data.accessList[String(id)]) { await ctx.reply("⚠️ User does not have access."); return; }
   delete data.accessList[String(id)];
   await saveBotData(data);
+  // Drop cached access so the user immediately sees they have no access.
+  accessCache.del(id);
 
   // Stop any running CIG session for this user immediately
   const cigSession = cigSessions.get(id);
@@ -3622,6 +3632,8 @@ bot.command("redeem", async (ctx) => {
 
   if (result.success) {
     const exp = new Date(result.expiresAt!).toUTCString();
+    // Drop cached access so the user's very next action sees the new access.
+    accessCache.del(userId);
     // Grant access notification
     await ctx.reply(
       `🎉 <b>Code Redeemed Successfully!</b>\n\n` +
@@ -3648,6 +3660,7 @@ bot.command("ban", async (ctx) => {
   if (isNaN(id)) { await ctx.reply("❓ Usage: /ban [user_id]"); return; }
   const data = await loadBotData();
   if (!data.bannedUsers.includes(id)) { data.bannedUsers.push(id); await saveBotData(data); }
+  bannedCache.del(id); // bust cache so next interaction sees the ban immediately
   await ctx.reply(`🚫 <b>User Banned!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
@@ -3658,6 +3671,7 @@ bot.command("unban", async (ctx) => {
   const data = await loadBotData();
   data.bannedUsers = data.bannedUsers.filter((u) => u !== id);
   await saveBotData(data);
+  bannedCache.del(id); // bust cache so next interaction sees the unban immediately
   await ctx.reply(`✅ <b>User Unbanned!</b>\n\n👤 User: <code>${id}</code>`, { parse_mode: "HTML" });
 });
 
