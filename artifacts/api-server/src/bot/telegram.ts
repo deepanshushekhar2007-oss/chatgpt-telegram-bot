@@ -1314,6 +1314,80 @@ async function ensureWhatsAppRestored(userId: number): Promise<void> {
     });
   } catch {}
 }
+// ─── Join Session (batching + live progress bar) ──────────────────────────────
+interface JoinSession {
+  chatId: number;
+  msgId: number;
+  queue: string[];
+  done: number;
+  results: string[];
+  running: boolean;
+  cancelled: boolean;
+}
+const joinSessions = new Map<number, JoinSession>();
+
+function buildJoinProgressBar(done: number, total: number): string {
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  const filled = Math.round((done / Math.max(total, 1)) * 20);
+  return `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
+}
+
+function buildJoinStatusText(session: JoinSession): string {
+  const total = session.done + session.queue.length;
+  const bar = buildJoinProgressBar(session.done, total);
+  const last = session.results.slice(-10);
+  const more = session.results.length > 10 ? `\n... +${session.results.length - 10} earlier results\n` : "";
+  return (
+    `⏳ <b>Joining Groups: ${session.done}/${total}</b>\n\n${bar}\n\n` +
+    (session.results.length > 0 ? more + last.join("\n") + "\n\n" : "") +
+    (session.queue.length > 0 ? `⌛ <b>${session.queue.length}</b> link(s) still in queue...` : "")
+  );
+}
+
+async function runJoinBackground(userId: number): Promise<void> {
+  const session = joinSessions.get(userId);
+  if (!session || session.running) return;
+  session.running = true;
+  try {
+    while (session.queue.length > 0 && !session.cancelled) {
+      if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
+      const link = session.queue.shift()!;
+      const res = await joinGroupWithLink(String(userId), link);
+      let errMsg = res.error || "Unknown";
+      if (errMsg.toLowerCase().includes("conflict")) errMsg = "Server busy — please wait and try again";
+      session.results.push(res.success ? `✅ Joined: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(errMsg)}`);
+      session.done++;
+      if (!cancelDialogActiveFor.has(userId)) {
+        try {
+          await bot.api.editMessageText(session.chatId, session.msgId, buildJoinStatusText(session), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request"),
+          });
+        } catch {}
+      }
+      if (session.queue.length > 0) await new Promise((r) => setTimeout(r, 1500));
+    }
+    joinCancelRequests.delete(userId);
+    cancelDialogActiveFor.delete(userId);
+    const ok = session.results.filter((r) => r.startsWith("✅")).length;
+    const total = session.done;
+    const header = session.cancelled
+      ? `⛔ <b>Joining Stopped (${ok}/${total} joined)</b>`
+      : `🎉 <b>Done! (${ok}/${total} joined)</b>`;
+    const last = session.results.slice(-25);
+    const more = session.results.length > 25 ? `... +${session.results.length - 25} more\n\n` : "";
+    try {
+      await bot.api.editMessageText(session.chatId, session.msgId, `${header}\n\n${more}${last.join("\n")}`, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    joinSessions.delete(userId);
+  } finally {
+    session.running = false;
+  }
+}
+
 const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
@@ -4084,7 +4158,6 @@ bot.callbackQuery("connect_wa", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   clearQrPairing(userId);
-  await disconnectWhatsApp(String(userId)).catch(() => {});
 
   const connectedText = "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.";
   const connectedKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
@@ -4097,11 +4170,18 @@ bot.callbackQuery("connect_wa", async (ctx) => {
 
   userStates.delete(userId);
 
+  // Check connection FIRST — only disconnect if NOT already connected, to
+  // avoid killing a live QR-paired session when the user taps Back or Connect.
+  const alreadyConnected = isConnected(String(userId));
+  if (!alreadyConnected) {
+    await disconnectWhatsApp(String(userId)).catch(() => {});
+  }
+
   const isPhoto = !!ctx.callbackQuery.message?.photo;
 
   if (isPhoto) {
     try { await ctx.deleteMessage(); } catch {}
-    if (isConnected(String(userId))) {
+    if (alreadyConnected) {
       await ctx.reply(connectedText, { parse_mode: "HTML", reply_markup: connectedKb });
     } else {
       await ctx.reply(connectText, { parse_mode: "HTML", reply_markup: connectKb });
@@ -4109,7 +4189,7 @@ bot.callbackQuery("connect_wa", async (ctx) => {
     return;
   }
 
-  if (isConnected(String(userId))) {
+  if (alreadyConnected) {
     await ctx.editMessageText(connectedText, { parse_mode: "HTML", reply_markup: connectedKb });
     return;
   }
@@ -13722,52 +13802,47 @@ bot.on("message:text", async (ctx) => {
   if (state.step === "join_enter_links") {
     if (!state.joinData) return;
     const cleanLinks = extractLinksFromText(text);
-    if (!cleanLinks.length) { await ctx.reply("❌ No valid WhatsApp links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" }); return; }
-    userStates.delete(userId);
+    if (!cleanLinks.length) {
+      await ctx.reply("❌ No valid WhatsApp links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" });
+      return;
+    }
+
+    const existing = joinSessions.get(userId);
+    if (existing && !existing.cancelled) {
+      // ── Batch mode: append new links to the running session ────────────────
+      existing.queue.push(...cleanLinks);
+      const total = existing.done + existing.queue.length;
+      await ctx.reply(
+        `➕ <b>${cleanLinks.length} link(s) added to queue!</b>\n\n` +
+        `✅ Already done: <b>${existing.done}</b>\n` +
+        `⌛ Remaining in queue: <b>${existing.queue.length}</b>\n` +
+        `📋 Total: <b>${total}</b>`,
+        { parse_mode: "HTML" }
+      );
+      // Wake up the runner in case it finished and new links arrived
+      void runJoinBackground(userId);
+      return;
+    }
+
+    // ── New session ─────────────────────────────────────────────────────────
     joinCancelRequests.delete(userId);
-    const statusMsg = await ctx.reply(`⏳ <b>Joining ${cleanLinks.length} group(s)...</b>\n\n🔄 0/${cleanLinks.length} done...`, {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request"),
-    });
-    const joinChatId = ctx.chat.id;
-    const joinMsgId = statusMsg.message_id;
-    void (async () => {
-      let result = "🔗 <b>Join Groups Result</b>\n\n";
-      const results: string[] = [];
-      let cancelled = false;
-      for (let ji = 0; ji < cleanLinks.length; ji++) {
-        if (joinCancelRequests.has(userId)) {
-          cancelled = true;
-          results.push(`⛔ Cancelled. ${cleanLinks.length - ji} group(s) not joined.`);
-          break;
-        }
-        const res = await joinGroupWithLink(String(userId), cleanLinks[ji]);
-        let errMsg = res.error || "Unknown";
-        if (errMsg.toLowerCase().includes("conflict")) errMsg = "Server busy — please wait and try again";
-        const line = res.success ? `✅ Joined Group: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(errMsg)}`;
-        results.push(line);
-        // Skip overwrite if user is staring at the cancel-confirm dialog —
-        // otherwise the Yes/No buttons get wiped and cancel looks broken.
-        if (!cancelDialogActiveFor.has(userId)) {
-          try {
-            await bot.api.editMessageText(joinChatId, joinMsgId,
-              `⏳ <b>Joining: ${ji + 1}/${cleanLinks.length}</b>\n\n${results.join("\n")}`,
-              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
-            );
-          } catch {}
-        }
-        if (ji < cleanLinks.length - 1) await new Promise((r) => setTimeout(r, 1500));
-      }
-      joinCancelRequests.delete(userId);
-      cancelDialogActiveFor.delete(userId);
-      result += results.join("\n");
-      if (cancelled) result += "\n\n⛔ <b>Joining stopped by user.</b>";
-      try {
-        await bot.api.editMessageText(joinChatId, joinMsgId, result, {
-          parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-        });
-      } catch {}
-    })();
+    // Keep user in join_enter_links step so they can send more links mid-run
+    const statusMsg = await ctx.reply(
+      `⏳ <b>Joining ${cleanLinks.length} group(s)...</b>\n\n` +
+      buildJoinProgressBar(0, cleanLinks.length),
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
+    );
+    const session: JoinSession = {
+      chatId: ctx.chat.id,
+      msgId: statusMsg.message_id,
+      queue: [...cleanLinks],
+      done: 0,
+      results: [],
+      running: false,
+      cancelled: false,
+    };
+    joinSessions.set(userId, session);
+    void runJoinBackground(userId);
     return;
   }
 
