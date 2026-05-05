@@ -975,6 +975,7 @@ interface UserState {
     patterns: SimilarGroup[];
     selectedIndices: Set<number>;
     page: number;
+    patternPage?: number;
   };
   demoteAdminData?: {
     allGroups: Array<{ id: string; subject: string }>;
@@ -2412,13 +2413,18 @@ bot.command("help", async (ctx) => {
     `• Beech mein cancel bhi kar sakte ho\n\n` +
 
     `🔗 13. Reset Link\n` +
-    `• Select admin groups — choose Similar Groups or All Groups\n` +
-    `• Tap groups to select, then confirm\n` +
+    `• Two modes available:\n` +
+    `   📋 Select Groups: choose Similar Groups or All Groups → tap groups to select → confirm\n` +
+    `      - Similar Groups list supports Previous/Next pagination\n` +
+    `   🔗 Reset by Group Link: paste group invite links (one per line) → bot resolves & shows review → confirm\n` +
+    `      - You can paste multiple links at once\n` +
+    `      - Bot shows group names for review before resetting\n` +
     `• Bot revokes current invite links and generates new ones\n` +
     `• ⚠️ Old links will stop working immediately\n` +
-    `• Live progress shows each group being processed\n` +
-    `• Cancel button to stop at any time\n` +
-    `• New links are shown when complete\n\n` +
+    `• Rate limit errors are automatically retried (waits and retries once)\n` +
+    `• Successful new links are shown first, failed groups listed at the end\n` +
+    `• Live progress shows current group being processed\n` +
+    `• Cancel button to stop at any time\n\n` +
 
     `🏷️ 14. Change Group Name\n` +
     `• Rename multiple groups in one go. Two modes:\n` +
@@ -5955,7 +5961,7 @@ bot.callbackQuery("help_button", async (ctx) => {
     `10. Add Members — Add members to your groups\n` +
     `11. Edit Settings — Change group settings/permissions\n` +
     `12. Change Name — Rename your groups\n` +
-    `13. Reset Link — Reset group invite links\n` +
+    `13. Reset Link — Reset group invite links (Select Groups or by Group Link)\n` +
     `14. Demote Admin — Remove admin rights from members\n` +
     `15. Auto Chat ⭐ — Auto send messages to friends/groups\n` +
     `16. Auto Accepter — Auto-accept invite-link join requests\n\n` +
@@ -8574,6 +8580,7 @@ bot.callbackQuery("reset_link", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "rl_similar").text("📋 All Groups", "rl_show_all").row();
   else kb.text("📋 All Groups", "rl_show_all").row();
+  kb.text("🔗 Reset by Group Link", "rl_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -8584,6 +8591,25 @@ bot.callbackQuery("reset_link", async (ctx) => {
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
+
+const RL_SIM_PAGE_SIZE = 10;
+
+function buildRlSimilarKeyboard(patterns: SimilarGroup[], page: number): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const totalPages = Math.max(1, Math.ceil(patterns.length / RL_SIM_PAGE_SIZE));
+  const start = page * RL_SIM_PAGE_SIZE;
+  const end = Math.min(start + RL_SIM_PAGE_SIZE, patterns.length);
+  for (let i = start; i < end; i++) {
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `rl_sim_${i}`).row();
+  }
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Previous" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "rl_sim_prev_page").text(`📄 ${page + 1}/${totalPages}`, "rl_sim_page_info").text(next, "rl_sim_next_page").row();
+  }
+  kb.text("🔙 Back", "reset_link").text("🏠 Menu", "main_menu");
+  return kb;
+}
 
 bot.callbackQuery("rl_similar", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -8598,16 +8624,44 @@ bot.callbackQuery("rl_similar", async (ctx) => {
     }); return;
   }
 
-  const kb = new InlineKeyboard();
-  for (let i = 0; i < patterns.length; i++) {
-    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `rl_sim_${i}`).row();
-  }
-  kb.text("🔙 Back", "reset_link").text("🏠 Menu", "main_menu");
-
+  state.resetLinkData.patternPage = 0;
   await ctx.editMessageText(
     "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
-    { parse_mode: "HTML", reply_markup: kb }
+    { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(patterns, 0) }
   );
+});
+
+bot.callbackQuery("rl_sim_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.resetLinkData) return;
+  const current = state.resetLinkData.patternPage || 0;
+  if (current > 0) state.resetLinkData.patternPage = current - 1;
+  const page = state.resetLinkData.patternPage || 0;
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
+    { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(state.resetLinkData.patterns, page) }
+  );
+});
+
+bot.callbackQuery("rl_sim_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.resetLinkData) return;
+  const totalPages = Math.ceil(state.resetLinkData.patterns.length / RL_SIM_PAGE_SIZE);
+  const current = state.resetLinkData.patternPage || 0;
+  if (current < totalPages - 1) state.resetLinkData.patternPage = current + 1;
+  const page = state.resetLinkData.patternPage || 0;
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
+    { parse_mode: "HTML", reply_markup: buildRlSimilarKeyboard(state.resetLinkData.patterns, page) }
+  );
+});
+
+bot.callbackQuery("rl_sim_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
 });
 
 bot.callbackQuery(/^rl_sim_(\d+)$/, async (ctx) => {
@@ -8758,6 +8812,22 @@ bot.callbackQuery("rl_proceed_confirm", async (ctx) => {
   void resetLinkBackground(userId, selectedGroups, chatId, msgId);
 });
 
+bot.callbackQuery("rl_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.resetLinkData) return;
+  state.step = "rl_enter_links";
+  await ctx.editMessageText(
+    "🔗 <b>Reset by Group Link</b>\n\n" +
+    "Send one or more WhatsApp group invite links, one per line:\n\n" +
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>\n\n" +
+    "⚠️ You must be an admin in those groups.\n" +
+    "Bot will resolve each link, show a review, and reset only after your confirmation.",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
 bot.callbackQuery("rl_cancel_request", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -8801,12 +8871,13 @@ async function resetLinkBackground(
   let successCount = 0;
   let wasCancelled = false;
 
-  const updateProgress = async (gi: number) => {
+  const updateProgress = async (gi: number, currentGroup?: string) => {
     if (cancelDialogActiveFor.has(userIdNum)) return;
     try {
       await bot.api.editMessageText(chatId, msgId,
         `⏳ <b>Resetting invite links...</b>\n\n` +
-        `📊 ${gi}/${groups.length} done | ✅ ${successCount} succeeded`,
+        `📊 ${gi}/${groups.length} done | ✅ ${successCount} succeeded` +
+        (currentGroup ? `\n\n🔄 Currently: ${esc(currentGroup)}` : ""),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
       );
     } catch {}
@@ -8820,7 +8891,29 @@ async function resetLinkBackground(
       break;
     }
     const group = groups[gi];
-    const res = await resetGroupInviteLink(userId, group.id);
+    await updateProgress(gi, group.subject);
+
+    let res = await resetGroupInviteLink(userId, group.id);
+
+    // Rate limit / owner limit detected — wait and retry once
+    if (!res.success && res.error) {
+      const errLower = res.error.toLowerCase();
+      if (
+        errLower.includes("owner") ||
+        errLower.includes("rate") ||
+        errLower.includes("not-authorized") ||
+        errLower.includes("forbidden") ||
+        errLower.includes("405") ||
+        errLower.includes("not authorized")
+      ) {
+        // Wait 6 seconds to clear the rate-limit window, then retry once
+        await new Promise((r) => setTimeout(r, 6000));
+        if (!resetLinkCancelRequests.has(userIdNum)) {
+          res = await resetGroupInviteLink(userId, group.id);
+        }
+      }
+    }
+
     if (res.success && res.newLink) {
       results.push({ subject: group.subject, newLink: res.newLink });
       successCount++;
@@ -8834,15 +8927,26 @@ async function resetLinkBackground(
   resetLinkCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
 
+  const successResults = results.filter(r => r.newLink);
+  const failedResults = results.filter(r => !r.newLink);
+
   let resultText = `🔗 <b>Reset Link Result</b>\n\n`;
   if (wasCancelled) resultText += `⛔ <b>Cancelled after ${results.length}/${groups.length} group(s).</b>\n\n`;
-  for (const r of results) {
-    if (r.newLink) {
-      resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
-    } else {
-      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(r.error || "Failed")}\n\n`;
-    }
+
+  // Show all successful resets first with their new links
+  for (const r of successResults) {
+    resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
+
+  // Show all failed groups together at the end
+  if (failedResults.length > 0) {
+    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed to Reset (${failedResults.length} group(s)):</b>\n`;
+    for (const r of failedResults) {
+      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(r.error || "Failed")}\n`;
+    }
+    resultText += "\n";
+  }
+
   if (!wasCancelled) {
     resultText += `━━━━━━━━━━━━━━━━━━\n✅ <b>${successCount}/${groups.length} links reset successfully!</b>`;
   }
@@ -13317,6 +13421,80 @@ bot.on("message:text", async (ctx) => {
     state.groupSettings.friendNumbers = numbers;
     await ctx.reply(`✅ <b>${numbers.length} friend number(s) saved!</b>`, { parse_mode: "HTML" });
     await showGroupFriendAdminStep(ctx);
+    return;
+  }
+
+  if (state.step === "rl_enter_links") {
+    if (!state.resetLinkData) return;
+    const cleanLinks = extractLinksFromText(text);
+    if (!cleanLinks.length) {
+      await ctx.reply(
+        "❌ No valid WhatsApp group links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    const resolvingMsg = await ctx.reply(
+      `🔍 <b>Resolving ${cleanLinks.length} link(s)...</b>\n\n⌛ Please wait...`,
+      { parse_mode: "HTML" }
+    );
+    const resolveChatId = ctx.chat.id;
+    const resolveMsgId = resolvingMsg.message_id;
+
+    const resolved: Array<{ id: string; subject: string }> = [];
+    const failedLinks: string[] = [];
+    for (const link of cleanLinks) {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) {
+        resolved.push({ id: info.id, subject: info.subject });
+      } else {
+        failedLinks.push(link);
+      }
+    }
+
+    if (!resolved.length) {
+      try {
+        await bot.api.editMessageText(resolveChatId, resolveMsgId,
+          "❌ <b>Could not resolve any of the provided links.</b>\n\n" +
+          "Make sure the links are valid and you are a member of those groups.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+        );
+      } catch {}
+      userStates.delete(userId);
+      return;
+    }
+
+    // Update resetLinkData with resolved groups (all pre-selected)
+    state.resetLinkData = {
+      allGroups: resolved,
+      patterns: state.resetLinkData.patterns || [],
+      selectedIndices: new Set(resolved.map((_, i) => i)),
+      page: 0,
+      patternPage: state.resetLinkData.patternPage,
+    };
+    state.step = "reset_link_select";
+
+    const groupList = resolved.slice(0, 30).map(r => `• ${esc(r.subject)}`).join("\n");
+    const more = resolved.length > 30 ? `\n... +${resolved.length - 30} more` : "";
+    let reviewText =
+      `🔗 <b>Reset Invite Links — Review</b>\n\n` +
+      `<b>${resolved.length} group(s) will be reset:</b>\n\n${groupList}${more}\n\n`;
+    if (failedLinks.length > 0) {
+      reviewText += `⚠️ <b>${failedLinks.length} link(s) could not be resolved (will be skipped).</b>\n\n`;
+    }
+    reviewText +=
+      `⚠️ <b>This will revoke all current invite links</b> and generate new ones.\n` +
+      `Anyone with the old link will NOT be able to join.\n\n` +
+      `Are you sure you want to proceed?`;
+
+    try {
+      await bot.api.editMessageText(resolveChatId, resolveMsgId, reviewText, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Yes, Reset Links", "rl_proceed_confirm")
+          .text("❌ Cancel", "main_menu"),
+      });
+    } catch {}
     return;
   }
 
