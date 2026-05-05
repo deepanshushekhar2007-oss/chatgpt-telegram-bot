@@ -380,6 +380,23 @@ async function createSocket(
 
   if (!state.creds.registered && pairingMode === "code") {
     const cleaned = phoneNumber.replace(/[^0-9]/g, "");
+
+    // Guard: QR sessions have no phone number. If creds are unregistered and
+    // there is no phone number, attempting a pairing code request will always
+    // fail (WhatsApp requires a number). Bail out early with a clear message
+    // so the user knows to reconnect via QR instead of seeing a cryptic error.
+    if (!cleaned) {
+      console.log(`[WA][${userId}] QR session with unregistered creds — skipping pairing code, asking user to reconnect via QR`);
+      closeSocketSafe(sock);
+      session.socket = null;
+      clearAllSessionTimers(userId);
+      sessions.delete(userId);
+      void clearSessionData(userId);
+      onDisconnected("Your QR session has expired or is no longer valid. Please reconnect via QR code.");
+      void forceMemoryReclaim();
+      return;
+    }
+
     let codeRequestScheduled = false;
 
     const requestCode = async () => {
@@ -523,10 +540,12 @@ async function createSocket(
       console.log(`[WA][${userId}] Closed gen=${myGenId}. code=${statusCode} reason=${reason} wasConnected=${session.wasConnected} retries=${session.retryCount} pairingMode=${pairingMode}`);
 
       // When reconnecting an already-established session, never re-show QR and never
-      // request a new pairing code.  Always reconnect as a registered ("code") session
-      // so Baileys uses saved creds directly.  This applies to QR sessions after scan
-      // and to code sessions after a 515 stream restart.
-      const reconnectMode: "code" | "qr" = session.wasConnected ? "code" : pairingMode;
+      // request a new pairing code. Baileys uses saved creds directly.
+      // For QR sessions (phoneNumber empty): keep pairingMode="qr" so Baileys
+      // doesn't try to request a pairing code with an empty phone number.
+      // For code sessions: use "code" so Baileys handles the 515 stream restart.
+      const hasPhone = phoneNumber.replace(/[^0-9]/g, "").length > 0;
+      const reconnectMode: "code" | "qr" = (session.wasConnected && hasPhone) ? "code" : pairingMode;
       const reconnectOnQr = session.wasConnected ? () => {} : onQr;
 
       // 401 / loggedOut — two very different scenarios share the same status code:
@@ -837,13 +856,14 @@ export async function restoreWhatsAppSessions(): Promise<void> {
       await new Promise((r) => setTimeout(r, 5000));
     }
 
+    const storedMode = stored.pairingMode || "code";
     const session: WhatsAppSession = {
       socket: null,
       connected: false,
       pairingCode: null,
       qrCode: null,
       qrExpiresAt: null,
-      pairingMode: "code",
+      pairingMode: storedMode,
       connecting: true,
       phoneNumber: stored.phoneNumber,
       codeRequested: false,
@@ -859,7 +879,7 @@ export async function restoreWhatsAppSessions(): Promise<void> {
       await createSocket(
         stored.userId,
         stored.phoneNumber,
-        "code",
+        storedMode,
         () => {},
         () => {},
         () => console.log(`[WA][RESTORE][${stored.userId}] Session restored`),
