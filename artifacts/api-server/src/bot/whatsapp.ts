@@ -584,7 +584,7 @@ async function createSocket(
         void clearSessionData(userId);
         clearAllSessionTimers(userId);
         sessions.delete(userId);
-        onDisconnected("WhatsApp ne logout kar diya. Dobara connect karein.");
+        onDisconnected("Logged out by WhatsApp. Please reconnect from the menu.");
         void forceMemoryReclaim();
         return;
       }
@@ -603,7 +603,8 @@ async function createSocket(
         if (session.retryCount > 8) {
           clearAllSessionTimers(userId);
           sessions.delete(userId);
-          onDisconnected("Too many reconnect attempts. Please reconnect manually.");
+          void clearSessionData(userId);
+          onDisconnected("Too many reconnect attempts. Please reconnect from the menu.");
           void forceMemoryReclaim();
           return;
         }
@@ -636,7 +637,7 @@ async function createSocket(
           clearAllSessionTimers(userId);
           sessions.delete(userId);
           void clearSessionData(userId);
-          onDisconnected("WhatsApp ne connection reject kar diya (403). Dobara connect karein.");
+          onDisconnected("WhatsApp rejected this connection (403). Please reconnect from the menu.");
           void forceMemoryReclaim();
           return;
         }
@@ -669,7 +670,8 @@ async function createSocket(
         session.socket = null;
         clearAllSessionTimers(userId);
         sessions.delete(userId);
-        onDisconnected("Connection baar baar fail ho raha hai. Dobara connect karein.");
+        void clearSessionData(userId);
+        onDisconnected("Connection keeps failing. Please reconnect from the menu.");
         void forceMemoryReclaim();
         return;
       }
@@ -1601,14 +1603,22 @@ export async function getGroupIdFromLink(
 ): Promise<{ id: string; subject: string } | null> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
-  try {
-    const code = extractInviteCode(inviteLink);
-    const metadata = await session.socket.groupGetInviteInfo(code);
-    return { id: metadata.id, subject: metadata.subject };
-  } catch (err: any) {
-    console.error(`[WA][${userId}] Group info error:`, err?.message);
-    return null;
+  const code = extractInviteCode(inviteLink);
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      // Back off between retries: 3s, 6s
+      await new Promise((r) => setTimeout(r, 3000 * attempt));
+    }
+    try {
+      const metadata = await session.socket.groupGetInviteInfo(code);
+      return { id: metadata.id, subject: metadata.subject };
+    } catch (err: any) {
+      lastErr = err;
+      console.error(`[WA][${userId}] Group info error (attempt ${attempt + 1}/3):`, err?.message);
+    }
   }
+  return null;
 }
 
 export interface GroupInfo {
