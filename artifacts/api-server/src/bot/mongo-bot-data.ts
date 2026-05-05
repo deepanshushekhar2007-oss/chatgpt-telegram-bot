@@ -602,3 +602,53 @@ export async function deletePendingGroupCreation(userId: number): Promise<void> 
     await col.deleteOne({ userId });
   } catch {}
 }
+
+// ─── Auto-Accepter Job Persistence ──────────────────────────────────────────
+// Saves running auto-accepter jobs to MongoDB so they survive a bot restart.
+// On restart the job is restored silently (no message sent to user).
+
+export interface PersistedAutoAccepterJob {
+  userId: number;
+  groupIds: string[];
+  groupNames: string[];
+  durationMs: number;
+  endsAt: number;
+  chatId: number;
+  statusMsgId: number;
+  totalAccepted: number;
+  savedAt: number;
+}
+
+export async function saveAutoAccepterJob(job: PersistedAutoAccepterJob): Promise<void> {
+  try {
+    const col = await getCollection("auto_accepter_jobs");
+    await col.replaceOne({ userId: job.userId }, { ...job, savedAt: Date.now() }, { upsert: true });
+  } catch {}
+}
+
+export async function loadAllAutoAccepterJobs(): Promise<PersistedAutoAccepterJob[]> {
+  try {
+    const col = await getCollection("auto_accepter_jobs");
+    const docs = await col.find({}).toArray();
+    return docs.map((d) => ({
+      userId: d["userId"] as number,
+      groupIds: (d["groupIds"] || []) as string[],
+      groupNames: (d["groupNames"] || []) as string[],
+      durationMs: d["durationMs"] as number,
+      endsAt: d["endsAt"] as number,
+      chatId: d["chatId"] as number,
+      statusMsgId: d["statusMsgId"] as number,
+      totalAccepted: (d["totalAccepted"] ?? 0) as number,
+      savedAt: (d["savedAt"] ?? 0) as number,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteAutoAccepterJob(userId: number): Promise<void> {
+  try {
+    const col = await getCollection("auto_accepter_jobs");
+    await col.deleteOne({ userId });
+  } catch {}
+}
