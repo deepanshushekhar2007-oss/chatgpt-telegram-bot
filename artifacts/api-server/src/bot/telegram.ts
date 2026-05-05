@@ -9323,6 +9323,9 @@ async function demoteAllBackground(
   let totalDemoted = 0;
   let wasCancelled = false;
 
+  // Get bot's own phone number so we never demote ourselves
+  const myNumber = (getConnectedWhatsAppNumber(userId) || "").replace(/[^0-9]/g, "");
+
   for (let gi = 0; gi < groups.length; gi++) {
     if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
     const group = groups[gi];
@@ -9349,8 +9352,18 @@ async function demoteAllBackground(
       continue;
     }
 
-    const admins = participants.filter((p) => p.isAdmin && !p.isSuperAdmin);
     const ownerCount = participants.filter((p) => p.isSuperAdmin).length;
+    // Filter: not owner, and not the bot's own number
+    const admins = participants.filter((p) => {
+      if (p.isSuperAdmin) return false;
+      if (!p.isAdmin) return false;
+      if (myNumber) {
+        const pNum = p.phone.replace(/[^0-9]/g, "");
+        // Match on last 10 digits to handle country-code variations
+        if (pNum && myNumber && (pNum === myNumber || pNum.slice(-10) === myNumber.slice(-10))) return false;
+      }
+      return true;
+    });
 
     if (!admins.length) {
       const ownerNote = ownerCount > 0 ? ` (${ownerCount} owner(s) skipped)` : "";
