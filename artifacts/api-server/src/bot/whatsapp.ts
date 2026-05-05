@@ -525,6 +525,7 @@ async function createSocket(
       session.qrCode = null;
       session.qrExpiresAt = null;
       session.retryCount = 0;
+      clearDisconnectNotified(userId); // reset so next real disconnect can notify again
       savePairingMode(userId, pairingMode).catch(() => {});
       onConnected();
     }
@@ -883,21 +884,23 @@ export function setDisconnectNotifier(fn: (userId: string, reason: string, phone
   disconnectNotifier = fn;
 }
 
-// Cooldown: send at most ONE disconnect notification per user per 5 minutes.
-// Without this, every reconnect retry (which can happen every ~60s) fires
-// a fresh Telegram message, flooding the user's chat.
-const lastDisconnectNotifyAt = new Map<string, number>();
-const DISCONNECT_NOTIFY_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+// Send at most ONE disconnect notification per user per disconnect cycle.
+// The flag is cleared only when the session successfully reconnects (connection=open).
+// This prevents repeated messages every time a retry fails — the user sees exactly
+// one "Disconnected" alert and then one implicit recovery (session comes back online).
+const disconnectNotifiedUsers = new Set<string>();
 
 export function notifyDisconnect(userId: string, reason: string): void {
   try {
-    const now = Date.now();
-    const last = lastDisconnectNotifyAt.get(userId) ?? 0;
-    if (now - last < DISCONNECT_NOTIFY_COOLDOWN_MS) return; // already notified recently — skip
-    lastDisconnectNotifyAt.set(userId, now);
+    if (disconnectNotifiedUsers.has(userId)) return; // already notified for this disconnect cycle
+    disconnectNotifiedUsers.add(userId);
     const phone = getConnectedWhatsAppNumber(userId) ?? sessions.get(userId)?.phoneNumber ?? null;
     disconnectNotifier?.(userId, reason, phone);
   } catch {}
+}
+
+export function clearDisconnectNotified(userId: string): void {
+  disconnectNotifiedUsers.delete(userId);
 }
 
 export async function restoreWhatsAppSessions(): Promise<void> {
