@@ -548,10 +548,32 @@ async function createSocket(
       const reconnectMode: "code" | "qr" = (session.wasConnected && hasPhone) ? "code" : pairingMode;
       const reconnectOnQr = session.wasConnected ? () => {} : onQr;
 
+      // ── QR session already-connected disconnect: STOP immediately ───────────
+      // Phone/code sessions can silently reconnect using saved credentials.
+      // QR sessions have NO phone number stored — Baileys cannot reconnect
+      // silently, it always needs a new QR scan. Retrying for QR sessions
+      // is pointless: it just spins up new sockets endlessly, causes repeated
+      // Telegram disconnect notifications, and wastes server memory.
+      //
+      // Exception: statusCode 515 ("Stream Errored") is the normal Baileys
+      // post-scan restart that happens RIGHT AFTER a successful QR scan —
+      // that one must still be retried (handled in the 515 block below).
+      const isQrSession = !hasPhone;
+      if (isQrSession && session.wasConnected && statusCode !== 515 && !reason.includes("Stream Errored")) {
+        console.log(`[WA][${userId}] QR session disconnected after being live (code=${statusCode}) — stopping all retries, user must re-scan.`);
+        closeSocketSafe(sock);
+        session.socket = null;
+        clearAllSessionTimers(userId);
+        sessions.delete(userId);
+        onDisconnected("Reconnect via QR code");
+        void forceMemoryReclaim();
+        return;
+      }
+
       // 401 / loggedOut — two very different scenarios share the same status code:
       //   A) Session that WAS connected gets 401 → often transient after QR scan or
       //      after a 515 stream restart.  Retry silently a few times before accepting
-      //      it as a real logout.
+      //      it as a real logout (phone/code sessions only — QR sessions stopped above).
       //   B) Session that NEVER connected gets 401 → stale / invalid creds.  Clear
       //      immediately and let the user reconnect.
       if (statusCode === DisconnectReason.loggedOut) {
@@ -559,8 +581,8 @@ async function createSocket(
         session.socket = null;
         session.codeRequested = false;
 
-        if (session.wasConnected && session.retryCount < 3) {
-          // Transient 401 after successful connection — retry with backoff
+        if (session.wasConnected && hasPhone && session.retryCount < 3) {
+          // Transient 401 after successful connection (phone/code sessions only)
           session.retryCount++;
           const delay = 4000 * session.retryCount;
           console.log(`[WA][${userId}] 401 after live session gen=${myGenId} — retry ${session.retryCount}/3 in ${delay / 1000}s (mode=${reconnectMode})`);
@@ -593,6 +615,8 @@ async function createSocket(
       // NORMAL after user successfully scans QR or enters pairing code.
       // WhatsApp saves credentials first, then sends 515.
       // DO NOT clear session files — creds must persist for reconnect.
+      // For QR sessions: allow up to 3 retries (the post-scan 515 + 1-2 bounces).
+      // For code sessions: allow up to 8 retries.
       if (statusCode === 515 || reason.includes("Stream Errored")) {
         console.log(`[WA][${userId}] 515 stream restart gen=${myGenId} — reconnecting in ${reconnectMode} mode (session preserved)`);
         closeSocketSafe(sock);
@@ -600,7 +624,8 @@ async function createSocket(
         session.codeRequested = false;
         session.retryCount++;
 
-        if (session.retryCount > 8) {
+        const max515Retries = isQrSession ? 3 : 8;
+        if (session.retryCount > max515Retries) {
           clearAllSessionTimers(userId);
           sessions.delete(userId);
           void clearSessionData(userId);
@@ -627,9 +652,10 @@ async function createSocket(
 
       // 403 = WhatsApp permanently rejected this session (banned, session invalidated, or device unlinked remotely)
       // Retrying endlessly on 403 causes memory leaks (500+ sockets accumulate). Cap retries tightly.
+      // QR sessions get only 2 retries since they can't silently reconnect anyway.
       if (statusCode === 403) {
         session.retryCount++;
-        const MAX_403_RETRIES = session.wasConnected ? 10 : 3;
+        const MAX_403_RETRIES = session.wasConnected ? (hasPhone ? 10 : 2) : 3;
         if (session.retryCount > MAX_403_RETRIES) {
           console.log(`[WA][${userId}] 403 repeated ${session.retryCount}x — WhatsApp permanently rejected. Stopping reconnect.`);
           closeSocketSafe(sock);
@@ -661,6 +687,8 @@ async function createSocket(
       }
 
       // All other close reasons — reconnect after delay with a safety cap
+      // QR sessions that reach here have wasConnected=false (still in QR scan phase).
+      // Phone/code sessions: up to 50 retries with exponential backoff.
       const MAX_RETRIES = 50;
       session.codeRequested = false;
       session.retryCount++;
