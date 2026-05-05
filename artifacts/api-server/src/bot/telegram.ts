@@ -3722,11 +3722,24 @@ bot.command("status", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const data = await loadBotData();
   const now = Date.now();
+
+  // Build set of user IDs who got access via redeem codes — exclude them from status list.
+  const redeemUserIds = new Set<string>();
+  for (const code of Object.values(data.redeemCodes ?? {})) {
+    for (const uid of (code as any).usedBy ?? []) {
+      redeemUserIds.add(String(uid));
+    }
+  }
+
   let accessText = "";
+  let activeGrantCount = 0;
   for (const [uid, info] of Object.entries(data.accessList)) {
     const rem = info.expiresAt - now;
+    if (rem <= 0) continue;
+    if (redeemUserIds.has(uid)) continue;
     const dLeft = Math.ceil(rem / 86400000);
-    accessText += rem > 0 ? `  ✅ <code>${uid}</code> — ${dLeft} days\n` : `  ⚠️ <code>${uid}</code> — EXPIRED\n`;
+    accessText += `  ✅ <code>${uid}</code> — ${dLeft} days\n`;
+    activeGrantCount++;
   }
   const bannedText = data.bannedUsers.length ? data.bannedUsers.map((id) => `  🚫 <code>${id}</code>`).join("\n") + "\n" : "  None\n";
 
@@ -3751,7 +3764,7 @@ bot.command("status", async (ctx) => {
     `🤖 <b>Auto Chat:</b> ${autoChatEnabled ? "ON 🟢 (All users)" : "OFF 🔴 (Selected users only)"}\n` +
     `👑 <b>Owner:</b> ${OWNER_USERNAME}\n` +
     `👥 <b>Total Users:</b> ${data.totalUsers.length}\n\n` +
-    `✅ <b>Access List (${Object.keys(data.accessList).length}):</b>\n${accessText || "  None\n"}\n` +
+    `✅ <b>Access List (${activeGrantCount}):</b>\n${accessText || "  None\n"}\n` +
     `🤖 <b>Auto Chat Access (${autoChatAccessList.length}):</b>\n${autoChatAccessText}\n` +
     `🚫 <b>Banned (${data.bannedUsers.length}):</b>\n${bannedText}`,
     { parse_mode: "HTML" }
