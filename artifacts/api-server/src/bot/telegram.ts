@@ -10859,6 +10859,12 @@ async function runGroupChatDualBackground(
     sessionType: "cig",
     groups,
     autoChatExpiresAt,
+    currentGroupIndex: startGroupIndex,
+    messageIndex: startMessageIndex,
+    sentCount: startSent,
+    sentByAccount1: startSentByAccount1,
+    sentByAccount2: startSentByAccount2,
+    failedCount: startFailed,
   }).catch(() => {});
 
   // Protect BOTH WhatsApp sessions (primary + secondary) from idle and
@@ -10880,6 +10886,8 @@ async function runGroupChatDualBackground(
 
     while (!session.cancelled && session.running) {
       if (!groups.length) break;
+      markSessionActive(primaryUserId);
+      markSessionActive(autoUserId);
 
       // Check if auto chat duration has expired
       if (autoChatExpiresAt && Date.now() >= autoChatExpiresAt) {
@@ -11466,7 +11474,7 @@ const MAX_GROUPS_PER_AUTOCHAT = Number(process.env.MAX_GROUPS_PER_AUTOCHAT || "3
 const AUTOCHAT_PROGRESS_THROTTLE_MS = Number(process.env.AUTOCHAT_PROGRESS_THROTTLE_MS || "20000");
 let activeAutoChatCount = 0;
 
-async function runAutoChatBackground(userId: number, autoUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number, repeatCount: number): Promise<void> {
+async function runAutoChatBackground(userId: number, autoUserId: string, chatId: number, msgId: number, groups: Array<{ id: string; subject: string }>, message: string, delaySeconds: number, repeatCount: number, startSent = 0): Promise<void> {
   // Backpressure: if too many auto-chats are already running, refuse politely
   // instead of pushing the host into OOM.
   if (activeAutoChatCount >= MAX_CONCURRENT_AUTOCHAT) {
@@ -11499,7 +11507,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     message,
     delaySeconds,
     repeatCount,
-    sent: 0,
+    sent: startSent,
     failed: 0,
     currentRound: 1,
     rotationIndex: 0,
@@ -11517,6 +11525,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     message,
     delaySeconds,
     repeatCount,
+    sentCount: startSent,
   }).catch(() => {});
 
   // Protect the secondary WhatsApp session from idle / memory-pressure
@@ -11556,6 +11565,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
 
       for (const group of cappedGroups) {
         if (session.cancelled) break;
+        markSessionActive(autoUserId);
 
         // Defensive reconnect: if the secondary WA socket got dropped due
         // to a server-side reset or transient network blip, lazy-restore
@@ -15263,7 +15273,7 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
           const groups = groupIds.map((id) => ({ id, subject: "" }));
-          void runAutoChatBackground(s.userId, autoUserId, s.userId, statusMsg.message_id, groups, s.message ?? "", s.delaySeconds ?? 60, s.repeatCount ?? 0);
+          void runAutoChatBackground(s.userId, autoUserId, s.userId, statusMsg.message_id, groups, s.message ?? "", s.delaySeconds ?? 60, s.repeatCount ?? 0, s.sentCount ?? 0);
           console.log(`[AUTO_CHAT] Restored legacy session for userId=${s.userId} (${groupIds.length} groups)`);
         }
 
