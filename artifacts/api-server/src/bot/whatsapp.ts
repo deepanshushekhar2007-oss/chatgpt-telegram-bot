@@ -1760,14 +1760,21 @@ export async function getGroupParticipants(userId: string, groupId: string): Pro
     return meta.participants.map((p: any) => {
       const jidRaw: string = p.id || "";
       let phone: string;
+      // Operation JID: for @lid participants WhatsApp requires the phone-based
+      // JID (e.g. 919234038011@s.whatsapp.net) for participant update calls
+      // (demote/promote/remove). Using the raw @lid JID causes silent failures.
+      let operationJid: string;
       if (jidRaw.endsWith("@lid")) {
         // LID mode: p.phoneNumber holds the real phone JID e.g. "919234038011@s.whatsapp.net"
-        phone = extractPhoneFromJid((p as any).phoneNumber || "") || extractPhoneFromJid(jidRaw);
+        const phoneJid: string = (p as any).phoneNumber || "";
+        phone = extractPhoneFromJid(phoneJid) || extractPhoneFromJid(jidRaw);
+        operationJid = phoneJid || jidRaw;
       } else {
         phone = extractPhoneFromJid(jidRaw) || "";
+        operationJid = jidRaw;
       }
       return {
-        jid: jidRaw,
+        jid: operationJid,
         phone,
         isAdmin: p.admin === "admin" || p.admin === "superadmin",
         isSuperAdmin: p.admin === "superadmin",
@@ -1876,15 +1883,16 @@ export async function demoteGroupAdmin(
   userId: string,
   groupId: string,
   participantJid: string
-): Promise<boolean> {
+): Promise<{ success: boolean; error?: string }> {
   const session = useSession(userId);
-  if (!session?.socket || !session.connected) return false;
+  if (!session?.socket || !session.connected) return { success: false, error: "Not connected" };
   try {
     await session.socket.groupParticipantsUpdate(groupId, [participantJid], "demote");
-    return true;
+    return { success: true };
   } catch (err: any) {
-    console.error(`[WA][${userId}] Demote admin error:`, err?.message);
-    return false;
+    const msg: string = err?.message || String(err) || "Unknown error";
+    console.error(`[WA][${userId}] Demote admin error:`, msg);
+    return { success: false, error: msg };
   }
 }
 
