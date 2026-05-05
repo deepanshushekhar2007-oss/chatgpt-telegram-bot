@@ -646,7 +646,7 @@ async function createSocket(
         session.codeRequested = false;
         session.retryCount++;
 
-        const max515Retries = isQrSession ? 3 : 8;
+        const max515Retries = 8;
         if (session.retryCount > max515Retries) {
           clearAllSessionTimers(userId);
           sessions.delete(userId);
