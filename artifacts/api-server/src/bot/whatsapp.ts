@@ -6,7 +6,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
-import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
+import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions, savePairingMode } from "./mongo-auth-state";
 
 const logger = pino({ level: "silent" });
 
@@ -262,7 +262,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     pairingCode: null,
     qrCode: null,
     qrExpiresAt: null,
-    pairingMode: "code",
+    pairingMode: stored.pairingMode || "code",
     connecting: true,
     phoneNumber: stored.phoneNumber,
     codeRequested: false,
@@ -280,7 +280,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     await createSocket(
       stored.userId,
       stored.phoneNumber,
-      "code",
+      stored.pairingMode || "code",
       () => {},
       () => {},
       () => console.log(`[WA][LAZY][${stored.userId}] Session restored on demand`),
@@ -508,6 +508,7 @@ async function createSocket(
       session.qrCode = null;
       session.qrExpiresAt = null;
       session.retryCount = 0;
+      savePairingMode(userId, pairingMode).catch(() => {});
       onConnected();
     }
 
@@ -894,7 +895,7 @@ export async function refreshWhatsAppSession(
   }
 
   const { state } = await useMongoDBAuthState(userId);
-  if (!state.creds.registered) {
+  if (!state.creds.registered && !state.creds.me?.id) {
     onError("Saved credentials are missing — please use Connect WhatsApp instead.");
     return;
   }
@@ -912,7 +913,7 @@ export async function refreshWhatsAppSession(
   existing.connecting = true;
   existing.connectLock = true;
   existing.retryCount = 0;
-  existing.wasConnected = false;
+  existing.wasConnected = true;
 
   const phoneNumber = existing.phoneNumber || "";
 
@@ -1237,22 +1238,60 @@ export async function joinGroupWithLink(
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
   }
-  try {
-    const code = extractInviteCode(link);
-    const result = await session.socket.groupAcceptInvite(code);
-    let groupName = "Group";
-    if (typeof result === "string" && result) {
-      try {
-        const metadata = await session.socket.groupMetadata(result);
-        groupName = metadata?.subject || result;
-      } catch {
-        groupName = result;
+  const MAX_CONFLICT_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_CONFLICT_RETRIES; attempt++) {
+    try {
+      const code = extractInviteCode(link);
+      const result = await session.socket.groupAcceptInvite(code);
+      let groupName = "Group";
+      if (typeof result === "string" && result) {
+        try {
+          const metadata = await session.socket.groupMetadata(result);
+          groupName = metadata?.subject || result;
+        } catch {
+          groupName = result;
+        }
       }
+      return { success: true, groupName };
+    } catch (err: any) {
+      const msg = (err?.message || "").toLowerCase();
+      console.error(`[WA][${userId}] Join group error (attempt ${attempt}):`, err?.message);
+      if (msg.includes("conflict") && attempt < MAX_CONFLICT_RETRIES) {
+        await new Promise((r) => setTimeout(r, 3000 * attempt));
+        if (!session.socket || !session.connected) {
+          return { success: false, error: "WhatsApp not connected" };
+        }
+        continue;
+      }
+      if (msg.includes("conflict")) {
+        return { success: false, error: "Server busy — please wait a moment and try again" };
+      }
+      return { success: false, error: err?.message || "Failed to join" };
     }
-    return { success: true, groupName };
+  }
+  return { success: false, error: "Failed to join after retries" };
+}
+
+export async function resetGroupInviteLink(
+  userId: string,
+  groupId: string
+): Promise<{ success: boolean; newLink?: string; error?: string }> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) {
+    return { success: false, error: "WhatsApp not connected" };
+  }
+  try {
+    await session.socket.groupRevokeInvite(groupId);
+    await new Promise((r) => setTimeout(r, 1200));
+    if (!session.socket || !session.connected) {
+      return { success: false, error: "Disconnected during reset" };
+    }
+    const newCode = await session.socket.groupInviteCode(groupId);
+    if (!newCode) return { success: false, error: "Could not fetch new link" };
+    return { success: true, newLink: `https://chat.whatsapp.com/${newCode}` };
   } catch (err: any) {
-    console.error(`[WA][${userId}] Join group error:`, err?.message);
-    return { success: false, error: err?.message || "Failed to join" };
+    console.error(`[WA][${userId}] Reset invite link error:`, err?.message);
+    return { success: false, error: err?.message || "Failed to reset link" };
   }
 }
 

@@ -170,10 +170,10 @@ export async function useMongoDBAuthState(userId: string) {
   };
 }
 
-export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: string; phoneNumber: string }>> {
+export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: string; phoneNumber: string; pairingMode: "qr" | "code" }>> {
   const credsCollection = await getCollection("wa_creds");
-  const docs = await credsCollection.find({}, { projection: { _id: 1, userId: 1, creds: 1 } }).toArray();
-  const sessions: Array<{ userId: string; phoneNumber: string }> = [];
+  const docs = await credsCollection.find({}, { projection: { _id: 1, userId: 1, creds: 1, pairingMode: 1 } }).toArray();
+  const sessions: Array<{ userId: string; phoneNumber: string; pairingMode: "qr" | "code" }> = [];
 
   for (const doc of docs) {
     const userId = String(doc.userId || doc._id || "");
@@ -185,19 +185,28 @@ export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: stri
       const rawId = creds?.me?.id || creds?.me?.lid || "";
       const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
       phoneNumber = digits ? `+${digits}` : "";
-      // Include QR-connected sessions that have me.id set even if registered flag
-      // is not yet true (can happen when creds.update fires before registered=true
-      // is persisted — common for QR pairing flow timing edge cases).
       const hasConnected = creds?.registered === true || (creds?.me?.id && String(creds.me.id).includes("@"));
       if (!hasConnected) continue;
     } catch {
       continue;
     }
 
-    sessions.push({ userId, phoneNumber });
+    const pairingMode: "qr" | "code" = (doc.pairingMode === "qr") ? "qr" : "code";
+    sessions.push({ userId, phoneNumber, pairingMode });
   }
 
   return sessions;
+}
+
+export async function savePairingMode(userId: string, mode: "qr" | "code"): Promise<void> {
+  try {
+    const credsCollection = await getCollection("wa_creds");
+    await credsCollection.updateOne(
+      { _id: userId as any },
+      { $set: { pairingMode: mode } }
+    );
+  } catch {
+  }
 }
 
 export async function clearMongoSession(userId: string): Promise<void> {
@@ -257,7 +266,7 @@ export async function cleanupStaleSessions(
     let isRegistered = false;
     try {
       const creds = deserialize(doc.creds);
-      isRegistered = creds?.registered === true;
+      isRegistered = creds?.registered === true || !!(creds?.me?.id && String(creds.me.id).includes("@"));
     } catch {
       // Corrupt doc — mark for deletion
       toDelete.push(userId);
