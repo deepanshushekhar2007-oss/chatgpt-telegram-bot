@@ -1326,6 +1326,165 @@ interface JoinSession {
 }
 const joinSessions = new Map<number, JoinSession>();
 
+// ─── Reset-by-Link Resolve Session ───────────────────────────────────────────
+// Allows users to send multiple batches of links while resolution is running.
+// New links are appended to the queue and the single progress message is updated
+// in-place — no message deletion, no lost progress.
+
+interface RlResolveSession {
+  chatId: number;
+  msgId: number;
+  queue: string[];                              // pending links still to resolve
+  resolved: Array<{ id: string; subject: string }>; // successfully resolved groups
+  failed: string[];                             // links that failed after retry
+  done: number;                                 // total processed so far
+  running: boolean;
+  cancelled: boolean;
+  patterns: any[];                              // carry-forward from resetLinkData
+  patternPage?: number;
+}
+
+const rlResolveSessions = new Map<number, RlResolveSession>();
+
+function buildRlProgressBar(done: number, total: number): string {
+  const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+  const filled = Math.round((done / Math.max(total, 1)) * 20);
+  return `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
+}
+
+function buildRlResolveStatusText(session: RlResolveSession): string {
+  const total = session.done + session.queue.length;
+  const bar = buildRlProgressBar(session.done, total);
+  return (
+    `🔍 <b>Resolving Links...</b>\n\n` +
+    `${bar}\n\n` +
+    `✅ Resolved: <b>${session.resolved.length}</b>   ❌ Failed: <b>${session.failed.length}</b>\n` +
+    (session.queue.length > 0
+      ? `⌛ <b>${session.queue.length}</b> link(s) still in queue...`
+      : `⏳ Finishing up...`)
+  );
+}
+
+async function runRlResolveBackground(userId: number): Promise<void> {
+  const session = rlResolveSessions.get(userId);
+  if (!session || session.running) return;
+  session.running = true;
+
+  const BATCH_SIZE = 5;
+  const INTER_CALL_DELAY = 300;
+  const BATCH_PAUSE = 2000;
+
+  try {
+    while (session.queue.length > 0 && !session.cancelled) {
+      const link = session.queue.shift()!;
+
+      // Throttle: pause after every BATCH_SIZE items
+      if (session.done > 0 && session.done % BATCH_SIZE === 0) {
+        try {
+          await bot.api.editMessageText(session.chatId, session.msgId,
+            buildRlResolveStatusText(session) + `\n\n<i>Pausing briefly to avoid rate limits...</i>`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE));
+      } else if (session.done > 0) {
+        await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
+      }
+
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) {
+        session.resolved.push({ id: info.id, subject: info.subject });
+      } else {
+        session.failed.push(link);
+      }
+      session.done++;
+
+      // Update live progress bar after each link
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId,
+          buildRlResolveStatusText(session),
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+    }
+
+    // Retry failed links once after the queue drains
+    if (session.failed.length > 0 && !session.cancelled) {
+      const toRetry = [...session.failed];
+      session.failed.length = 0;
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId,
+          `🔄 <b>Retrying ${toRetry.length} failed link(s)...</b>\n\n` +
+          `✅ ${session.resolved.length} resolved so far\n\n` +
+          `<i>Waiting a moment before retrying...</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+      await new Promise((r) => setTimeout(r, 5000));
+      for (let li = 0; li < toRetry.length; li++) {
+        if (li > 0) await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
+        const info = await getGroupIdFromLink(String(userId), toRetry[li]);
+        if (info) {
+          session.resolved.push({ id: info.id, subject: info.subject });
+        } else {
+          session.failed.push(toRetry[li]);
+        }
+      }
+    }
+
+    rlResolveSessions.delete(userId);
+
+    if (!session.resolved.length) {
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId,
+          "❌ <b>Could not resolve any of the provided links.</b>\n\n" +
+          "Make sure the links are valid and you are a member of those groups.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+        );
+      } catch {}
+      userStates.delete(userId);
+      return;
+    }
+
+    // Transition: update user state and show the confirmation review
+    const state = userStates.get(userId);
+    if (!state) return;
+
+    state.resetLinkData = {
+      allGroups: session.resolved,
+      patterns: session.patterns || [],
+      selectedIndices: new Set(session.resolved.map((_, i) => i)),
+      page: 0,
+      patternPage: session.patternPage,
+    };
+    state.step = "reset_link_select";
+
+    const groupList = session.resolved.slice(0, 30).map(r => `• ${esc(r.subject)}`).join("\n");
+    const more = session.resolved.length > 30 ? `\n... +${session.resolved.length - 30} more` : "";
+    let reviewText =
+      `🔗 <b>Reset Invite Links — Review</b>\n\n` +
+      `<b>${session.resolved.length} group(s) will be reset:</b>\n\n${groupList}${more}\n\n`;
+    if (session.failed.length > 0) {
+      reviewText += `⚠️ <b>${session.failed.length} link(s) could not be resolved (will be skipped).</b>\n\n`;
+    }
+    reviewText +=
+      `⚠️ <b>This will revoke all current invite links</b> and generate new ones.\n` +
+      `Anyone with the old link will NOT be able to join.\n\n` +
+      `Are you sure you want to proceed?`;
+
+    try {
+      await bot.api.editMessageText(session.chatId, session.msgId, reviewText, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Yes, Reset Links", "rl_proceed_confirm")
+          .text("❌ Cancel", "main_menu"),
+      });
+    } catch {}
+  } finally {
+    session.running = false;
+  }
+}
+
 function buildJoinProgressBar(done: number, total: number): string {
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
   const filled = Math.round((done / Math.max(total, 1)) * 20);
@@ -13684,118 +13843,45 @@ bot.on("message:text", async (ctx) => {
       );
       return;
     }
-    const resolvingMsg = await ctx.reply(
-      `🔍 <b>Resolving ${cleanLinks.length} link(s)...</b>\n\n⌛ Please wait...`,
-      { parse_mode: "HTML" }
-    );
-    const resolveChatId = ctx.chat.id;
-    const resolveMsgId = resolvingMsg.message_id;
 
-    const resolved: Array<{ id: string; subject: string }> = [];
-    const failedLinks: string[] = [];
-    const BATCH_SIZE = 5;
-    const INTER_CALL_DELAY = 300; // 300 ms between every call to avoid rate-limit
-    const BATCH_PAUSE = 2000;     // extra 2 s pause after each batch of 5
-
-    for (let li = 0; li < cleanLinks.length; li++) {
-      const link = cleanLinks[li];
-
-      // Throttle: pause after each batch to respect WhatsApp rate limits
-      if (li > 0 && li % BATCH_SIZE === 0) {
-        try {
-          await bot.api.editMessageText(
-            resolveChatId,
-            resolveMsgId,
-            `🔍 <b>Resolving links...</b>\n\n` +
-            `✅ ${resolved.length} resolved, ❌ ${failedLinks.length} failed so far\n` +
-            `⏳ ${li}/${cleanLinks.length} processed...\n\n` +
-            `<i>Pausing briefly to avoid rate limits...</i>`,
-            { parse_mode: "HTML" }
-          );
-        } catch {}
-        await new Promise((r) => setTimeout(r, BATCH_PAUSE));
-      } else if (li > 0) {
-        await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
-      }
-
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) {
-        resolved.push({ id: info.id, subject: info.subject });
-      } else {
-        failedLinks.push(link);
-      }
-    }
-
-    // Retry failed links once with a longer pause
-    if (failedLinks.length > 0) {
-      try {
-        await bot.api.editMessageText(
-          resolveChatId,
-          resolveMsgId,
-          `🔄 <b>Retrying ${failedLinks.length} failed link(s)...</b>\n\n` +
-          `✅ ${resolved.length} resolved so far\n\n` +
-          `<i>Waiting a moment before retrying...</i>`,
-          { parse_mode: "HTML" }
-        );
-      } catch {}
-      await new Promise((r) => setTimeout(r, 5000));
-      const stillFailed: string[] = [];
-      for (let li = 0; li < failedLinks.length; li++) {
-        if (li > 0) await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
-        const info = await getGroupIdFromLink(String(userId), failedLinks[li]);
-        if (info) {
-          resolved.push({ id: info.id, subject: info.subject });
-        } else {
-          stillFailed.push(failedLinks[li]);
-        }
-      }
-      failedLinks.length = 0;
-      stillFailed.forEach((l) => failedLinks.push(l));
-    }
-
-    if (!resolved.length) {
-      try {
-        await bot.api.editMessageText(resolveChatId, resolveMsgId,
-          "❌ <b>Could not resolve any of the provided links.</b>\n\n" +
-          "Make sure the links are valid and you are a member of those groups.",
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-        );
-      } catch {}
-      userStates.delete(userId);
+    const existing = rlResolveSessions.get(userId);
+    if (existing && !existing.cancelled) {
+      // ── Batch mode: append new links to the running resolve session ─────────
+      existing.queue.push(...cleanLinks);
+      const total = existing.done + existing.queue.length;
+      await ctx.reply(
+        `➕ <b>${cleanLinks.length} link(s) added to resolve queue!</b>\n\n` +
+        `✅ Already resolved: <b>${existing.resolved.length}</b>\n` +
+        `⌛ Remaining in queue: <b>${existing.queue.length}</b>\n` +
+        `📋 Total: <b>${total}</b>\n\n` +
+        `<i>Progress bar in the resolving message will update automatically.</i>`,
+        { parse_mode: "HTML" }
+      );
+      // Wake the runner in case it paused after draining the previous queue
+      void runRlResolveBackground(userId);
       return;
     }
 
-    // Update resetLinkData with resolved groups (all pre-selected)
-    state.resetLinkData = {
-      allGroups: resolved,
+    // ── New resolve session ─────────────────────────────────────────────────
+    const statusMsg = await ctx.reply(
+      `🔍 <b>Resolving ${cleanLinks.length} link(s)...</b>\n\n` +
+      buildRlProgressBar(0, cleanLinks.length),
+      { parse_mode: "HTML" }
+    );
+    const session: RlResolveSession = {
+      chatId: ctx.chat.id,
+      msgId: statusMsg.message_id,
+      queue: [...cleanLinks],
+      resolved: [],
+      failed: [],
+      done: 0,
+      running: false,
+      cancelled: false,
       patterns: state.resetLinkData.patterns || [],
-      selectedIndices: new Set(resolved.map((_, i) => i)),
-      page: 0,
       patternPage: state.resetLinkData.patternPage,
     };
-    state.step = "reset_link_select";
-
-    const groupList = resolved.slice(0, 30).map(r => `• ${esc(r.subject)}`).join("\n");
-    const more = resolved.length > 30 ? `\n... +${resolved.length - 30} more` : "";
-    let reviewText =
-      `🔗 <b>Reset Invite Links — Review</b>\n\n` +
-      `<b>${resolved.length} group(s) will be reset:</b>\n\n${groupList}${more}\n\n`;
-    if (failedLinks.length > 0) {
-      reviewText += `⚠️ <b>${failedLinks.length} link(s) could not be resolved (will be skipped).</b>\n\n`;
-    }
-    reviewText +=
-      `⚠️ <b>This will revoke all current invite links</b> and generate new ones.\n` +
-      `Anyone with the old link will NOT be able to join.\n\n` +
-      `Are you sure you want to proceed?`;
-
-    try {
-      await bot.api.editMessageText(resolveChatId, resolveMsgId, reviewText, {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("✅ Yes, Reset Links", "rl_proceed_confirm")
-          .text("❌ Cancel", "main_menu"),
-      });
-    } catch {}
+    rlResolveSessions.set(userId, session);
+    void runRlResolveBackground(userId);
     return;
   }
 
