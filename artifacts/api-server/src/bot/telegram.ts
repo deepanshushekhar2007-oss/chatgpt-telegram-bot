@@ -14450,15 +14450,26 @@ async function restoreAutoAccepterJobs(): Promise<void> {
         if (remaining <= 0) {
           console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing.`);
           await deleteAutoAccepterJob(saved.userId);
+          // Notify user that the job expired while the bot was down
+          try {
+            await bot.api.sendMessage(
+              saved.chatId,
+              `🛡️ <b>Auto Request Accepter — Expired</b>\n\n` +
+              `The bot was restarted and your Auto Request Accepter session had already expired by the time the bot came back online.\n\n` +
+              `✅ <b>Total Accepted (before restart):</b> ${saved.totalAccepted}\n\n` +
+              `You can start a new session anytime.`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+            );
+          } catch {}
           continue;
         }
 
-        // Make sure the WhatsApp session is connected before re-creating the job.
-        const restored = await ensureSessionLoaded(String(saved.userId));
-        if (!restored) {
-          console.warn(`[AUTO_ACCEPTER] Could not restore WA session for userId=${saved.userId} — skipping job restore.`);
-          await deleteAutoAccepterJob(saved.userId);
-          continue;
+        // Try to reconnect the WhatsApp session. Even if it fails here,
+        // we still create the job — runAutoAccepterPoll already has its own
+        // lazy-reconnect logic and will retry on every poll tick.
+        const waRestored = await ensureSessionLoaded(String(saved.userId));
+        if (!waRestored) {
+          console.warn(`[AUTO_ACCEPTER] WA session not immediately available for userId=${saved.userId} — job will still run; poll will retry.`);
         }
 
         const job: AutoAccepterJob = {
@@ -14484,7 +14495,22 @@ async function restoreAutoAccepterJobs(): Promise<void> {
         // Run a poll immediately so the status message is refreshed.
         void runAutoAccepterPoll(job);
 
-        console.log(`[AUTO_ACCEPTER] Restored job for userId=${saved.userId} (${saved.groupIds.length} groups, ${Math.ceil(remaining / 60000)} min remaining, totalAccepted=${saved.totalAccepted})`);
+        const remainMins = Math.ceil(remaining / 60000);
+        console.log(`[AUTO_ACCEPTER] Restored job for userId=${saved.userId} (${saved.groupIds.length} groups, ${remainMins} min remaining, totalAccepted=${saved.totalAccepted})`);
+
+        // Notify the user that the auto-accepter has resumed after the restart.
+        try {
+          await bot.api.sendMessage(
+            saved.chatId,
+            `🔄 <b>Auto Request Accepter — Resumed</b>\n\n` +
+            `The bot was restarted and your Auto Request Accepter has been automatically resumed.\n\n` +
+            `✅ <b>Accepted so far:</b> ${saved.totalAccepted}\n` +
+            `⏰ <b>Time remaining:</b> ~${remainMins} min\n` +
+            `📋 <b>Groups:</b> ${saved.groupIds.length}\n\n` +
+            `<i>No action needed — it is running in the background.</i>`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job").text("🏠 Menu", "main_menu") }
+          );
+        } catch {}
       } catch (err: any) {
         console.error(`[AUTO_ACCEPTER] Failed to restore job for userId=${saved.userId}:`, err?.message);
       }
