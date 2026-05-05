@@ -137,6 +137,62 @@ let cachedBotUsername: string | null = null;
 // the user actually joins the channel.
 //
 // Entries are dropped after PENDING_REFERRAL_TTL_MS or after they're consumed
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory TTL cache — short-lived (30–60 s) cache for hot DB look-ups
+// (ban status, access status, stored-session flag) so repeated /start and
+// button presses never hit MongoDB for the same user twice in quick
+// succession. Memory footprint is negligible: each entry is ~100 bytes;
+// 5 000 entries ≈ 500 KB. The cache auto-evicts on read when expired and a
+// periodic sweep clears stale entries to prevent unbounded growth over days.
+// ─────────────────────────────────────────────────────────────────────────────
+class TTLCache<K, V> {
+  private m = new Map<K, { v: V; exp: number }>();
+  private hits = 0;
+  private misses = 0;
+  constructor(private ttlMs: number, private max = 5_000) {}
+  get(k: K): V | undefined {
+    const e = this.m.get(k);
+    if (!e) { this.misses++; return undefined; }
+    if (Date.now() > e.exp) { this.m.delete(k); this.misses++; return undefined; }
+    this.hits++;
+    return e.v;
+  }
+  set(k: K, v: V): void {
+    if (this.m.size >= this.max) {
+      // Evict the oldest entry to stay within the cap.
+      this.m.delete(this.m.keys().next().value!);
+    }
+    this.m.set(k, { v, exp: Date.now() + this.ttlMs });
+  }
+  del(k: K): void { this.m.delete(k); }
+  get size() { return this.m.size; }
+  get hitCount() { return this.hits; }
+  get missCount() { return this.misses; }
+  /** Remove all entries that have already expired. */
+  sweep(): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [k, e] of this.m) {
+      if (now > e.exp) { this.m.delete(k); removed++; }
+    }
+    return removed;
+  }
+}
+
+/** Ban status per userId — 45 s TTL. */
+const bannedCache = new TTLCache<number, boolean>(45_000);
+/** Access status per userId — 45 s TTL. */
+const accessCache = new TTLCache<number, boolean>(45_000);
+/** Whether user has a stored WA session — 60 s TTL. Invalidated on disconnect/logout. */
+const hasSessionCache = new TTLCache<string, boolean>(60_000);
+
+// Periodic sweep: remove expired entries from all caches every 5 minutes.
+setInterval(() => {
+  bannedCache.sweep();
+  accessCache.sweep();
+  hasSessionCache.sweep();
+}, 5 * 60 * 1000);
+
 // by check_joined / clearUserMemoryState. Cap is small (one entry per user
 // per /start) so unbounded growth is not a real concern, but the TTL sweep
 // keeps it tidy if a user opens the link and never joins.
@@ -378,8 +434,11 @@ bot.use(async (ctx, next) => {
       || cbData.startsWith("lang_")
       || cbData.startsWith("force_sub_");
     if (cbData && !skipReconnect && !isConnected(String(userId))) {
-      let hasStored = false;
-      try { hasStored = await hasStoredWhatsAppSession(String(userId)); } catch {}
+      // Use session cache so this check is instant (no MongoDB round-trip).
+      let hasStored = hasSessionCache.get(String(userId));
+      if (hasStored === undefined) {
+        try { hasStored = await hasStoredWhatsAppSession(String(userId)); hasSessionCache.set(String(userId), hasStored); } catch { hasStored = false; }
+      }
       if (hasStored) {
         // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
         // does not fire and cause a silent "nothing happens" drop.
@@ -399,7 +458,7 @@ bot.use(async (ctx, next) => {
         try {
           connected = await waitForWhatsAppConnected(String(userId), {
             timeoutMs: 20_000,
-            pollMs: 500,
+            pollMs: 200, // reduced from 500 ms → faster detection
           });
         } catch {}
 
@@ -657,11 +716,19 @@ function isAdmin(userId: number): boolean {
 }
 
 async function isBanned(userId: number): Promise<boolean> {
-  return isUserBanned(userId);
+  const cached = bannedCache.get(userId);
+  if (cached !== undefined) return cached;
+  const result = await isUserBanned(userId);
+  bannedCache.set(userId, result);
+  return result;
 }
 
 async function hasAccess(userId: number): Promise<boolean> {
-  return hasUserAccess(userId, ADMIN_USER_ID);
+  const cached = accessCache.get(userId);
+  if (cached !== undefined) return cached;
+  const result = await hasUserAccess(userId, ADMIN_USER_ID);
+  accessCache.set(userId, result);
+  return result;
 }
 
 async function getAccessState(userId: number): Promise<AccessState> {
@@ -1317,7 +1384,12 @@ async function ensureWhatsAppRestored(userId: number): Promise<void> {
   const uid = String(userId);
   if (isConnected(uid)) return;
   try {
-    const stored = await hasStoredWhatsAppSession(uid);
+    // Use session cache to avoid a MongoDB round-trip on every update.
+    let stored = hasSessionCache.get(uid);
+    if (stored === undefined) {
+      stored = await hasStoredWhatsAppSession(uid);
+      hasSessionCache.set(uid, stored);
+    }
     if (!stored) return;
     // Fire-and-forget — ensureSessionLoaded handles its own concurrency guards.
     ensureSessionLoaded(uid).catch((err) => {
@@ -2124,8 +2196,10 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
 
   // No saved session at all — nothing to wait for, the menu's "Connect
   // WhatsApp" button will handle pairing.
-  let hasStored = false;
-  try { hasStored = await hasStoredWhatsAppSession(uid); } catch {}
+  let hasStored = hasSessionCache.get(uid);
+  if (hasStored === undefined) {
+    try { hasStored = await hasStoredWhatsAppSession(uid); hasSessionCache.set(uid, hasStored); } catch { hasStored = false; }
+  }
   if (!hasStored) return;
 
   // Send the initial progress message; if it fails, abort silently — the
@@ -2170,7 +2244,7 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
 
   let connected = false;
   try {
-    connected = await waitForWhatsAppConnected(uid, { timeoutMs: TOTAL_MS, pollMs: 500 });
+    connected = await waitForWhatsAppConnected(uid, { timeoutMs: TOTAL_MS, pollMs: 200 });
   } catch {}
   stopped = true;
   clearInterval(ticker);
@@ -2214,7 +2288,12 @@ function parseStartPayload(text: string | undefined): string {
 
 bot.command("start", async (ctx) => {
   const userId = ctx.from!.id;
-  await trackUser(userId);
+  // trackUser is a fire-and-forget write — we don't need to await it
+  // before proceeding; it just records the user in MongoDB asynchronously.
+  void trackUser(userId);
+
+  // isBanned uses an in-memory 45 s cache, so this is near-instant for
+  // returning users and only hits MongoDB on the very first call per window.
   if (await isBanned(userId)) {
     await ctx.reply("🚫 You are banned from using this bot.");
     return;
@@ -2243,8 +2322,10 @@ bot.command("start", async (ctx) => {
 
   // ── Referral award (channel-already-joined fast path) ─────────────────
   // User is already a channel member, so award the referral right now.
+  // Fire-and-forget: the award is non-blocking and the user can already
+  // see the menu while MongoDB records the credit in the background.
   if (referrerId && Number.isFinite(referrerId)) {
-    await processReferralAward(userId, referrerId);
+    void processReferralAward(userId, referrerId);
   }
 
   // ── First-time users (no language set yet) → language picker FIRST.
@@ -2267,31 +2348,33 @@ bot.command("start", async (ctx) => {
     return;
   }
 
-  // ── Returning users (language already set).
+  // ── Returning users (language already set). ────────────────────────────
+  // Run ensureFreeTrial + hasAccess in PARALLEL — they are independent
+  // MongoDB reads and together take the same time as the slower of the two
+  // instead of the sum of both.
+  userStates.delete(userId);
+  const [trialResult, userHasAccess] = await Promise.all([
+    isAdmin(userId)
+      ? Promise.resolve({ created: false as boolean, expiresAt: 0 })
+      : ensureFreeTrial(userId, FREE_TRIAL_MS),
+    isAdmin(userId) ? Promise.resolve(true) : hasAccess(userId),
+  ]);
   // Start their one-and-only 24h free trial if they don't have one yet.
   // The trial entry is permanent in MongoDB (`freeTrials` map keyed by
   // userId) so the same user can never receive a second free trial.
   // Admin is skipped — admin already has unlimited access, the trial UI
   // would be misleading for them.
-  let trialJustStarted: { expiresAt: number } | null = null;
-  if (!isAdmin(userId)) {
-    const trial = await ensureFreeTrial(userId, FREE_TRIAL_MS);
-    if (trial.created) trialJustStarted = { expiresAt: trial.expiresAt };
-  }
-
-  // No access gate here either. The gate lives inside each feature
-  // handler (see hasAccess() / sendReferRequired() call sites). This
-  // means /start always shows the menu with all buttons — even for
-  // users whose trial has expired. They see the gate only when they
-  // actually try to USE a feature.
-  userStates.delete(userId);
+  const trialJustStarted = (!isAdmin(userId) && trialResult.created)
+    ? { expiresAt: trialResult.expiresAt } : null;
 
   // Show live "connecting WhatsApp" progress bar before the menu, so
   // users immediately see the status of their saved WhatsApp session.
   // Skip this for users who have no access — for them WhatsApp is
   // unusable until they renew, so spending time/RAM on a connection
   // attempt is wasteful and could trigger needless reconnects.
-  const userHasAccess = isAdmin(userId) || (await hasAccess(userId));
+  // The WA progress function sends its first message instantly (the
+  // "⏳ Connecting…" toast) and then waits in the background; awaiting
+  // it here keeps message ordering correct (progress above menu).
   if (userHasAccess) {
     await showWhatsAppConnectingProgress(ctx, userId);
   }
@@ -3975,6 +4058,10 @@ bot.command("memory", async (ctx) => {
     `  🗂️ User states: <b>${userStates.size}</b>\n` +
     `  📷 QR pairings: <b>${qrPairings.size}</b>\n` +
     `  📖 Help pages cached: <b>${helpPages.size}</b>\n\n` +
+    `🚀 <b>Speed Cache (in-memory TTL):</b>\n` +
+    `  🔴 Ban cache: <b>${bannedCache.size}</b> entries | hits: ${bannedCache.hitCount} / misses: ${bannedCache.missCount}\n` +
+    `  🟢 Access cache: <b>${accessCache.size}</b> entries | hits: ${accessCache.hitCount} / misses: ${accessCache.missCount}\n` +
+    `  📱 Session cache: <b>${hasSessionCache.size}</b> entries | hits: ${hasSessionCache.hitCount} / misses: ${hasSessionCache.missCount}\n\n` +
     `🔥 <b>Top RAM Consumers (Top 5):</b>\n` +
     topUsersBlock +
     `  ─────────────────\n` +
@@ -9296,10 +9383,11 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
     "Send WhatsApp group invite links (one per message or multiple at once):\n" +
     "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
     "⚠️ You must be an admin in those groups.\n" +
-    "Send at least one link first, then the Done button will appear.",
+    "<i>Click Done when you have sent all links.</i>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
+        .text("✅ Done", "rl_link_done").row()
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -9434,21 +9522,17 @@ async function runRlResolvePipelineBackground(
   const failedResults = results.filter(r => !r.newLink);
 
   let resultText = `🔗 <b>Reset by Link — Result</b>\n\n`;
-  resultText += `📊 Total Links: ${total} | ✅ Reset: ${resetOk} | ❌ Failed: ${failedResults.length}\n\n`;
   if (wasCancelled) resultText += `⛔ <b>Cancelled after ${done}/${total}.</b>\n\n`;
 
   for (const r of successResults) {
     resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
   if (failedResults.length > 0) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed to Reset (${failedResults.length} link(s)):</b>\n`;
+    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed (${failedResults.length}):</b>\n`;
     for (const r of failedResults) {
       const reason = r.resolveErr ? "Link resolve nahi hua" : (r.resetErr || "Failed");
       resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(reason)}\n`;
     }
-  }
-  if (!wasCancelled) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n✅ ${resetOk}/${total} links reset successfully!`;
   }
 
   const chunks = splitMessage(resultText, 4000);
@@ -9569,7 +9653,6 @@ async function resetLinkBackground(
   const failedResults = results.filter(r => !r.newLink);
 
   let resultText = `🔗 <b>Reset Link Result</b>\n\n`;
-  resultText += `📊 Total Groups: ${groups.length} | ✅ Reset: ${successCount} | ❌ Failed: ${failedResults.length}\n\n`;
   if (wasCancelled) resultText += `⛔ <b>Cancelled after ${results.length}/${groups.length} group(s).</b>\n\n`;
 
   // Show all successful resets first with their new links
@@ -10252,6 +10335,9 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
   }
   // 1. Drop the live Baileys socket + auth state and pending reconnect timers.
   await disconnectWhatsApp(String(userId));
+  // 1a. Invalidate the session cache so the next /start or button press
+  //     does not incorrectly think a stored session still exists.
+  hasSessionCache.del(String(userId));
   // 2. Drop this user's slice of every per-user in-memory Map/Set so RAM
   //    actually returns to baseline instead of being held by orphaned state.
   clearUserMemoryState(userId);
@@ -10462,6 +10548,7 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   const autoUserId = getAutoUserId(String(userId));
   // Drop the auto-chat Baileys socket + its pending reconnect timers.
   await disconnectWhatsApp(autoUserId);
+  hasSessionCache.del(autoUserId);
   // Stop and forget the auto-chat session object.
   const session = autoChatSessions.get(userId);
   if (session) { session.cancelled = true; session.running = false; }
@@ -14932,7 +15019,17 @@ async function restoreAutoAccepterJobs(): Promise<void> {
         if (remaining <= 0) {
           console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing.`);
           await deleteAutoAccepterJob(saved.userId);
-          // Session already expired before restart — user was already notified, skip re-notifying
+          // Notify user that the job expired while the bot was down
+          try {
+            await bot.api.sendMessage(
+              saved.chatId,
+              `🛡️ <b>Auto Request Accepter — Expired</b>\n\n` +
+              `The bot was restarted and your Auto Request Accepter session had already expired by the time the bot came back online.\n\n` +
+              `✅ <b>Total Accepted (before restart):</b> ${saved.totalAccepted}\n\n` +
+              `You can start a new session anytime.`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+            );
+          } catch {}
           continue;
         }
 
