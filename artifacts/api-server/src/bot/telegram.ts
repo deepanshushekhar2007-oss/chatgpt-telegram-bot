@@ -14384,11 +14384,23 @@ export async function startBot() {
     if (!Number.isFinite(telegramId)) return;
     const phoneText = phoneNumber ? phoneNumber : "(unknown)";
     const accountLabel = isAuto ? "Auto Chat WhatsApp" : "WhatsApp";
+    const reasonLower = (reason || "").toLowerCase();
+    const isQrExpiry =
+      reasonLower.includes("qr session") ||
+      reasonLower.includes("qr code") ||
+      reasonLower.includes("reconnect via qr");
+
+    let reconnectHint = `Please reconnect to continue using the bot.`;
+    if (isQrExpiry) {
+      reconnectHint = `Your QR session is no longer valid.\n\n` +
+        `Tap <b>Reconnect WhatsApp</b> → <b>📷 Pair QR</b> to scan a new QR code and reconnect.`;
+    }
+
     const message =
       `⚠️ <b>${accountLabel} Disconnected</b>\n\n` +
       `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
       `Reason: ${esc(reason || "Unknown")}\n\n` +
-      `Please reconnect to continue using the bot.`;
+      reconnectHint;
     void bot.api.sendMessage(telegramId, message, {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
