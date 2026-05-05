@@ -80,6 +80,10 @@ import {
   loadPendingGroupCreation,
   deletePendingGroupCreation,
   type PersistedGroupSettings,
+  saveAutoAccepterJob,
+  loadAllAutoAccepterJobs,
+  deleteAutoAccepterJob,
+  type PersistedAutoAccepterJob,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -384,8 +388,8 @@ bot.use(async (ctx, next) => {
         try {
           await ctx.editMessageText(
             `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
-            `<i>Aap idle the to disconnect ho gaya tha. ` +
-            `5-15 second mein apne aap button kaam karega.</i>`,
+            `<i>Your session was idle and got disconnected. ` +
+            `It will reconnect automatically in 5–15 seconds.</i>`,
             { parse_mode: "HTML" }
           );
         } catch {}
@@ -402,21 +406,18 @@ bot.use(async (ctx, next) => {
           try {
             await ctx.editMessageText(
               `❌ <b>WhatsApp disconnected</b>\n\n` +
-              `Aapka WhatsApp session disconnect ho gaya hai. Phone me ` +
-              `WhatsApp → Linked Devices kholo, bot wala device check ` +
-              `karo. Agar wahan se hata diya gaya hai to bot me dobara ` +
-              `link karna hoga:\n\n` +
-              `📱 Menu → <b>Connect WhatsApp</b> → QR ya Pairing Code se ` +
-              `re-link karo.`,
+              `Your WhatsApp session has been disconnected.\n\n` +
+              `Please connect a fresh session from the menu:\n` +
+              `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
               { parse_mode: "HTML" }
             );
           } catch {
             try {
               await ctx.reply(
                 `❌ <b>WhatsApp disconnected</b>\n\n` +
-                `Aapka WhatsApp session disconnect ho gaya hai. Menu se ` +
-                `<b>Connect WhatsApp</b> dabake QR ya Pairing Code se ` +
-                `dobara link karo.`,
+                `Your WhatsApp session has been disconnected.\n\n` +
+                `Please connect a fresh session from the menu:\n` +
+                `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
                 { parse_mode: "HTML" }
               );
             } catch {}
@@ -639,8 +640,13 @@ function buildCleanLink(raw: string): string {
 }
 
 function extractLinksFromText(text: string): string[] {
+  // Normalize links that are split across two lines by Telegram rendering:
+  //   "https://chat.whatsapp.com\n/CODE" → "https://chat.whatsapp.com/CODE"
+  const normalized = text
+    .replace(/(chat\.whatsapp\.com)\s*\r?\n\s*\//g, "$1/")
+    .replace(/(https?:\/\/chat\.whatsapp\.com)\s+([A-Za-z0-9]{10,})/g, "$1/$2");
   const regex = /https?:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]+/gi;
-  const matches = text.match(regex);
+  const matches = normalized.match(regex);
   if (!matches) return [];
   return [...new Set(matches.map(buildCleanLink))];
 }
@@ -6071,6 +6077,19 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
       }
     );
   } catch {}
+
+  // Persist updated totalAccepted to MongoDB so count survives a bot restart.
+  void saveAutoAccepterJob({
+    userId: job.userId,
+    groupIds: job.groupIds,
+    groupNames: job.groupNames,
+    durationMs: job.durationMs,
+    endsAt: job.endsAt,
+    chatId: job.chatId,
+    statusMsgId: job.statusMsgId,
+    totalAccepted: job.totalAccepted,
+    savedAt: Date.now(),
+  });
 }
 
 async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled"): Promise<void> {
@@ -6080,6 +6099,9 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled")
   clearInterval(job.pollTimer);
   clearTimeout(job.endTimer);
   autoAccepterJobs.delete(userId);
+
+  // Remove from MongoDB now that the job is finished.
+  void deleteAutoAccepterJob(userId);
 
   // Release the WhatsApp session back to normal idle-eviction rules now that
   // the long-lived job is over. If we forget this, memory eviction can never
@@ -6464,6 +6486,19 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
   };
 
   autoAccepterJobs.set(userId, job);
+
+  // Persist to MongoDB so the job survives a bot restart.
+  void saveAutoAccepterJob({
+    userId,
+    groupIds,
+    groupNames,
+    durationMs,
+    endsAt,
+    chatId,
+    statusMsgId,
+    totalAccepted: 0,
+    savedAt: Date.now(),
+  });
 
   // Protect this user's WhatsApp session from idle-eviction for the entire
   // duration of the job. Without this, after 30 minutes of Telegram inactivity
@@ -13524,13 +13559,64 @@ bot.on("message:text", async (ctx) => {
 
     const resolved: Array<{ id: string; subject: string }> = [];
     const failedLinks: string[] = [];
-    for (const link of cleanLinks) {
+    const BATCH_SIZE = 5;
+    const INTER_CALL_DELAY = 300; // 300 ms between every call to avoid rate-limit
+    const BATCH_PAUSE = 2000;     // extra 2 s pause after each batch of 5
+
+    for (let li = 0; li < cleanLinks.length; li++) {
+      const link = cleanLinks[li];
+
+      // Throttle: pause after each batch to respect WhatsApp rate limits
+      if (li > 0 && li % BATCH_SIZE === 0) {
+        try {
+          await bot.api.editMessageText(
+            resolveChatId,
+            resolveMsgId,
+            `🔍 <b>Resolving links...</b>\n\n` +
+            `✅ ${resolved.length} resolved, ❌ ${failedLinks.length} failed so far\n` +
+            `⏳ ${li}/${cleanLinks.length} processed...\n\n` +
+            `<i>Pausing briefly to avoid rate limits...</i>`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE));
+      } else if (li > 0) {
+        await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
+      }
+
       const info = await getGroupIdFromLink(String(userId), link);
       if (info) {
         resolved.push({ id: info.id, subject: info.subject });
       } else {
         failedLinks.push(link);
       }
+    }
+
+    // Retry failed links once with a longer pause
+    if (failedLinks.length > 0) {
+      try {
+        await bot.api.editMessageText(
+          resolveChatId,
+          resolveMsgId,
+          `🔄 <b>Retrying ${failedLinks.length} failed link(s)...</b>\n\n` +
+          `✅ ${resolved.length} resolved so far\n\n` +
+          `<i>Waiting a moment before retrying...</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+      await new Promise((r) => setTimeout(r, 5000));
+      const stillFailed: string[] = [];
+      for (let li = 0; li < failedLinks.length; li++) {
+        if (li > 0) await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
+        const info = await getGroupIdFromLink(String(userId), failedLinks[li]);
+        if (info) {
+          resolved.push({ id: info.id, subject: info.subject });
+        } else {
+          stillFailed.push(failedLinks[li]);
+        }
+      }
+      failedLinks.length = 0;
+      stillFailed.forEach((l) => failedLinks.push(l));
     }
 
     if (!resolved.length) {
@@ -14293,6 +14379,67 @@ function splitMessage(msg: string, maxLen: number): string[] {
  * (userId_auto) that were previously saved — so users don't need to
  * re-enter their number after a bot restart.
  */
+/**
+ * Restores auto-accepter jobs that were running before a bot restart.
+ * Silently resumes each job — no message is sent to the user.
+ * Expired jobs are cleaned from MongoDB without restarting.
+ */
+async function restoreAutoAccepterJobs(): Promise<void> {
+  try {
+    const jobs = await loadAllAutoAccepterJobs();
+    if (!jobs.length) return;
+    console.log(`[AUTO_ACCEPTER] Restoring ${jobs.length} auto-accepter job(s) after restart...`);
+
+    for (const saved of jobs) {
+      try {
+        const remaining = saved.endsAt - Date.now();
+        if (remaining <= 0) {
+          console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing.`);
+          await deleteAutoAccepterJob(saved.userId);
+          continue;
+        }
+
+        // Make sure the WhatsApp session is connected before re-creating the job.
+        const restored = await ensureSessionLoaded(String(saved.userId));
+        if (!restored) {
+          console.warn(`[AUTO_ACCEPTER] Could not restore WA session for userId=${saved.userId} — skipping job restore.`);
+          await deleteAutoAccepterJob(saved.userId);
+          continue;
+        }
+
+        const job: AutoAccepterJob = {
+          userId: saved.userId,
+          groupIds: saved.groupIds,
+          groupNames: saved.groupNames,
+          durationMs: saved.durationMs,
+          endsAt: saved.endsAt,
+          chatId: saved.chatId,
+          statusMsgId: saved.statusMsgId,
+          totalAccepted: saved.totalAccepted,
+          seenJids: new Set(),
+          pollTimer: null as any,
+          endTimer: null as any,
+        };
+
+        autoAccepterJobs.set(saved.userId, job);
+        protectSessionFromEviction(String(saved.userId));
+
+        job.pollTimer = setInterval(() => { void runAutoAccepterPoll(job); }, 30_000);
+        job.endTimer = setTimeout(() => { void stopAutoAccepterJob(saved.userId, "done"); }, remaining);
+
+        // Run a poll immediately so the status message is refreshed.
+        void runAutoAccepterPoll(job);
+
+        console.log(`[AUTO_ACCEPTER] Restored job for userId=${saved.userId} (${saved.groupIds.length} groups, ${Math.ceil(remaining / 60000)} min remaining, totalAccepted=${saved.totalAccepted})`);
+      } catch (err: any) {
+        console.error(`[AUTO_ACCEPTER] Failed to restore job for userId=${saved.userId}:`, err?.message);
+      }
+    }
+  } catch (err: any) {
+    console.error("[AUTO_ACCEPTER] restoreAutoAccepterJobs error:", err?.message);
+  }
+}
+
 async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
@@ -14496,6 +14643,10 @@ export async function startBot() {
   // so users don't need to re-enter their number after a bot restart.
   // 10s delay — small wait so MongoDB connection is stable.
   setTimeout(() => { void restoreAutoWaSessionsOnStartup(); }, 10_000);
+
+  // Restore auto-accepter jobs 45s after startup — ensures WA sessions have
+  // had enough time to reconnect from MongoDB before we start polling.
+  setTimeout(() => { void restoreAutoAccepterJobs(); }, 45_000);
 
   void syncAutoChatSettings().then(() => {
     console.log(`[BOT] Auto Chat settings loaded: global=${autoChatGlobalEnabled} accessList=${autoChatAccessSet.size} users`);
