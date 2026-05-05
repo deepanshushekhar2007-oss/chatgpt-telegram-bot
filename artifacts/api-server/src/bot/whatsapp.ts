@@ -520,14 +520,49 @@ async function createSocket(
       const statusCode = boom?.output?.statusCode;
       const reason = boom?.message || "Unknown";
 
-      console.log(`[WA][${userId}] Closed gen=${myGenId}. code=${statusCode} reason=${reason} wasConnected=${session.wasConnected} retries=${session.retryCount}`);
+      console.log(`[WA][${userId}] Closed gen=${myGenId}. code=${statusCode} reason=${reason} wasConnected=${session.wasConnected} retries=${session.retryCount} pairingMode=${pairingMode}`);
 
-      // Real logout — user manually unlinked from WA settings
+      // When reconnecting an already-established session, never re-show QR and never
+      // request a new pairing code.  Always reconnect as a registered ("code") session
+      // so Baileys uses saved creds directly.  This applies to QR sessions after scan
+      // and to code sessions after a 515 stream restart.
+      const reconnectMode: "code" | "qr" = session.wasConnected ? "code" : pairingMode;
+      const reconnectOnQr = session.wasConnected ? () => {} : onQr;
+
+      // 401 / loggedOut — two very different scenarios share the same status code:
+      //   A) Session that WAS connected gets 401 → often transient after QR scan or
+      //      after a 515 stream restart.  Retry silently a few times before accepting
+      //      it as a real logout.
+      //   B) Session that NEVER connected gets 401 → stale / invalid creds.  Clear
+      //      immediately and let the user reconnect.
       if (statusCode === DisconnectReason.loggedOut) {
-        console.log(`[WA][${userId}] Logout detected gen=${myGenId}`);
-        clearSessionData(userId);
         closeSocketSafe(sock);
         session.socket = null;
+        session.codeRequested = false;
+
+        if (session.wasConnected && session.retryCount < 3) {
+          // Transient 401 after successful connection — retry with backoff
+          session.retryCount++;
+          const delay = 4000 * session.retryCount;
+          console.log(`[WA][${userId}] 401 after live session gen=${myGenId} — retry ${session.retryCount}/3 in ${delay / 1000}s (mode=${reconnectMode})`);
+          trackSessionTimer(userId, async () => {
+            if (session.socketGenId !== myGenId) return;
+            const currentSession = sessions.get(userId);
+            if (!currentSession || currentSession !== session) return;
+            try {
+              await createSocket(userId, phoneNumber, reconnectMode, onCode, reconnectOnQr, onConnected, onDisconnected, session);
+            } catch (e: any) {
+              clearAllSessionTimers(userId);
+              sessions.delete(userId);
+              onDisconnected(`Reconnect failed: ${e?.message}`);
+            }
+          }, delay);
+          return;
+        }
+
+        // Real logout confirmed (never connected, or retried enough times)
+        console.log(`[WA][${userId}] Logout confirmed gen=${myGenId} (wasConnected=${session.wasConnected} retries=${session.retryCount})`);
+        void clearSessionData(userId);
         clearAllSessionTimers(userId);
         sessions.delete(userId);
         onDisconnected("WhatsApp ne logout kar diya. Dobara connect karein.");
@@ -535,44 +570,12 @@ async function createSocket(
         return;
       }
 
-      // 401 = stale credentials, clear and retry
-      if (statusCode === 401 && !session.wasConnected) {
-        console.log(`[WA][${userId}] 401 invalid creds gen=${myGenId} — clearing and retrying`);
-        closeSocketSafe(sock);
-        session.socket = null;
-        clearSessionData(userId);
-        session.codeRequested = false;
-        session.retryCount++;
-
-        if (session.retryCount > 3) {
-          clearAllSessionTimers(userId);
-          sessions.delete(userId);
-          onDisconnected("Connection baar baar fail ho raha hai. Dobara try karein.");
-          void forceMemoryReclaim();
-          return;
-        }
-
-        trackSessionTimer(userId, async () => {
-          if (session.socketGenId !== myGenId) return;
-          const currentSession = sessions.get(userId);
-          if (!currentSession || currentSession !== session) return;
-          try {
-            await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
-          } catch (e: any) {
-            clearAllSessionTimers(userId);
-            sessions.delete(userId);
-            onDisconnected(`Retry failed: ${e?.message}`);
-          }
-        }, 3000);
-        return;
-      }
-
       // 515 = "Stream Errored (restart required)"
-      // This is NORMAL after user successfully enters pairing code.
+      // NORMAL after user successfully scans QR or enters pairing code.
       // WhatsApp saves credentials first, then sends 515.
-      // DO NOT clear session files — registered=true must persist for reconnect.
+      // DO NOT clear session files — creds must persist for reconnect.
       if (statusCode === 515 || reason.includes("Stream Errored")) {
-        console.log(`[WA][${userId}] 515 stream restart gen=${myGenId} — normal after pairing, reconnecting (session preserved)`);
+        console.log(`[WA][${userId}] 515 stream restart gen=${myGenId} — reconnecting in ${reconnectMode} mode (session preserved)`);
         closeSocketSafe(sock);
         session.socket = null;
         session.codeRequested = false;
@@ -581,7 +584,7 @@ async function createSocket(
         if (session.retryCount > 8) {
           clearAllSessionTimers(userId);
           sessions.delete(userId);
-          onDisconnected("Bahut zyada reconnect attempts. Dobara try karein.");
+          onDisconnected("Too many reconnect attempts. Please reconnect manually.");
           void forceMemoryReclaim();
           return;
         }
@@ -592,7 +595,7 @@ async function createSocket(
           const currentSession = sessions.get(userId);
           if (!currentSession || currentSession !== session) return;
           try {
-            await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
+            await createSocket(userId, phoneNumber, reconnectMode, onCode, reconnectOnQr, onConnected, onDisconnected, session);
           } catch (e: any) {
             clearAllSessionTimers(userId);
             sessions.delete(userId);
@@ -613,21 +616,21 @@ async function createSocket(
           session.socket = null;
           clearAllSessionTimers(userId);
           sessions.delete(userId);
-          clearSessionData(userId);
+          void clearSessionData(userId);
           onDisconnected("WhatsApp ne connection reject kar diya (403). Dobara connect karein.");
           void forceMemoryReclaim();
           return;
         }
         // Exponential backoff for 403: 10s, 20s, 40s... up to 2 min
         const delay = Math.min(10000 * Math.pow(2, session.retryCount - 1), 120000);
-        console.log(`[WA][${userId}] 403 retry ${session.retryCount}/${MAX_403_RETRIES} in ${delay / 1000}s gen=${myGenId}...`);
+        console.log(`[WA][${userId}] 403 retry ${session.retryCount}/${MAX_403_RETRIES} in ${delay / 1000}s gen=${myGenId} mode=${reconnectMode}...`);
         session.codeRequested = false;
         trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId) return;
           const currentSession = sessions.get(userId);
           if (!currentSession || currentSession !== session) return;
           try {
-            await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
+            await createSocket(userId, phoneNumber, reconnectMode, onCode, reconnectOnQr, onConnected, onDisconnected, session);
           } catch (e: any) {
             clearAllSessionTimers(userId);
             sessions.delete(userId);
@@ -653,13 +656,13 @@ async function createSocket(
       }
       // Exponential backoff: 5s → 10s → 20s → max 2 min
       const reconnectDelay = Math.min(5000 * Math.pow(1.5, Math.floor(session.retryCount / 5)), 120000);
-      console.log(`[WA][${userId}] Will reconnect in ${reconnectDelay / 1000}s gen=${myGenId}...`);
+      console.log(`[WA][${userId}] Will reconnect in ${reconnectDelay / 1000}s gen=${myGenId} mode=${reconnectMode}...`);
       trackSessionTimer(userId, async () => {
         if (session.socketGenId !== myGenId) return;
         const currentSession = sessions.get(userId);
         if (!currentSession || currentSession !== session) return;
         try {
-          await createSocket(userId, phoneNumber, pairingMode, onCode, onQr, onConnected, onDisconnected, session);
+          await createSocket(userId, phoneNumber, reconnectMode, onCode, reconnectOnQr, onConnected, onDisconnected, session);
         } catch (e: any) {
           clearAllSessionTimers(userId);
           sessions.delete(userId);
