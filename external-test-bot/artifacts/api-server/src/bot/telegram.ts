@@ -227,6 +227,81 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildJoinProgressBar(done: number, total: number): string {
+  const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+  const filled = Math.floor(pct / 5);
+  const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+  return `[${bar}] ${pct}%`;
+}
+
+function buildJoinProgressText(session: JoinSession): string {
+  const done = session.processed;
+  const total = session.total;
+  const bar = buildJoinProgressBar(done, total);
+  const lastResults = session.results.slice(-8).join("\n");
+  return (
+    `⏳ <b>Joining Groups...</b>\n\n` +
+    `📊 <b>Progress: ${done}/${total}</b>\n` +
+    `${bar}\n\n` +
+    (lastResults ? `📋 Recent:\n${lastResults}\n\n` : "") +
+    (session.queue.length > 0 ? `⏳ ${session.queue.length} more in queue...` : "⌛ Processing...")
+  );
+}
+
+async function runJoinBackground(userId: number, session: JoinSession): Promise<void> {
+  while (session.queue.length > 0) {
+    if (joinCancelRequests.has(userId)) {
+      session.cancelled = true;
+      session.results.push(`⛔ Cancelled. ${session.queue.length} group(s) not joined.`);
+      session.queue = [];
+      break;
+    }
+
+    const link = session.queue.shift()!;
+    const res = await joinGroupWithLink(String(userId), link);
+    const line = res.success
+      ? `✅ Joined: ${esc(res.groupName || "Group")}`
+      : `❌ Failed: ${esc(res.error || "Unknown")}`;
+    session.results.push(line);
+    session.processed++;
+
+    try {
+      await bot.api.editMessageText(session.chatId, session.msgId,
+        buildJoinProgressText(session),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
+      );
+    } catch {}
+
+    if (session.queue.length > 0) {
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  session.running = false;
+  joinSessions.delete(userId);
+  joinCancelRequests.delete(userId);
+  userStates.delete(userId);
+
+  const bar = buildJoinProgressBar(session.processed, session.total);
+  let result = `🔗 <b>Join Groups Result</b>\n\n📊 <b>${session.processed}/${session.total}</b>\n${bar}\n\n`;
+  if (session.cancelled) result += "⛔ <b>Joining stopped by user.</b>\n\n";
+  result += session.results.join("\n");
+
+  const chunks = splitMessage(result, 4000);
+  try {
+    await bot.api.editMessageText(session.chatId, session.msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(session.chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  }
+}
+
 function broadcastProgressText(total: number, sent: number, failed: number): string {
   const processed = sent + failed;
   const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
@@ -457,6 +532,19 @@ interface CigSession {
 }
 
 const cigSessions: Map<number, CigSession> = new Map();
+
+interface JoinSession {
+  running: boolean;
+  cancelled: boolean;
+  chatId: number;
+  msgId: number;
+  queue: string[];
+  processed: number;
+  total: number;
+  results: string[];
+}
+
+const joinSessions: Map<number, JoinSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
 const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
@@ -1266,9 +1354,10 @@ bot.callbackQuery("connect_wa", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
-  clearQrPairing(userId);
-  await disconnectWhatsApp(String(userId)).catch(() => {});
 
+  userStates.delete(userId);
+
+  const isPhoto = !!ctx.callbackQuery.message?.photo;
   const connectedText = "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.";
   const connectedKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
   const connectText = "📱 <b>Connect WhatsApp</b>\n\nChoose pairing method:";
@@ -1278,25 +1367,27 @@ bot.callbackQuery("connect_wa", async (ctx) => {
     .row()
     .text("🔙 Back", "main_menu");
 
-  userStates.delete(userId);
-
-  const isPhoto = !!ctx.callbackQuery.message?.photo;
-
-  if (isPhoto) {
-    try { await ctx.deleteMessage(); } catch {}
-    if (isConnected(String(userId))) {
+  if (isConnected(String(userId))) {
+    // Already connected — do NOT disconnect the active session
+    if (isPhoto) {
+      try { await ctx.deleteMessage(); } catch {}
       await ctx.reply(connectedText, { parse_mode: "HTML", reply_markup: connectedKb });
     } else {
-      await ctx.reply(connectText, { parse_mode: "HTML", reply_markup: connectKb });
+      await ctx.editMessageText(connectedText, { parse_mode: "HTML", reply_markup: connectedKb });
     }
     return;
   }
 
-  if (isConnected(String(userId))) {
-    await ctx.editMessageText(connectedText, { parse_mode: "HTML", reply_markup: connectedKb });
-    return;
+  // Not connected — safe to clean up any pending QR/pairing state
+  clearQrPairing(userId);
+  await disconnectWhatsApp(String(userId)).catch(() => {});
+
+  if (isPhoto) {
+    try { await ctx.deleteMessage(); } catch {}
+    await ctx.reply(connectText, { parse_mode: "HTML", reply_markup: connectKb });
+  } else {
+    await ctx.editMessageText(connectText, { parse_mode: "HTML", reply_markup: connectKb });
   }
-  await ctx.editMessageText(connectText, { parse_mode: "HTML", reply_markup: connectKb });
 });
 
 bot.callbackQuery("connect_pair_code", async (ctx) => {
@@ -4717,44 +4808,43 @@ bot.on("message:text", async (ctx) => {
     if (!state.joinData) return;
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) { await ctx.reply("❌ No valid WhatsApp links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>", { parse_mode: "HTML" }); return; }
-    userStates.delete(userId);
+
+    const existingSession = joinSessions.get(userId);
+    if (existingSession && existingSession.running) {
+      // A session is already running — add new links to its queue
+      existingSession.queue.push(...cleanLinks);
+      existingSession.total += cleanLinks.length;
+      try {
+        await bot.api.editMessageText(existingSession.chatId, existingSession.msgId,
+          buildJoinProgressText(existingSession),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
+        );
+      } catch {}
+      await ctx.reply(`✅ <b>${cleanLinks.length} more link(s) added to queue!</b>\n\n⏳ Total now: ${existingSession.total}`, { parse_mode: "HTML" });
+      return;
+    }
+
+    // Start a fresh session — keep state alive so user can add more links while running
     joinCancelRequests.delete(userId);
-    const statusMsg = await ctx.reply(`⏳ <b>Joining ${cleanLinks.length} group(s)...</b>\n\n🔄 0/${cleanLinks.length} done...`, {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request"),
-    });
+    const statusMsg = await ctx.reply(
+      `⏳ <b>Joining ${cleanLinks.length} group(s)...</b>\n\n${buildJoinProgressBar(0, cleanLinks.length)}\n\n⌛ Starting...`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
+    );
     const joinChatId = ctx.chat.id;
     const joinMsgId = statusMsg.message_id;
-    void (async () => {
-      let result = "🔗 <b>Join Groups Result</b>\n\n";
-      const results: string[] = [];
-      let cancelled = false;
-      for (let ji = 0; ji < cleanLinks.length; ji++) {
-        if (joinCancelRequests.has(userId)) {
-          cancelled = true;
-          results.push(`⛔ Cancelled. ${cleanLinks.length - ji} group(s) not joined.`);
-          break;
-        }
-        const res = await joinGroupWithLink(String(userId), cleanLinks[ji]);
-        const line = res.success ? `✅ Joined Group: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(res.error || "Unknown")}`;
-        results.push(line);
-        try {
-          await bot.api.editMessageText(joinChatId, joinMsgId,
-            `⏳ <b>Joining: ${ji + 1}/${cleanLinks.length}</b>\n\n${results.join("\n")}`,
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "join_cancel_request") }
-          );
-        } catch {}
-        if (ji < cleanLinks.length - 1) await new Promise((r) => setTimeout(r, 1500));
-      }
-      joinCancelRequests.delete(userId);
-      result += results.join("\n");
-      if (cancelled) result += "\n\n⛔ <b>Joining stopped by user.</b>";
-      try {
-        await bot.api.editMessageText(joinChatId, joinMsgId, result, {
-          parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-        });
-      } catch {}
-    })();
+
+    const session: JoinSession = {
+      running: true,
+      cancelled: false,
+      chatId: joinChatId,
+      msgId: joinMsgId,
+      queue: [...cleanLinks],
+      processed: 0,
+      total: cleanLinks.length,
+      results: [],
+    };
+    joinSessions.set(userId, session);
+    void runJoinBackground(userId, session);
     return;
   }
 

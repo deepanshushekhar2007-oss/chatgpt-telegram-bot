@@ -2482,7 +2482,7 @@ bot.command("help", async (ctx) => {
     `   2. Select groups — choose Similar Groups or All Groups\n` +
     `   3. Pick duration: 15 min, 30 min, 1 hr, or 2 hrs\n` +
     `   4. Review selected groups and confirm to start\n` +
-    `   5. Bot will poll every 30 seconds and auto-accept invite-link joiners\n` +
+    `   5. Bot will poll every 10 seconds and auto-accept invite-link joiners\n` +
     `   6. Tap "Cancel" button to stop early at any time\n` +
     `• When the timer ends, you get a notification\n` +
     `• Group must have "Approval required" mode ON\n` +
@@ -6013,6 +6013,13 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
   // idle-eviction sweep never closes our protected session.
   markSessionActive(userIdStr);
 
+  // Stop immediately if the user's access has expired or they've been banned.
+  const [banned, access] = await Promise.all([isBanned(userId), hasAccess(userId)]);
+  if (banned || (!isAdmin(userId) && !access)) {
+    void stopAutoAccepterJob(userId, "access_revoked");
+    return;
+  }
+
   // If the WA socket got dropped for any reason (network blip, WhatsApp
   // server-side reset, etc.), lazy-restore it from MongoDB BEFORE we try
   // to read the pending list. Without this the polling silently returns
@@ -6070,7 +6077,7 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
       `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
       (newCount > 0 ? `🆕 <b>Just Accepted:</b> ${newCount}\n` : "") +
       `⏰ <b>Time Remaining:</b> ~${remainMins} min\n\n` +
-      `<i>Polls every 30 seconds. Only accepts invite-link joiners.</i>`,
+      `<i>Polls every 10 seconds. Only accepts invite-link joiners.</i>`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job"),
@@ -6092,7 +6099,7 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
   });
 }
 
-async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled"): Promise<void> {
+async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" | "access_revoked"): Promise<void> {
   const job = autoAccepterJobs.get(userId);
   if (!job) return;
 
@@ -6108,16 +6115,26 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled")
   // close this user's socket again.
   unprotectSession(String(userId));
 
-  const isDone = reason === "done";
-  const msg = isDone
-    ? `🛡️ <b>Auto Request Accepter — Finished</b>\n\n` +
+  let msg: string;
+  if (reason === "done") {
+    msg =
+      `🛡️ <b>Auto Request Accepter — Finished</b>\n\n` +
       `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n` +
       `⏱️ <b>Duration:</b> ${Math.round(job.durationMs / 60000)} min\n\n` +
       `<b>Time is up! The Auto Request Accepter has been stopped.</b>\n` +
-      `Your selected groups will no longer auto-accept join requests.`
-    : `⛔ <b>Auto Request Accepter — Cancelled</b>\n\n` +
+      `Your selected groups will no longer auto-accept join requests.`;
+  } else if (reason === "access_revoked") {
+    msg =
+      `🚫 <b>Auto Request Accepter — Stopped</b>\n\n` +
+      `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n\n` +
+      `<b>Your access has expired or been revoked.</b>\n` +
+      `The Auto Request Accepter has been stopped automatically. Please renew your access to use this feature.`;
+  } else {
+    msg =
+      `⛔ <b>Auto Request Accepter — Cancelled</b>\n\n` +
       `✅ <b>Total Accepted:</b> ${job.totalAccepted}\n\n` +
       `You cancelled the Auto Request Accepter. No more requests will be auto-accepted.`;
+  }
 
   try {
     await bot.api.editMessageText(
@@ -6131,14 +6148,25 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled")
     );
   } catch {}
 
-  // Also send a separate notification message
-  if (isDone) {
+  // Also send a separate notification message for done or access_revoked
+  if (reason === "done") {
     try {
       await bot.api.sendMessage(
         job.chatId,
         `🔔 <b>Notification: Auto Request Accepter Stopped</b>\n\n` +
         `The Auto Request Accepter has been turned off — your selected time duration has expired.\n\n` +
         `✅ <b>Total requests accepted:</b> ${job.totalAccepted}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+  } else if (reason === "access_revoked") {
+    try {
+      await bot.api.sendMessage(
+        job.chatId,
+        `🔔 <b>Notification: Auto Request Accepter Stopped</b>\n\n` +
+        `Your access has expired or been revoked, so the Auto Request Accepter was stopped automatically.\n\n` +
+        `✅ <b>Total requests accepted:</b> ${job.totalAccepted}\n\n` +
+        `Please renew your access to continue using this feature.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
       );
     } catch {}
@@ -6424,7 +6452,7 @@ bot.callbackQuery(/^ar_time_(\d+)$/, async (ctx) => {
     `📋 <b>Groups to Monitor (${arGroups.length}):</b>\n${previewGroups}${moreText}\n\n` +
     `⏱️ <b>Duration:</b> ${durationLabel}\n\n` +
     `ℹ️ <b>What will happen:</b>\n` +
-    `• Bot polls every 30 seconds\n` +
+    `• Bot polls every 10 seconds\n` +
     `• Only users who joined via invite link will be accepted\n` +
     `• Admin-added pending requests will NOT be accepted\n` +
     `• You will get a notification when time is up\n\n` +
@@ -6506,10 +6534,10 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
   // accepting requests even though the job is still scheduled to run.
   protectSessionFromEviction(String(userId));
 
-  // Start polling every 30 seconds
+  // Start polling every 10 seconds
   job.pollTimer = setInterval(() => {
     void runAutoAccepterPoll(job);
-  }, 30_000);
+  }, 10_000);
 
   // End timer
   job.endTimer = setTimeout(() => {
@@ -11212,7 +11240,7 @@ bot.callbackQuery("edit_settings", async (ctx) => {
   const allGroups = await getAllGroups(String(userId));
   const adminGroups = allGroups.filter(g => g.isAdmin);
   if (!adminGroups.length) {
-    await ctx.editMessageText("📭 Aap kisi bhi group mein admin nahi hain.", {
+    await ctx.editMessageText("📭 You are not an admin in any group.", {
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     }); return;
   }
@@ -11446,7 +11474,7 @@ async function showEditSettingsReview(ctx: any) {
     "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
     `${on(settings.addMembers)} Add Members | ${on(settings.approveJoin)} Approve Join\n\n` +
-    "✅ Confirm karke sab groups mein apply karo:";
+    "✅ Confirm to apply these settings to all selected groups:";
   const kb = new InlineKeyboard().text("✅ Apply to All Groups", "es_apply_confirm").text("❌ Cancel", "main_menu");
   try { await ctx.editMessageText(reviewText, { parse_mode: "HTML", reply_markup: kb }); }
   catch { await ctx.reply(reviewText, { parse_mode: "HTML", reply_markup: kb }); }
@@ -11464,7 +11492,7 @@ bot.callbackQuery("es_apply_confirm", async (ctx) => {
   state.editSettingsData.cancelled = false;
   state.step = "edit_settings_applying";
   await ctx.editMessageText(
-    `⏳ <b>Settings Apply Ho Rahi Hain...</b>\n\n🔄 0/${selectedGroups.length} done`,
+    `⏳ <b>Applying Settings...</b>\n\n🔄 0/${selectedGroups.length} done`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") }
   );
   void applyEditSettingsBackground(String(userId), userId, settings, selectedGroups, chatId, msgId);
@@ -11473,11 +11501,11 @@ bot.callbackQuery("es_apply_confirm", async (ctx) => {
 bot.callbackQuery("es_cancel_apply", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.editMessageText(
-    "⚠️ <b>Cancel karna chahte hain?</b>\n\nJo groups process ho chuke hain unko revert nahi kiya jayega.",
+    "⚠️ <b>Are you sure you want to cancel?</b>\n\nGroups already processed will not be reverted.",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Cancel", "es_cancel_confirm")
+        .text("✅ Yes, Cancel", "es_cancel_confirm")
         .text("▶️ Continue", "es_cancel_dismiss"),
     }
   );
@@ -11530,7 +11558,7 @@ async function applyEditSettingsBackground(
     const lines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)}` : `❌ ${esc(r.name)}`).join("\n");
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Apply Ho Rahi Hain: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
+        `⏳ <b>Applying Settings: ${done}/${total}</b>\n\n${lines}${done < total ? "\n\n⌛ Processing..." : ""}`,
         { parse_mode: "HTML", reply_markup: done < total ? new InlineKeyboard().text("❌ Cancel", "es_cancel_apply") : undefined }
       );
     } catch {}
@@ -11541,9 +11569,27 @@ async function applyEditSettingsBackground(
   const ok = results.filter(r => r.ok).length;
   const cancelled = results.some(r => r.error === "Cancelled");
   const header = cancelled ? `🛑 <b>Cancelled (${ok}/${total} done)</b>` : `🎉 <b>Done! (${ok}/${total} applied)</b>`;
+
+  // Build settings summary to show at the top of the result
+  const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
+  const dmLabel = settings.disappearingMessages === 86400 ? "24 Hours"
+    : settings.disappearingMessages === 604800 ? "7 Days"
+    : settings.disappearingMessages === 7776000 ? "90 Days"
+    : "Off";
+  const settingsSummary =
+    `⚙️ <b>Settings Applied:</b>\n` +
+    `📄 Description: ${settings.description ? esc(settings.description) : "Skipped"}\n` +
+    `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Changed" : "❌ Skipped"}\n` +
+    `⏳ Disappearing Messages: ${dmLabel}\n` +
+    `📝 Edit Group Info: ${on(settings.editGroupInfo)}\n` +
+    `💬 Send Messages: ${on(settings.sendMessages)}\n` +
+    `➕ Add Members: ${on(settings.addMembers)}\n` +
+    `🔐 Approve Join: ${on(settings.approveJoin)}`;
+
   const finalLines = results.map(r => r.ok ? `✅ ${esc(r.name)}` : r.error === "Cancelled" ? `⛔ ${esc(r.name)} (skipped)` : `❌ ${esc(r.name)}: ${esc(r.error || "")}`).join("\n");
   try {
-    await bot.api.editMessageText(chatId, msgId, `${header}\n\n${finalLines}`, {
+    await bot.api.editMessageText(chatId, msgId,
+      `${header}\n\n${settingsSummary}\n\n📋 <b>Groups (${total}):</b>\n${finalLines}`, {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -12825,7 +12871,15 @@ async function startAddMembersMultiGroup(
 
     const result = await addGroupParticipantsBulk(String(userId), group.id, contacts);
     const addedCount = Array.isArray(result) ? result.filter(r => r.success).length : contacts.length;
-    lines[lines.length - 1] = `✅ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
+    if (addedCount === 0) {
+      const firstFail = Array.isArray(result) ? result.find(r => !r.success) : null;
+      const reason = firstFail?.error || "Unknown reason";
+      lines[lines.length - 1] = `❌ <b>${esc(group.name)}</b> — 0/${contacts.length} added (${esc(reason)})`;
+    } else if (addedCount < contacts.length) {
+      lines[lines.length - 1] = `⚠️ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
+    } else {
+      lines[lines.length - 1] = `✅ <b>${esc(group.name)}</b> — ${addedCount}/${contacts.length} added`;
+    }
 
     if (delaySeconds > 0) await new Promise(r => setTimeout(r, delaySeconds * 1000));
   }
@@ -14424,7 +14478,7 @@ async function restoreAutoAccepterJobs(): Promise<void> {
         autoAccepterJobs.set(saved.userId, job);
         protectSessionFromEviction(String(saved.userId));
 
-        job.pollTimer = setInterval(() => { void runAutoAccepterPoll(job); }, 30_000);
+        job.pollTimer = setInterval(() => { void runAutoAccepterPoll(job); }, 10_000);
         job.endTimer = setTimeout(() => { void stopAutoAccepterJob(saved.userId, "done"); }, remaining);
 
         // Run a poll immediately so the status message is refreshed.
