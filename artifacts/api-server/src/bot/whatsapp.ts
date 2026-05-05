@@ -548,25 +548,47 @@ async function createSocket(
       const reconnectMode: "code" | "qr" = (session.wasConnected && hasPhone) ? "code" : pairingMode;
       const reconnectOnQr = session.wasConnected ? () => {} : onQr;
 
-      // ── QR session already-connected disconnect: STOP immediately ───────────
+      // ── QR session already-connected disconnect: limited retries ────────────
       // Phone/code sessions can silently reconnect using saved credentials.
-      // QR sessions have NO phone number stored — Baileys cannot reconnect
-      // silently, it always needs a new QR scan. Retrying for QR sessions
-      // is pointless: it just spins up new sockets endlessly, causes repeated
-      // Telegram disconnect notifications, and wastes server memory.
+      // QR sessions have NO phone number stored — but Baileys CAN still
+      // restore the session using saved creds (creds.json) WITHOUT showing
+      // a new QR code. This handles 30-minute keepalive drops, network blips,
+      // and WhatsApp server-side evictions. We allow up to MAX_QR_RETRIES
+      // attempts; if all fail the user gets one notification to re-scan.
       //
       // Exception: statusCode 515 ("Stream Errored") is the normal Baileys
-      // post-scan restart that happens RIGHT AFTER a successful QR scan —
-      // that one must still be retried (handled in the 515 block below).
+      // post-scan restart — handled below.
       const isQrSession = !hasPhone;
+      const MAX_QR_RETRIES = 5;
       if (isQrSession && session.wasConnected && statusCode !== 515 && !reason.includes("Stream Errored")) {
-        console.log(`[WA][${userId}] QR session disconnected after being live (code=${statusCode}) — stopping all retries, user must re-scan.`);
+        if (session.retryCount >= MAX_QR_RETRIES) {
+          console.log(`[WA][${userId}] QR session failed to reconnect after ${session.retryCount} tries — stopping. User must re-scan.`);
+          closeSocketSafe(sock);
+          session.socket = null;
+          clearAllSessionTimers(userId);
+          sessions.delete(userId);
+          onDisconnected("Reconnect via QR code");
+          void forceMemoryReclaim();
+          return;
+        }
+        session.retryCount++;
+        session.codeRequested = false;
+        const delay = Math.min(5000 * session.retryCount, 30000); // 5s, 10s, 15s, 20s, 25s
+        console.log(`[WA][${userId}] QR session disconnected (code=${statusCode}) — retry ${session.retryCount}/${MAX_QR_RETRIES} in ${delay / 1000}s`);
         closeSocketSafe(sock);
         session.socket = null;
-        clearAllSessionTimers(userId);
-        sessions.delete(userId);
-        onDisconnected("Reconnect via QR code");
-        void forceMemoryReclaim();
+        trackSessionTimer(userId, async () => {
+          if (session.socketGenId !== myGenId) return;
+          const currentSession = sessions.get(userId);
+          if (!currentSession || currentSession !== session) return;
+          try {
+            await createSocket(userId, phoneNumber, "qr", onCode, reconnectOnQr, onConnected, onDisconnected, session);
+          } catch (e: any) {
+            clearAllSessionTimers(userId);
+            sessions.delete(userId);
+            onDisconnected(`Reconnect failed: ${e?.message}`);
+          }
+        }, delay);
         return;
       }
 
@@ -831,6 +853,14 @@ export function isConnected(userId: string): boolean {
   const s = sessions.get(userId);
   if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
+}
+
+export async function sendSocketPresence(userId: string): Promise<void> {
+  const s = sessions.get(userId);
+  if (!s?.socket || !s.connected) return;
+  try {
+    await s.socket.sendPresenceUpdate("available");
+  } catch {}
 }
 
 export function getConnectedWhatsAppNumber(userId: string): string | null {
