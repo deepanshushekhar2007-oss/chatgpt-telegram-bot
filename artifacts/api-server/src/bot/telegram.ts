@@ -3419,7 +3419,7 @@ bot.command("access", async (ctx) => {
     // next interaction picks up the fresh value instead of the stale false.
     accessCache.del(targetId);
     const exp = new Date(data.accessList[String(targetId)].expiresAt).toUTCString();
-    await ctx.reply(`✅ <b>Access Granted!</\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
+    await ctx.reply(`✅ <b>Access Granted!</b>\n\n👤 User: <code>${targetId}</code>\n📅 Days: ${days}\n⏰ Expires: ${exp}`, { parse_mode: "HTML" });
 
     // Notify the user that admin has granted them access. Lists every
     // feature that's unlocked so they know exactly what they got. Auto
