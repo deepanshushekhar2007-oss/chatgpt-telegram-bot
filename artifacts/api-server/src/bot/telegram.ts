@@ -3291,6 +3291,10 @@ bot.command("accessautochat", async (ctx) => {
 
   await saveBotData(data);
   autoChatAccessSet.add(id);
+  // Also bust the general access cache — checkAccessMiddleware calls hasAccess()
+  // which is cached, so without this the user gets blocked even though they
+  // now have autochat access and (possibly) general access too.
+  accessCache.del(id);
 
   const durationText = expiresAt
     ? `⏳ Duration: <b>${days} day${days === 1 ? "" : "s"}</b>\n📅 Expires: <b>${new Date(expiresAt).toUTCString()}</b>`
@@ -3333,6 +3337,8 @@ bot.command("revokeautochat", async (ctx) => {
   await saveBotData(data);
   autoChatAccessSet.delete(id);
   autoChatAccessExpiry.delete(id);
+  // Bust access cache so the revoke takes effect on the very next interaction.
+  accessCache.del(id);
 
   // Stop any running CIG session for this user immediately
   const cigSession = cigSessions.get(id);
