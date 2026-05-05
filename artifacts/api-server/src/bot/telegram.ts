@@ -9329,7 +9329,11 @@ async function demoteSelectedBackground(
     for (let pi = 0; pi < phoneNumbers.length; pi++) {
       if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
       const phone = phoneNumbers[pi].replace(/[^0-9]/g, "");
-      const participant = participants.find((p) => p.phone === phone || p.jid.startsWith(phone + "@"));
+      const phoneLast10 = phone.slice(-10);
+      const participant = participants.find((p) => {
+        const pPhone = p.phone.replace(/[^0-9]/g, "");
+        return pPhone === phone || (phoneLast10.length >= 7 && pPhone.slice(-10) === phoneLast10);
+      });
 
       if (!participant) {
         groupLines.push(`  ❌ +${phone} — Not found in group`);
