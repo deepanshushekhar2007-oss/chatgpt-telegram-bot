@@ -1408,30 +1408,6 @@ async function runRlResolveBackground(userId: number): Promise<void> {
       } catch {}
     }
 
-    // Retry failed links once after the queue drains
-    if (session.failed.length > 0 && !session.cancelled) {
-      const toRetry = [...session.failed];
-      session.failed.length = 0;
-      try {
-        await bot.api.editMessageText(session.chatId, session.msgId,
-          `🔄 <b>Retrying ${toRetry.length} failed link(s)...</b>\n\n` +
-          `✅ ${session.resolved.length} resolved so far\n\n` +
-          `<i>Waiting a moment before retrying...</i>`,
-          { parse_mode: "HTML" }
-        );
-      } catch {}
-      await new Promise((r) => setTimeout(r, 5000));
-      for (let li = 0; li < toRetry.length; li++) {
-        if (li > 0) await new Promise((r) => setTimeout(r, INTER_CALL_DELAY));
-        const info = await getGroupIdFromLink(String(userId), toRetry[li]);
-        if (info) {
-          session.resolved.push({ id: info.id, subject: info.subject });
-        } else {
-          session.failed.push(toRetry[li]);
-        }
-      }
-    }
-
     rlResolveSessions.delete(userId);
 
     if (!session.resolved.length) {
