@@ -9339,10 +9339,22 @@ async function demoteAllBackground(
     } catch {}
 
     const participants = await getGroupParticipants(userId, group.id);
+
+    // Check if bot itself is admin — if not, we cannot demote anyone in this group
+    const mySession = userStates.get(userIdNum);
+    void mySession; // suppress unused warning
+    // We check by attempting a safe read: if participants is empty the group is likely inaccessible
+    if (!participants.length) {
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ⚠️ Could not fetch group data (bot may not be a member)`);
+      continue;
+    }
+
     const admins = participants.filter((p) => p.isAdmin && !p.isSuperAdmin);
+    const ownerCount = participants.filter((p) => p.isSuperAdmin).length;
 
     if (!admins.length) {
-      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ℹ️ No demotable admins found`);
+      const ownerNote = ownerCount > 0 ? ` (${ownerCount} owner(s) skipped)` : "";
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n  ℹ️ No demotable admins found${ownerNote}`);
       continue;
     }
 
@@ -9350,13 +9362,42 @@ async function demoteAllBackground(
       if (demoteAdminCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
       const admin = admins[ai];
       const phone = admin.phone || admin.jid.split("@")[0];
-      const ok = await demoteGroupAdmin(userId, group.id, admin.jid);
-      if (ok) {
+
+      let res = await demoteGroupAdmin(userId, group.id, admin.jid);
+
+      // Rate limit / not-authorized — wait and retry once
+      if (!res.success && res.error) {
+        const errLow = res.error.toLowerCase();
+        if (
+          errLow.includes("not-authorized") || errLow.includes("forbidden") ||
+          errLow.includes("rate") || errLow.includes("403") || errLow.includes("405")
+        ) {
+          await new Promise((r) => setTimeout(r, 5000));
+          if (!demoteAdminCancelRequests.has(userIdNum)) {
+            res = await demoteGroupAdmin(userId, group.id, admin.jid);
+          }
+        }
+      }
+
+      if (res.success) {
         groupLines.push(`  ✅ +${phone} — Demoted`);
         demoted++;
         totalDemoted++;
       } else {
-        groupLines.push(`  ❌ +${phone} — Failed`);
+        // Summarise the error into a short human-readable reason
+        const errMsg = res.error || "Unknown error";
+        const errLow = errMsg.toLowerCase();
+        let reason = "Failed";
+        if (errLow.includes("not-authorized") || errLow.includes("forbidden") || errLow.includes("403")) {
+          reason = "Not authorized (bot may not be admin)";
+        } else if (errLow.includes("not connected") || errLow.includes("disconnected")) {
+          reason = "WhatsApp not connected";
+        } else if (errLow.includes("rate") || errLow.includes("405")) {
+          reason = "Rate limited";
+        } else if (errMsg.length < 80) {
+          reason = errMsg;
+        }
+        groupLines.push(`  ❌ +${phone} — ${reason}`);
         failed++;
       }
 
@@ -9449,13 +9490,40 @@ async function demoteSelectedBackground(
         groupLines.push(`  ⚠️ +${phone} — Group owner, cannot demote`);
         notAdmin++;
       } else {
-        const ok = await demoteGroupAdmin(userId, group.id, participant.jid);
-        if (ok) {
+        let res = await demoteGroupAdmin(userId, group.id, participant.jid);
+
+        // Rate limit / not-authorized — wait and retry once
+        if (!res.success && res.error) {
+          const errLow = res.error.toLowerCase();
+          if (
+            errLow.includes("not-authorized") || errLow.includes("forbidden") ||
+            errLow.includes("rate") || errLow.includes("403") || errLow.includes("405")
+          ) {
+            await new Promise((r) => setTimeout(r, 5000));
+            if (!demoteAdminCancelRequests.has(userIdNum)) {
+              res = await demoteGroupAdmin(userId, group.id, participant.jid);
+            }
+          }
+        }
+
+        if (res.success) {
           groupLines.push(`  ✅ +${phone} — Demoted`);
           demoted++;
           totalDemoted++;
         } else {
-          groupLines.push(`  ❌ +${phone} — Failed`);
+          const errMsg = res.error || "Unknown error";
+          const errLow = errMsg.toLowerCase();
+          let reason = "Failed";
+          if (errLow.includes("not-authorized") || errLow.includes("forbidden") || errLow.includes("403")) {
+            reason = "Not authorized (bot may not be admin)";
+          } else if (errLow.includes("not connected") || errLow.includes("disconnected")) {
+            reason = "WhatsApp not connected";
+          } else if (errLow.includes("rate") || errLow.includes("405")) {
+            reason = "Rate limited";
+          } else if (errMsg.length < 80) {
+            reason = errMsg;
+          }
+          groupLines.push(`  ❌ +${phone} — ${reason}`);
           failed++;
         }
       }
