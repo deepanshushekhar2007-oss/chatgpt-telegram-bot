@@ -7,6 +7,7 @@ import makeWASocket, {
 import { Boom } from "@hapi/boom";
 import pino from "pino";
 import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions, savePairingMode } from "./mongo-auth-state";
+import { getCustomDeviceName } from "./mongo-bot-data";
 
 const logger = pino({ level: "silent" });
 
@@ -374,9 +375,14 @@ async function createSocket(
     },
     printQRInTerminal: false,
     logger,
-    // Browsers.ubuntu("Chrome") = ["Ubuntu", "Chrome", "20.0.04"]
-    // This is required for phone number pairing to work correctly
-    browser: Browsers.ubuntu("Chrome"),
+    // Device name shown in WhatsApp → Linked Devices.
+    // Admin can change it via /devicename command (stored in MongoDB).
+    // Falls back to "Google Chrome (Ubuntu)" when no custom name is set.
+    browser: await (async () => {
+      const custom = await getCustomDeviceName();
+      if (custom) return ["Bot", custom, "1.0.0"] as [string, string, string];
+      return Browsers.ubuntu("Chrome");
+    })(),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
