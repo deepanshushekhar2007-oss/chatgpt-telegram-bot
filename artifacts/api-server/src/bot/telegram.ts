@@ -8879,31 +8879,39 @@ bot.callbackQuery("ap_together", async (ctx) => {
   if (!chatId || !msgId) return;
 
   userStates.delete(userId);
-  await ctx.editMessageText(`⏳ <b>Approving all pending members together...</b>\n\n⌛ Please wait...`, { parse_mode: "HTML" });
+  approvalCancelRequests.delete(userId);
+  cancelDialogActiveFor.delete(userId);
 
-  void approveTogetherBackground(String(userId), selectedGroups, chatId, msgId);
+  await ctx.editMessageText(
+    `⏳ <b>Approving all pending members together...</b>\n\n⌛ Please wait...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ap_cancel_request") }
+  );
+
+  void approveTogetherBackground(userId, String(userId), selectedGroups, chatId, msgId);
 });
 
 async function approveTogetherBackground(
+  userIdNum: number,
   userId: string,
   groups: Array<{ id: string; subject: string }>,
   chatId: number,
   msgId: number
 ) {
+  const progressMarkup = new InlineKeyboard().text("❌ Cancel", "ap_cancel_request");
   let fullResult = "✅ <b>Approve Together Result</b>\n\n";
   const lines: string[] = [];
+  let cancelled = false;
 
   for (let gi = 0; gi < groups.length; gi++) {
+    if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break; }
     const group = groups[gi];
 
     try {
-      if (msgId) {
-        await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
-          `🔄 Step 1: Turning OFF approval mode...`,
-          { parse_mode: "HTML" }
-        );
-      }
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+        `🔄 Step 1: Turning OFF approval mode...`,
+        { parse_mode: "HTML", reply_markup: progressMarkup }
+      );
     } catch {}
 
     const offOk = await setGroupApprovalMode(userId, group.id, "off");
@@ -8913,16 +8921,15 @@ async function approveTogetherBackground(
     }
 
     await new Promise((r) => setTimeout(r, 2000));
+    if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break; }
 
     try {
-      if (msgId) {
-        await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
-          `🔄 Step 2: Turning ON approval mode...\n` +
-          `✅ All pending members will be approved!`,
-          { parse_mode: "HTML" }
-        );
-      }
+      await bot.api.editMessageText(chatId, msgId,
+        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+        `🔄 Step 2: Turning ON approval mode...\n` +
+        `✅ All pending members will be approved!`,
+        { parse_mode: "HTML", reply_markup: progressMarkup }
+      );
     } catch {}
 
     const onOk = await setGroupApprovalMode(userId, group.id, "on");
@@ -8931,17 +8938,21 @@ async function approveTogetherBackground(
       continue;
     }
 
-    // Give the server a moment to update group state, then fetch the live
-    // total. "Approve Together" works by toggling the approval mode off→on,
-    // which triggers the server to auto-approve everyone — so the metadata
-    // we read here reflects the post-approval member count.
     await new Promise((r) => setTimeout(r, 1000));
     const total = await getGroupMemberCountSafe(userId, group.id);
     lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ All pending members approved! | 👥 Total: ${total}`);
   }
 
+  approvalCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  if (cancelled) {
+    fullResult = `🛑 <b>Approve Together — Cancelled</b>\n\n`;
+  }
   fullResult += lines.join("\n\n");
-  fullResult += `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
+  fullResult += cancelled
+    ? `\n\n━━━━━━━━━━━━━━━━━━\n🛑 <b>Stopped after ${lines.length} group(s).</b>`
+    : `\n\n━━━━━━━━━━━━━━━━━━\n✅ <b>Done processing ${groups.length} group(s)!</b>`;
 
   const chunks = splitMessage(fullResult, 4000);
   try {
