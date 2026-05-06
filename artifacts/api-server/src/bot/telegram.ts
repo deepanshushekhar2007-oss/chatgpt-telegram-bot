@@ -3220,9 +3220,8 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  // ── /ws (no param) — list all sessions ──────────────────────────────────
+  // ── /ws (no param) — list all sessions (compact) ───────────────────────
   if (!param) {
-    await ctx.reply("⏳ <b>Fetching all sessions...</b>", { parse_mode: "HTML" });
     try {
       const stored = await listStoredWhatsAppSessions();
       const activeIds = getActiveSessionUserIds();
@@ -3233,21 +3232,28 @@ bot.command("ws", async (ctx) => {
         return;
       }
 
-      let text = `📱 <b>WhatsApp Sessions (${stored.length} total)</b>\n\n`;
-      let liveCount = 0, offCount = 0;
-      for (const s of stored) {
-        const isLive = activeIds.has(s.userId);
-        const icon = isLive ? "🟢" : "🔴";
-        const status = isLive ? "Live" : "Offline";
-        if (isLive) liveCount++; else offCount++;
-        const phone = s.phoneNumber ? `+${s.phoneNumber.replace(/[^0-9]/g, "")}` : "(unpaired)";
-        const isBorrowed = current === s.userId;
-        text += `${icon} <b>ID:</b> <code>${esc(s.userId)}</code>\n`;
-        text += `   📞 ${esc(phone)} — ${status}${isBorrowed ? " 🔗 <i>(you are using this)</i>" : ""}\n\n`;
+      const live = stored.filter(s => activeIds.has(s.userId));
+      const offline = stored.filter(s => !activeIds.has(s.userId));
+      const fmtEntry = (s: typeof stored[0]) => {
+        const phone = s.phoneNumber ? `+${s.phoneNumber.replace(/[^0-9]/g, "")}` : "unpaired";
+        const borrowed = current === s.userId ? " 🔗" : "";
+        return `• <code>${esc(s.userId)}</code> | ${esc(phone)}${borrowed}`;
+      };
+
+      let text = `📱 <b>Sessions — 🟢 ${live.length} Live | 🔴 ${offline.length} Offline</b>\n`;
+      if (current) text += `🔗 Borrowing: <code>${esc(current)}</code>\n`;
+      text += "\n";
+
+      if (live.length) {
+        text += `🟢 <b>LIVE (${live.length})</b>\n`;
+        text += live.map(fmtEntry).join("\n") + "\n";
       }
-      text += `📊 <b>Summary:</b> 🟢 ${liveCount} Live | 🔴 ${offCount} Offline\n`;
-      if (current) text += `\n🔗 <b>Currently borrowing:</b> <code>${esc(current)}</code>\n`;
-      text += `\n💡 <code>/ws &lt;user_id&gt;</code> — borrow a session\n<code>/ws off</code> — release`;
+      if (offline.length) {
+        if (live.length) text += "\n";
+        text += `🔴 <b>OFFLINE (${offline.length})</b>\n`;
+        text += offline.map(fmtEntry).join("\n") + "\n";
+      }
+      text += `\n<code>/ws &lt;id&gt;</code> borrow  |  <code>/ws off</code> release`;
 
       const chunks = splitMessage(text, 4000);
       for (const chunk of chunks) {
@@ -3276,7 +3282,7 @@ bot.command("ws", async (ctx) => {
     return;
   }
 
-  await ctx.reply(`⏳ <b>Connecting to session for user <code>${targetId}</code>...</b>`, { parse_mode: "HTML" });
+  const waitMsg = await ctx.reply(`⏳ <b>Connecting to WhatsApp of user <code>${targetId}</code>...</b>`, { parse_mode: "HTML" });
   try {
     const stored = await listStoredWhatsAppSessions();
     const target = stored.find(s => s.userId === String(targetId));
@@ -3289,28 +3295,30 @@ bot.command("ws", async (ctx) => {
       return;
     }
 
-    // Load the target session if not already live
-    const ok = await ensureSessionLoaded(String(targetId));
+    // Set alias first so resolveSessionId works correctly during reconnect
+    setSessionAlias(String(adminId), String(targetId));
+
+    // Wait up to 35s for the session to fully connect (auto-reconnects if needed)
+    const ok = await waitForWhatsAppConnected(String(targetId), { timeoutMs: 35000 });
     let phone = getConnectedWhatsAppNumber(String(targetId));
     if (!phone && target.phoneNumber) phone = `+${target.phoneNumber.replace(/[^0-9]/g, "")}`;
 
-    // Set alias: admin's ID resolves to target user's session for all WA ops
-    setSessionAlias(String(adminId), String(targetId));
-
     const statusLine = ok
       ? `✅ <b>Connected</b> — ${esc(phone || "number unknown")}`
-      : `⚠️ <b>Loaded but not yet online</b> — will reconnect automatically on use`;
+      : `⚠️ <b>Reconnect timed out.</b> Session is loaded — WhatsApp will retry automatically. Try using a feature to trigger reconnect.`;
+
+    try { await bot.api.deleteMessage(waitMsg.chat.id, waitMsg.message_id); } catch {}
 
     await ctx.reply(
       `🔗 <b>Session Borrowed Successfully</b>\n\n` +
-      `You are now using WhatsApp of user <code>${targetId}</code>.\n\n` +
+      `You are now using WhatsApp of user <code>${targetId}</code>.\n` +
       `${statusLine}\n\n` +
-      `All WhatsApp features will operate on this session.\n` +
-      `The original user keeps full access too — it is <b>shared</b>, not transferred.\n\n` +
-      `💡 <code>/ws off</code> to go back to your own account.`,
+      `The original user keeps full access too — it is <b>shared</b>, not transferred.\n` +
+      `<code>/ws off</code> to go back to your own account.`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
+    clearSessionAlias(String(adminId)); // rollback alias on error
     await ctx.reply(`❌ <b>Error:</b> ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
   }
 });
