@@ -1855,6 +1855,18 @@ export async function leaveGroup(userId: string, groupId: string): Promise<boole
   }
 }
 
+export async function deleteGroupChat(userId: string, groupId: string): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.chatModify({ delete: true, lastMessages: [] }, groupId);
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Delete group chat error:`, err?.message);
+    return false;
+  }
+}
+
 export interface ParticipantInfo {
   jid: string;
   phone: string; // real phone number — works even in LID mode
