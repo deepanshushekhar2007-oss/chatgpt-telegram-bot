@@ -1524,14 +1524,14 @@ async function runRlResolveBackground(userId: number): Promise<void> {
 
     let reviewText =
       `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
-      `✅ <b>${session.resolved.length} group(s) resolved</b> — invite links reset ho jayenge.\n`;
+      `✅ <b>${session.resolved.length} group(s) resolved</b> — invite links will be reset.\n`;
     if (session.failed.length > 0) {
-      reviewText += `⚠️ <b>${session.failed.length} link(s) resolve nahi hue</b> (skip ho jayenge).\n`;
+      reviewText += `⚠️ <b>${session.failed.length} link(s) could not be resolved</b> (will be skipped).\n`;
     }
     reviewText +=
-      `\n⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
-      `Old link se koi join nahi kar payega.\n\n` +
-      `Aage badhna chahte ho?`;
+      `\n⚠️ <b>Current invite links will be revoked.</b>\n` +
+      `Anyone using the old link will no longer be able to join.\n\n` +
+      `Do you want to proceed?`;
 
     try {
       await bot.api.editMessageText(session.chatId, session.msgId, reviewText, {
@@ -9515,13 +9515,13 @@ bot.callbackQuery("rl_proceed", async (ctx) => {
   await ctx.editMessageText(
     `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
     `✅ <b>${selectedGroups.length} group(s) selected</b>\n\n` +
-    `⚠️ <b>Current invite links revoke ho jayenge.</b>\n` +
-    `Old link se koi join nahi kar payega.\n\n` +
-    `Aage badhna chahte ho?`,
+    `⚠️ <b>Current invite links will be revoked.</b>\n` +
+    `Anyone using the old link will no longer be able to join.\n\n` +
+    `Do you want to proceed?`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Reset Karo", "rl_proceed_confirm")
+        .text("✅ Yes, Reset Links", "rl_proceed_confirm")
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -9553,15 +9553,13 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
 
   const sent = await ctx.editMessageText(
     "🔗 <b>Reset by Group Link</b>\n\n" +
-    "📎 <b>0 links collected</b>\n\n" +
     "Send WhatsApp group invite links (one per message or multiple at once):\n" +
     "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
-    "⚠️ You must be an admin in those groups.\n" +
-    "<i>Click Done when you have sent all links.</i>",
+    "⚠️ You must be an admin in those groups.\n\n" +
+    "<i>The <b>Done</b> button will appear after you send at least one link.</i>",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Done", "rl_link_done").row()
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -9576,7 +9574,7 @@ bot.callbackQuery("rl_link_done", async (ctx) => {
 
   const buffer = state.rlLinkBuffer || [];
   if (!buffer.length) {
-    await ctx.answerCallbackQuery({ text: "❌ Pehle koi link bhejo!" });
+    await ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!" });
     return;
   }
 
@@ -9586,14 +9584,14 @@ bot.callbackQuery("rl_link_done", async (ctx) => {
 
   await ctx.editMessageText(
     `🔗 <b>Reset by Group Link — Confirm</b>\n\n` +
-    `📎 <b>${buffer.length} link(s)</b> collect kiye hain.\n\n` +
-    `Bot in links ko resolve karke invite links reset karega.\n\n` +
-    `⚠️ <b>Current invite links revoke ho jayenge.</b> Old link se koi join nahi kar payega.\n\n` +
-    `Aage badhna chahte ho?`,
+    `📎 <b>${buffer.length} link(s) collected</b>\n\n` +
+    `The bot will resolve these links and reset their invite links.\n\n` +
+    `⚠️ <b>Current invite links will be revoked.</b> Anyone using the old link will no longer be able to join.\n\n` +
+    `Do you want to proceed?`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✅ Haan, Reset Karo", "rl_link_pipeline_start")
+        .text("✅ Yes, Reset Links", "rl_link_pipeline_start")
         .text("❌ Cancel", "main_menu"),
     }
   );
@@ -14514,9 +14512,8 @@ bot.on("message:text", async (ctx) => {
         await bot.api.editMessageText(ctx.chat.id, collectMsgId,
           "🔗 <b>Reset by Group Link</b>\n\n" +
           `📎 <b>${total} link(s) collected</b>\n\n` +
-          "Send more links or click Done when finished:\n" +
-          "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
-          "<i>Click Done to proceed with resolving and resetting.</i>",
+          "Send more links, or tap <b>Done</b> to proceed:\n" +
+          "<code>https://chat.whatsapp.com/ABC123</code>",
           {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard()
