@@ -45,6 +45,10 @@ interface BotData {
   // Admin creates codes with /redeem CODE DAYS MAXUSERS.
   // Users redeem with /redeem CODE to get instant access.
   redeemCodes: Record<string, RedeemCode>;
+  // ── Device Name ──────────────────────────────────────────────────────────
+  // Custom name shown in WhatsApp → Linked Devices.
+  // null / undefined = use default "Google Chrome (Ubuntu)".
+  customDeviceName?: string | null;
 }
 
 const DEFAULT_DATA: BotData = {
@@ -80,6 +84,7 @@ export async function loadBotData(): Promise<BotData> {
         referredBy: doc.referredBy ?? {},
         referralAccess: doc.referralAccess ?? {},
         redeemCodes: doc.redeemCodes ?? {},
+        customDeviceName: doc.customDeviceName ?? null,
       };
     }
   } catch (err: any) {
@@ -107,6 +112,7 @@ export async function saveBotData(data: BotData): Promise<void> {
           referredBy: data.referredBy,
           referralAccess: data.referralAccess,
           redeemCodes: data.redeemCodes,
+          customDeviceName: data.customDeviceName ?? null,
           updatedAt: new Date(),
         },
       },
@@ -651,4 +657,25 @@ export async function deleteAutoAccepterJob(userId: number): Promise<void> {
     const col = await getCollection("auto_accepter_jobs");
     await col.deleteOne({ userId });
   } catch {}
+}
+
+// ── Device Name ───────────────────────────────────────────────────────────────
+
+export async function getCustomDeviceName(): Promise<string | null> {
+  try {
+    const data = await loadBotData();
+    return data.customDeviceName ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setCustomDeviceName(name: string | null): Promise<void> {
+  try {
+    const data = await loadBotData();
+    data.customDeviceName = name;
+    await saveBotData(data);
+  } catch (err: any) {
+    console.error("[MongoDB] setCustomDeviceName error:", err?.message);
+  }
 }
