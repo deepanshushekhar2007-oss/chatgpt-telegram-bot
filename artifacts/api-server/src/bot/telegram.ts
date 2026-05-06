@@ -431,7 +431,6 @@ bot.use(async (ctx, next) => {
     const cbData = ctx.callbackQuery?.data;
     const skipReconnect = !cbData
       || cbData === "connect_wa"
-      || cbData === "main_menu"
       || cbData.startsWith("connect_")
       || cbData.startsWith("disconnect_")
       || cbData.startsWith("logout_")
