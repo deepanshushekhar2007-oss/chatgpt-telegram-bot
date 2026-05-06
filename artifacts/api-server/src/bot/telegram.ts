@@ -1596,12 +1596,29 @@ async function runJoinBackground(userId: number): Promise<void> {
       : `🎉 <b>Done! (${ok}/${total} joined)</b>`;
     const last = session.results.slice(-25);
     const more = session.results.length > 25 ? `... +${session.results.length - 25} more\n\n` : "";
-    try {
-      await bot.api.editMessageText(session.chatId, session.msgId, `${header}\n\n${more}${last.join("\n")}`, {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-      });
-    } catch {}
+    const finalText = `${header}\n\n${more}${last.join("\n")}`;
+    const finalKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
+    let editSuccess = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await bot.api.editMessageText(session.chatId, session.msgId, finalText, {
+          parse_mode: "HTML",
+          reply_markup: finalKb,
+        });
+        editSuccess = true;
+        break;
+      } catch {
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (!editSuccess) {
+      try {
+        await bot.api.sendMessage(session.chatId, finalText, {
+          parse_mode: "HTML",
+          reply_markup: finalKb,
+        });
+      } catch {}
+    }
     joinSessions.delete(userId);
   } finally {
     session.running = false;
@@ -9562,7 +9579,7 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
   state.rlLinkBuffer = [];
   rlLinkCollectMsgId.delete(userId);
 
-  const sent = await ctx.editMessageText(
+  await ctx.editMessageText(
     "🔗 <b>Reset by Group Link</b>\n\n" +
     "Send WhatsApp group invite links (one per message or multiple at once):\n" +
     "<code>https://chat.whatsapp.com/ABC123</code>\n\n" +
@@ -9574,7 +9591,6 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
         .text("❌ Cancel", "main_menu"),
     }
   );
-  if (sent && "message_id" in sent) rlLinkCollectMsgId.set(userId, sent.message_id);
 });
 
 bot.callbackQuery("rl_link_done", async (ctx) => {
