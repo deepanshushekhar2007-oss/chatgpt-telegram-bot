@@ -1352,6 +1352,30 @@ export async function setGroupIcon(
   }
 }
 
+export async function removeGroupIcon(userId: string, groupId: string): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.removeProfilePicture(groupId);
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Remove group icon error:`, err?.message);
+    return false;
+  }
+}
+
+export async function removeGroupDescription(userId: string, groupId: string): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.groupUpdateDescription(groupId, "");
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Remove group description error:`, err?.message);
+    return false;
+  }
+}
+
 function extractInviteCode(link: string): string {
   const withoutQuery = link.split("?")[0];
   return withoutQuery
