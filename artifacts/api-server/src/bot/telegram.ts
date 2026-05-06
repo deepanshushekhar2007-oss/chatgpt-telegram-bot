@@ -15771,19 +15771,11 @@ async function restoreAutoAccepterJobs(): Promise<void> {
       try {
         const remaining = saved.endsAt - Date.now();
         if (remaining <= 0) {
-          console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing.`);
+          // Session expired while bot was down — silently clean up MongoDB.
+          // Do NOT send a notification: the session ended naturally and the
+          // user has no expectation of a message after restart.
+          console.log(`[AUTO_ACCEPTER] Job for userId=${saved.userId} already expired — removing silently.`);
           await deleteAutoAccepterJob(saved.userId);
-          // Notify user that the job expired while the bot was down
-          try {
-            await bot.api.sendMessage(
-              saved.chatId,
-              `🛡️ <b>Auto Request Accepter — Expired</b>\n\n` +
-              `The bot was restarted and your Auto Request Accepter session had already expired by the time the bot came back online.\n\n` +
-              `✅ <b>Total Accepted (before restart):</b> ${saved.totalAccepted}\n\n` +
-              `You can start a new session anytime.`,
-              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-            );
-          } catch {}
           continue;
         }
 
@@ -15821,19 +15813,37 @@ async function restoreAutoAccepterJobs(): Promise<void> {
         const remainMins = Math.ceil(remaining / 60000);
         console.log(`[AUTO_ACCEPTER] Restored job for userId=${saved.userId} (${saved.groupIds.length} groups, ${remainMins} min remaining, totalAccepted=${saved.totalAccepted})`);
 
-        // Notify the user that the auto-accepter has resumed after the restart.
-        try {
-          await bot.api.sendMessage(
-            saved.chatId,
-            `🔄 <b>Auto Request Accepter — Resumed</b>\n\n` +
-            `The bot was restarted and your Auto Request Accepter has been automatically resumed.\n\n` +
-            `✅ <b>Accepted so far:</b> ${saved.totalAccepted}\n` +
-            `⏰ <b>Time remaining:</b> ~${remainMins} min\n` +
-            `📋 <b>Groups:</b> ${saved.groupIds.length}\n\n` +
-            `<i>No action needed — it is running in the background.</i>`,
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job").text("🏠 Menu", "main_menu") }
-          );
-        } catch {}
+        // Send "Resumed" notification ONLY after WhatsApp is actually connected.
+        // We wait up to 90 seconds (polling every 5 s) — if WA doesn't connect
+        // in time we skip the message rather than spamming the user with a
+        // misleading "resumed" while WA is still offline.
+        void (async () => {
+          const maxWaitMs = 90_000;
+          const intervalMs = 5_000;
+          let waited = 0;
+          while (waited < maxWaitMs) {
+            if (isConnected(String(saved.userId))) break;
+            await new Promise(r => setTimeout(r, intervalMs));
+            waited += intervalMs;
+          }
+          if (!isConnected(String(saved.userId))) {
+            console.warn(`[AUTO_ACCEPTER] WA never reconnected for userId=${saved.userId} after restart — skipping resume notification.`);
+            return;
+          }
+          try {
+            await bot.api.sendMessage(
+              saved.chatId,
+              `🔄 <b>Auto Request Accepter — Resumed</b>\n\n` +
+              `The bot was restarted and your Auto Request Accepter has been automatically resumed.\n\n` +
+              `✅ <b>Accepted so far:</b> ${saved.totalAccepted}\n` +
+              `⏰ <b>Time remaining:</b> ~${remainMins} min\n` +
+              `📋 <b>Groups:</b> ${saved.groupIds.length}\n\n` +
+              `<i>No action needed — it is running in the background.</i>`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ar_stop_job").text("🏠 Menu", "main_menu") }
+            );
+          } catch {}
+        })();
+
       } catch (err: any) {
         console.error(`[AUTO_ACCEPTER] Failed to restore job for userId=${saved.userId}:`, err?.message);
       }
