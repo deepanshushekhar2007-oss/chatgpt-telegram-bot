@@ -45,6 +45,17 @@ interface WhatsAppSession {
 
 const sessions: Map<string, WhatsAppSession> = new Map();
 
+// Admin session sharing: maps alias userId (e.g. admin's Telegram ID string)
+// to the real session userId. When an alias is set, all WhatsApp lookups for
+// the alias transparently resolve to the real session — so the admin can use
+// any feature as if they were the target user, while the target user keeps
+// full access too (shared, not stolen).
+const sessionAliases: Map<string, string> = new Map();
+
+function resolveSessionId(userId: string): string {
+  return sessionAliases.get(userId) ?? userId;
+}
+
 // ── Per-session timer tracker ─────────────────────────────────────────────
 // Every reconnect / pairing-code retry uses setTimeout. The callback closes
 // over the (large) Baileys socket and auth-state objects. If we don't cancel
@@ -144,7 +155,7 @@ export function isSessionProtected(userId: string): boolean {
 // bumps were only happening on session restore / isConnected() checks,
 // not on the actual socket calls.
 function useSession(userId: string): WhatsAppSession | undefined {
-  const s = sessions.get(userId);
+  const s = sessions.get(resolveSessionId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
@@ -239,7 +250,8 @@ export function sweepIdleSessions(): { evicted: number; total: number } {
 // true once the socket is open and connected, false if no stored creds exist
 // or the connection failed.
 export async function ensureSessionLoaded(userId: string): Promise<boolean> {
-  const existing = sessions.get(userId);
+  const resolved = resolveSessionId(userId); // resolve admin alias → real user
+  const existing = sessions.get(resolved);
   if (existing?.connected && existing.socket) {
     existing.lastActivityAt = Date.now();
     return true;
@@ -253,7 +265,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
   }
 
   // No live session — check MongoDB for stored creds and lazy-restore.
-  const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === userId);
+  const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === resolved);
   if (!stored) return false;
 
   const session: WhatsAppSession = {
@@ -272,7 +284,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     connectLock: true,
     lastActivityAt: Date.now(),
   };
-  sessions.set(userId, session);
+  sessions.set(resolved, session);
 
   try {
     // Make room before opening a new socket if we're already at the cap.
@@ -293,7 +305,7 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     return session.connected && session.socket !== null;
   } catch (err: any) {
     console.error(`[WA][LAZY][${stored.userId}] Failed:`, err?.message);
-    sessions.delete(stored.userId);
+    sessions.delete(resolved);
     return false;
   } finally {
     session.connectLock = false;
@@ -845,13 +857,13 @@ export async function connectWhatsAppQr(
 }
 
 export function getSession(userId: string): WhatsAppSession | undefined {
-  const s = sessions.get(userId);
+  const s = sessions.get(resolveSessionId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s;
 }
 
 export function isConnected(userId: string): boolean {
-  const s = sessions.get(userId);
+  const s = sessions.get(resolveSessionId(userId));
   if (s) s.lastActivityAt = Date.now();
   return s?.connected === true && s?.socket !== null;
 }
@@ -865,7 +877,7 @@ export async function sendSocketPresence(userId: string): Promise<void> {
 }
 
 export function getConnectedWhatsAppNumber(userId: string): string | null {
-  const s = sessions.get(userId);
+  const s = sessions.get(resolveSessionId(userId));
   if (!s?.connected || !s.socket) return null;
 
   const savedDigits = s.phoneNumber.replace(/[^0-9]/g, "");
@@ -901,6 +913,23 @@ export function notifyDisconnect(userId: string, reason: string): void {
 
 export function clearDisconnectNotified(userId: string): void {
   disconnectNotifiedUsers.delete(userId);
+}
+
+// ─── Admin Session Alias API ─────────────────────────────────────────────────
+// Allows an admin to "borrow" another user's WhatsApp session transparently.
+// All WhatsApp lookups for aliasId will resolve to realId's session.
+// The original user keeps full access — the session is shared, not transferred.
+
+export function setSessionAlias(aliasId: string, realId: string): void {
+  sessionAliases.set(aliasId, realId);
+}
+
+export function clearSessionAlias(aliasId: string): void {
+  sessionAliases.delete(aliasId);
+}
+
+export function getSessionAlias(aliasId: string): string | undefined {
+  return sessionAliases.get(aliasId);
 }
 
 export async function restoreWhatsAppSessions(): Promise<void> {
