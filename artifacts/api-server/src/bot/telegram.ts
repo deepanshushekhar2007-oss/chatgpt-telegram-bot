@@ -50,6 +50,9 @@ import {
   unprotectSession,
   markSessionActive,
   sendSocketPresence,
+  setSessionAlias,
+  clearSessionAlias,
+  getSessionAlias,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1613,6 +1616,15 @@ const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
 const resetLinkCancelRequests: Set<number> = new Set();
 const demoteAdminCancelRequests: Set<number> = new Set();
+// Caches new links for download after a Reset Link operation.
+// Key = userId, Value = plain-text links (one per line). Auto-expires after 15 min.
+const resetLinkDownloadCache = new Map<number, { text: string; expiresAt: number }>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [uid, entry] of resetLinkDownloadCache) {
+    if (now > entry.expiresAt) resetLinkDownloadCache.delete(uid);
+  }
+}, 5 * 60 * 1000);
 
 // ── Cancel-dialog protection ────────────────────────────────────────────────
 // When a user taps a "❌ Cancel" button on a long-running flow, the bot shows
@@ -3176,10 +3188,131 @@ bot.command("admin", async (ctx) => {
     "➕ <code>/redeem CODE DAYS MAXUSERS</code> — Create a redeem code\n" +
     "📊 <code>/redeem CODE</code> — View code stats (who redeemed, remaining uses)\n" +
     "📋 <code>/redeem list</code> — List all codes with live status\n" +
-    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code",
+    "🗑️ <code>/redeem delete CODE</code> — Delete a redeem code\n\n" +
+    "📱 <b>Session Control (WS Sharing):</b>\n" +
+    "📋 <code>/ws</code> — List all WhatsApp sessions (live + offline)\n" +
+    "🔗 <code>/ws &lt;user_id&gt;</code> — Borrow a user's WA session (shared access)\n" +
+    "🔓 <code>/ws off</code> — Release borrowed session, return to your own",
 
     { parse_mode: "HTML" }
   );
+});
+
+// ─── /ws — Admin session sharing ────────────────────────────────────────────
+bot.command("ws", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const args = (ctx.message?.text || "").split(/\s+/);
+  const param = args[1]?.toLowerCase();
+  const adminId = ctx.from!.id;
+
+  // ── /ws off — release borrowed session ──────────────────────────────────
+  if (param === "off") {
+    const current = getSessionAlias(String(adminId));
+    if (!current) {
+      await ctx.reply("ℹ️ You are not currently using any borrowed session.", { parse_mode: "HTML" });
+      return;
+    }
+    clearSessionAlias(String(adminId));
+    await ctx.reply(
+      `✅ <b>Session Released</b>\n\nYou are back to your own WhatsApp account.\n<i>Was borrowing: <code>${esc(current)}</code></i>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  // ── /ws (no param) — list all sessions ──────────────────────────────────
+  if (!param) {
+    await ctx.reply("⏳ <b>Fetching all sessions...</b>", { parse_mode: "HTML" });
+    try {
+      const stored = await listStoredWhatsAppSessions();
+      const activeIds = getActiveSessionUserIds();
+      const current = getSessionAlias(String(adminId));
+
+      if (!stored.length) {
+        await ctx.reply("📭 <b>No WhatsApp sessions found in MongoDB.</b>", { parse_mode: "HTML" });
+        return;
+      }
+
+      let text = `📱 <b>WhatsApp Sessions (${stored.length} total)</b>\n\n`;
+      let liveCount = 0, offCount = 0;
+      for (const s of stored) {
+        const isLive = activeIds.has(s.userId);
+        const icon = isLive ? "🟢" : "🔴";
+        const status = isLive ? "Live" : "Offline";
+        if (isLive) liveCount++; else offCount++;
+        const phone = s.phoneNumber ? `+${s.phoneNumber.replace(/[^0-9]/g, "")}` : "(unpaired)";
+        const isBorrowed = current === s.userId;
+        text += `${icon} <b>ID:</b> <code>${esc(s.userId)}</code>\n`;
+        text += `   📞 ${esc(phone)} — ${status}${isBorrowed ? " 🔗 <i>(you are using this)</i>" : ""}\n\n`;
+      }
+      text += `📊 <b>Summary:</b> 🟢 ${liveCount} Live | 🔴 ${offCount} Offline\n`;
+      if (current) text += `\n🔗 <b>Currently borrowing:</b> <code>${esc(current)}</code>\n`;
+      text += `\n💡 <code>/ws &lt;user_id&gt;</code> — borrow a session\n<code>/ws off</code> — release`;
+
+      const chunks = splitMessage(text, 4000);
+      for (const chunk of chunks) {
+        await ctx.reply(chunk, { parse_mode: "HTML" });
+      }
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
+  // ── /ws <user_id> — borrow a user's WA session ──────────────────────────
+  const targetId = Number(param);
+  if (!Number.isFinite(targetId) || targetId <= 0) {
+    await ctx.reply(
+      `❌ <b>Invalid user ID.</b>\n\nUsage:\n` +
+      `<code>/ws &lt;user_id&gt;</code> — borrow session\n` +
+      `<code>/ws off</code> — release\n` +
+      `<code>/ws</code> — list all`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  if (targetId === adminId) {
+    await ctx.reply("ℹ️ That is your own Telegram ID. Use <code>/ws</code> to list sessions.", { parse_mode: "HTML" });
+    return;
+  }
+
+  await ctx.reply(`⏳ <b>Connecting to session for user <code>${targetId}</code>...</b>`, { parse_mode: "HTML" });
+  try {
+    const stored = await listStoredWhatsAppSessions();
+    const target = stored.find(s => s.userId === String(targetId));
+    if (!target) {
+      await ctx.reply(
+        `❌ <b>No WhatsApp session found</b> for user <code>${targetId}</code> in MongoDB.\n\n` +
+        `Use <code>/ws</code> to see all available sessions.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    // Load the target session if not already live
+    const ok = await ensureSessionLoaded(String(targetId));
+    let phone = getConnectedWhatsAppNumber(String(targetId));
+    if (!phone && target.phoneNumber) phone = `+${target.phoneNumber.replace(/[^0-9]/g, "")}`;
+
+    // Set alias: admin's ID resolves to target user's session for all WA ops
+    setSessionAlias(String(adminId), String(targetId));
+
+    const statusLine = ok
+      ? `✅ <b>Connected</b> — ${esc(phone || "number unknown")}`
+      : `⚠️ <b>Loaded but not yet online</b> — will reconnect automatically on use`;
+
+    await ctx.reply(
+      `🔗 <b>Session Borrowed Successfully</b>\n\n` +
+      `You are now using WhatsApp of user <code>${targetId}</code>.\n\n` +
+      `${statusLine}\n\n` +
+      `All WhatsApp features will operate on this session.\n` +
+      `The original user keeps full access too — it is <b>shared</b>, not transferred.\n\n` +
+      `💡 <code>/ws off</code> to go back to your own account.`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ <b>Error:</b> ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+  }
 });
 
 // ─── /refermode on|off ──────────────────────────────────────────────────────
@@ -9554,7 +9687,7 @@ async function runRlResolvePipelineBackground(
   const successResults = results.filter(r => r.newLink);
   const failedResults = results.filter(r => !r.newLink);
 
-  let resultText = `🔗 <b>Reset by Link — Result</b>\n\n`;
+  let resultText = `🔗 <b>Reset by Link — Result</b>\n📊 <b>Total: ${successResults.length} link(s) reset successfully</b>\n\n`;
   if (wasCancelled) resultText += `⛔ <b>Cancelled after ${done}/${total}.</b>\n\n`;
 
   for (const r of successResults) {
@@ -9563,22 +9696,33 @@ async function runRlResolvePipelineBackground(
   if (failedResults.length > 0) {
     resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed (${failedResults.length}):</b>\n`;
     for (const r of failedResults) {
-      const reason = r.resolveErr ? "Link resolve nahi hua" : (r.resetErr || "Failed");
+      const reason = r.resolveErr ? "Link resolve failed" : (r.resetErr || "Failed");
       resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(reason)}\n`;
     }
   }
 
+  // Cache links for optional .txt download (valid 15 min)
+  const showDownload = successResults.length >= 50;
+  if (showDownload) {
+    const linksText = successResults.map(r => `${r.subject}\n${r.newLink}`).join("\n\n");
+    resetLinkDownloadCache.set(userIdNum, { text: linksText, expiresAt: Date.now() + 15 * 60 * 1000 });
+  }
+
   const chunks = splitMessage(resultText, 4000);
+  const lastKb = showDownload
+    ? new InlineKeyboard().text("📥 Download Links (.txt)", "rl_download").text("🏠 Main Menu", "main_menu")
+    : new InlineKeyboard().text("🏠 Main Menu", "main_menu");
+
   try {
     await bot.api.editMessageText(chatId, msgId, chunks[0], {
       parse_mode: "HTML",
-      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: chunks.length === 1 ? lastKb : undefined,
     });
   } catch {}
   for (let i = 1; i < chunks.length; i++) {
     await bot.api.sendMessage(chatId, chunks[i], {
       parse_mode: "HTML",
-      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: i === chunks.length - 1 ? lastKb : undefined,
     });
   }
 }
@@ -9613,6 +9757,36 @@ bot.callbackQuery("rl_cancel_abort", async (ctx) => {
       reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request"),
     });
   } catch {}
+});
+
+bot.callbackQuery("rl_download", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Preparing file..." });
+  const userId = ctx.from.id;
+  const cached = resetLinkDownloadCache.get(userId);
+  if (!cached || Date.now() > cached.expiresAt) {
+    try {
+      await ctx.reply("⚠️ Download link expired. Please run Reset Link again.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+  try {
+    const fileContent = Buffer.from(cached.text, "utf-8");
+    const fileName = `reset_links_${new Date().toISOString().slice(0, 10)}.txt`;
+    await bot.api.sendDocument(
+      ctx.chat.id,
+      new InputFile(fileContent, fileName),
+      {
+        caption: `📥 <b>Reset Links</b>\n${cached.text.split("\n").filter(l => l.startsWith("https://")).length} links — downloaded on ${new Date().toLocaleDateString("en-IN")}`,
+        parse_mode: "HTML",
+      }
+    );
+    resetLinkDownloadCache.delete(userId);
+  } catch (err: any) {
+    await ctx.reply(`❌ Failed to send file: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+  }
 });
 
 async function resetLinkBackground(
@@ -9685,7 +9859,7 @@ async function resetLinkBackground(
   const successResults = results.filter(r => r.newLink);
   const failedResults = results.filter(r => !r.newLink);
 
-  let resultText = `🔗 <b>Reset Link Result</b>\n\n`;
+  let resultText = `🔗 <b>Reset Link Result</b>\n📊 <b>Total: ${successCount} link(s) reset successfully</b>\n\n`;
   if (wasCancelled) resultText += `⛔ <b>Cancelled after ${results.length}/${groups.length} group(s).</b>\n\n`;
 
   // Show all successful resets first with their new links
@@ -9706,17 +9880,28 @@ async function resetLinkBackground(
     resultText += `━━━━━━━━━━━━━━━━━━\n✅ <b>${successCount}/${groups.length} links reset successfully!</b>`;
   }
 
+  // Cache links for optional .txt download (valid 15 min)
+  const showDownloadBg = successResults.length >= 50;
+  if (showDownloadBg) {
+    const linksText = successResults.map(r => `${r.subject}\n${r.newLink}`).join("\n\n");
+    resetLinkDownloadCache.set(userIdNum, { text: linksText, expiresAt: Date.now() + 15 * 60 * 1000 });
+  }
+
   const chunks = splitMessage(resultText, 4000);
+  const lastKbBg = showDownloadBg
+    ? new InlineKeyboard().text("📥 Download Links (.txt)", "rl_download").text("🏠 Main Menu", "main_menu")
+    : new InlineKeyboard().text("🏠 Main Menu", "main_menu");
+
   try {
     await bot.api.editMessageText(chatId, msgId, chunks[0], {
       parse_mode: "HTML",
-      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: chunks.length === 1 ? lastKbBg : undefined,
     });
   } catch {}
   for (let i = 1; i < chunks.length; i++) {
     await bot.api.sendMessage(chatId, chunks[i], {
       parse_mode: "HTML",
-      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      reply_markup: i === chunks.length - 1 ? lastKbBg : undefined,
     });
   }
 }
