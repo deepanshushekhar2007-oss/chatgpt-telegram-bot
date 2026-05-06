@@ -14507,22 +14507,25 @@ bot.on("message:text", async (ctx) => {
     state.rlLinkBuffer.push(...cleanLinks);
     const total = state.rlLinkBuffer.length;
     const collectMsgId = rlLinkCollectMsgId.get(userId);
+    // Delete the previous collect message and send a fresh one so the user
+    // always sees the latest count as a new message (not a silent edit).
     if (collectMsgId) {
-      try {
-        await bot.api.editMessageText(ctx.chat.id, collectMsgId,
-          "🔗 <b>Reset by Group Link</b>\n\n" +
-          `📎 <b>${total} link(s) collected</b>\n\n` +
-          "Send more links, or tap <b>Done</b> to proceed:\n" +
-          "<code>https://chat.whatsapp.com/ABC123</code>",
-          {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("✅ Done", "rl_link_done").row()
-              .text("❌ Cancel", "main_menu"),
-          }
-        );
-      } catch {}
+      try { await bot.api.deleteMessage(ctx.chat.id, collectMsgId); } catch {}
+      rlLinkCollectMsgId.delete(userId);
     }
+    const newCollectMsg = await ctx.reply(
+      "🔗 <b>Reset by Group Link</b>\n\n" +
+      `📎 <b>${total} link(s) collected</b>\n\n` +
+      "Send more links, or tap <b>Done</b> to proceed:\n" +
+      "<code>https://chat.whatsapp.com/ABC123</code>",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Done", "rl_link_done").row()
+          .text("❌ Cancel", "main_menu"),
+      }
+    );
+    rlLinkCollectMsgId.set(userId, newCollectMsg.message_id);
     return;
   }
 
@@ -15387,15 +15390,11 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
           autoOk = await waitForWhatsAppConnected(autoUserId, { timeoutMs: 30_000, pollMs: 1_000 }).catch(() => false);
         }
 
-        // For ACF both must be connected; for CIG we need auto at minimum.
-        const requiredBoth = sessionType === "acf";
-        if (requiredBoth && (!primaryOk || !autoOk)) {
+        // Both primary and auto WA must be connected for any session type.
+        // If either is disconnected, do NOT send the "running" status message —
+        // the user's WhatsApp was already offline before restart.
+        if (!primaryOk || !autoOk) {
           console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: WA not connected (primary=${primaryOk}, auto=${autoOk})`);
-          await deleteAutoChatSession(s.userId).catch(() => {});
-          continue;
-        }
-        if (!autoOk) {
-          console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: auto WA not connected`);
           await deleteAutoChatSession(s.userId).catch(() => {});
           continue;
         }
