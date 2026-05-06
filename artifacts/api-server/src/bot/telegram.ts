@@ -89,6 +89,8 @@ import {
   loadAllAutoAccepterJobs,
   deleteAutoAccepterJob,
   type PersistedAutoAccepterJob,
+  getCustomDeviceName,
+  setCustomDeviceName,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -3227,7 +3229,10 @@ bot.command("admin", async (ctx) => {
     "📱 <b>Session Control (WS Sharing):</b>\n" +
     "📋 <code>/ws</code> — List all WhatsApp sessions (live + offline)\n" +
     "🔗 <code>/ws &lt;user_id&gt;</code> — Borrow a user's WA session (shared access)\n" +
-    "🔓 <code>/ws off</code> — Release borrowed session, return to your own",
+    "🔓 <code>/ws off</code> — Release borrowed session, return to your own\n\n" +
+    "📛 <b>Device Name (Linked Devices):</b>\n" +
+    "✏️ <code>/devicename &lt;name&gt;</code> — Set custom device name for all users\n" +
+    "🔄 <code>/devicename default</code> — Reset to default (Google Chrome / Ubuntu)",
 
     { parse_mode: "HTML" }
   );
@@ -3369,6 +3374,52 @@ bot.command("ws", async (ctx) => {
 // When OFF, the bot reverts to the original behaviour — every user can use
 // every feature for free (subject to existing /access subscription mode if
 // admin enabled it separately).
+// ─── /devicename — Admin device name control ─────────────────────────────────
+bot.command("devicename", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+
+  const parts = (ctx.message?.text || "").split(/\s+/);
+  parts.shift(); // remove /devicename
+  const arg = parts.join(" ").trim();
+
+  if (!arg) {
+    const current = await getCustomDeviceName();
+    await ctx.reply(
+      `📛 <b>Device Name (Linked Devices)</b>\n\n` +
+      `Current: <b>${current ? esc(current) : "Google Chrome (Ubuntu) [default]"}</b>\n\n` +
+      `❓ <b>Usage:</b>\n` +
+      `<code>/devicename &lt;name&gt;</code> — Set custom name\n` +
+      `<code>/devicename default</code> — Reset to default`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (arg.toLowerCase() === "default") {
+    await setCustomDeviceName(null);
+    await ctx.reply(
+      `✅ <b>Device name reset to default</b>\n\n` +
+      `New sessions will show as: <b>Google Chrome (Ubuntu)</b>\n\n` +
+      `<i>⚠️ Already connected sessions will still show the old name until they reconnect.</i>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (arg.length > 50) {
+    await ctx.reply("❌ Device name too long (max 50 characters).", { parse_mode: "HTML" });
+    return;
+  }
+
+  await setCustomDeviceName(arg);
+  await ctx.reply(
+    `✅ <b>Device name updated!</b>\n\n` +
+    `New sessions will show as: <b>${esc(arg)} (Bot)</b>\n\n` +
+    `<i>⚠️ Already connected sessions will still show the old name until they reconnect or the session is refreshed.</i>`,
+    { parse_mode: "HTML" }
+  );
+});
+
 bot.command("refermode", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
