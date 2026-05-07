@@ -10182,28 +10182,64 @@ async function runRlResolvePipelineBackground(
     });
   } catch {}
 
+  // Batch pause every N links to avoid rate limiting
+  const BATCH_SIZE = 10;
+  const BATCH_PAUSE_MS = 8000;
+  const INTER_LINK_MS = 2500; // delay between each link after success
+  const FAIL_LINK_MS = 5000;  // longer delay after a resolve failure
+
   for (let i = 0; i < links.length; i++) {
     if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
 
+    // Pause every BATCH_SIZE links to let WhatsApp recover
+    if (i > 0 && i % BATCH_SIZE === 0) {
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          buildProgress() + `\n\n<i>⏸ Pausing ${BATCH_PAUSE_MS / 1000}s to avoid rate limits...</i>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
+        );
+      } catch {}
+      await new Promise(r => setTimeout(r, BATCH_PAUSE_MS));
+      if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+    }
+
     const link = links[i];
 
-    // Step 1: Resolve the link
+    // Step 1: Resolve the link — retries with backoff are inside getGroupIdFromLink
     const info = await getGroupIdFromLink(userId, link);
     if (!info) {
-      results.push({ subject: link, resolveErr: "Could not resolve link" });
+      results.push({ subject: link, resolveErr: "Link invalid or expired" });
       done++;
       try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
-      await new Promise(r => setTimeout(r, 300));
+      // Longer wait after a failed resolve before trying the next link
+      if (i < links.length - 1) await new Promise(r => setTimeout(r, FAIL_LINK_MS));
       continue;
     }
 
-    // Step 2: Immediately reset the invite link
+    // Step 2: Reset the invite link — retry on transient errors
     let res = await resetGroupInviteLink(userId, info.id);
     if (!res.success && res.error) {
       const errLower = res.error.toLowerCase();
-      if (errLower.includes("owner") || errLower.includes("rate") || errLower.includes("not-authorized") || errLower.includes("forbidden") || errLower.includes("405")) {
-        await new Promise(r => setTimeout(r, 6000));
-        if (!resetLinkCancelRequests.has(userIdNum)) res = await resetGroupInviteLink(userId, info.id);
+      const isTransient =
+        errLower.includes("rate") ||
+        errLower.includes("busy") ||
+        errLower.includes("conflict") ||
+        errLower.includes("timeout") ||
+        errLower.includes("503") ||
+        errLower.includes("429") ||
+        errLower.includes("500") ||
+        errLower.includes("owner") ||
+        errLower.includes("not-authorized") ||
+        errLower.includes("forbidden") ||
+        errLower.includes("405");
+      if (isTransient && !resetLinkCancelRequests.has(userIdNum)) {
+        await new Promise(r => setTimeout(r, 8000));
+        res = await resetGroupInviteLink(userId, info.id);
+        // One more retry if still failing
+        if (!res.success && !resetLinkCancelRequests.has(userIdNum)) {
+          await new Promise(r => setTimeout(r, 15000));
+          res = await resetGroupInviteLink(userId, info.id);
+        }
       }
     }
 
@@ -10215,7 +10251,7 @@ async function runRlResolvePipelineBackground(
     }
     done++;
     try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
-    if (i < links.length - 1) await new Promise(r => setTimeout(r, 1200));
+    if (i < links.length - 1) await new Promise(r => setTimeout(r, INTER_LINK_MS));
   }
 
   resetLinkCancelRequests.delete(userIdNum);
