@@ -9,6 +9,8 @@ import {
   createWhatsAppGroup,
   applyGroupSettings,
   setGroupIcon,
+  removeGroupIcon,
+  removeGroupDescription,
   joinGroupWithLink,
   getGroupPendingRequests,
   getGroupPendingRequestsJids,
@@ -973,6 +975,8 @@ interface GroupSettings {
   finalNames: string[];
   namingMode: "auto" | "custom";
   dpBuffers: Buffer[];
+  removeDp?: boolean;
+  removeDescription?: boolean;
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
@@ -1583,14 +1587,21 @@ async function runJoinBackground(userId: number): Promise<void> {
   const session = joinSessions.get(userId);
   if (!session || session.running) return;
   session.running = true;
+  // Track consecutive failures to apply adaptive backoff
+  let consecutiveFails = 0;
   try {
     while (session.queue.length > 0 && !session.cancelled) {
       if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
       const link = session.queue.shift()!;
       const res = await joinGroupWithLink(String(userId), link);
-      let errMsg = res.error || "Unknown";
-      if (errMsg.toLowerCase().includes("conflict")) errMsg = "Server busy — please wait and try again";
-      session.results.push(res.success ? `✅ Joined: ${esc(res.groupName || "Group")}` : `❌ Failed: ${esc(errMsg)}`);
+      if (res.success) {
+        consecutiveFails = 0;
+        session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
+      } else {
+        consecutiveFails++;
+        const errMsg = res.error || "Unknown";
+        session.results.push(`❌ Failed: ${esc(errMsg)}`);
+      }
       session.done++;
       if (!cancelDialogActiveFor.has(userId)) {
         try {
@@ -1600,7 +1611,11 @@ async function runJoinBackground(userId: number): Promise<void> {
           });
         } catch {}
       }
-      if (session.queue.length > 0) await new Promise((r) => setTimeout(r, 1500));
+      if (session.queue.length > 0) {
+        // Adaptive delay: longer backoff when WA is throttling (3+ consecutive fails)
+        const delay = consecutiveFails >= 3 ? 6000 : consecutiveFails >= 1 ? 3000 : 2000;
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
     joinCancelRequests.delete(userId);
     cancelDialogActiveFor.delete(userId);
@@ -1647,6 +1662,9 @@ const removeMembersCancelRequests: Set<number> = new Set();
 const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
 const resetLinkCancelRequests: Set<number> = new Set();
+// Caches failed links from a Reset-by-Link run so the user can retry them.
+// Key = userId, Value = list of original invite links. Auto-expires after 30 min.
+const rlLinkRetryCache = new Map<number, { links: string[]; expiresAt: number }>();
 const demoteAdminCancelRequests: Set<number> = new Set();
 // Caches new links for download after a Reset Link operation.
 // Key = userId, Value = plain-text links (one per line). Auto-expires after 15 min.
@@ -4693,7 +4711,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -10187,10 +10205,26 @@ async function runRlResolvePipelineBackground(
     resetLinkDownloadCache.set(userIdNum, { text: linksText, expiresAt: Date.now() + 15 * 60 * 1000 });
   }
 
+  // Cache failed links for retry (valid 30 min)
+  // Collect the original links that failed (resolve failures + reset failures)
+  const failedOriginalLinks: string[] = [];
+  for (let i = 0; i < links.length; i++) {
+    const r = results[i];
+    if (r && !r.newLink) failedOriginalLinks.push(links[i]);
+  }
+  const showRetry = failedOriginalLinks.length > 0;
+  if (showRetry) {
+    rlLinkRetryCache.set(userIdNum, { links: failedOriginalLinks, expiresAt: Date.now() + 30 * 60 * 1000 });
+  }
+
   const chunks = splitMessage(resultText, 4000);
-  const lastKb = showDownload
-    ? new InlineKeyboard().text("📥 Download Links (.txt)", "rl_download").text("🏠 Main Menu", "main_menu")
-    : new InlineKeyboard().text("🏠 Main Menu", "main_menu");
+  const lastKb = (() => {
+    const kb = new InlineKeyboard();
+    if (showDownload) kb.text("📥 Download Links (.txt)", "rl_download");
+    if (showRetry) kb.text("🔄 Retry Failed Links", "rl_link_retry");
+    kb.row().text("🏠 Main Menu", "main_menu");
+    return kb;
+  })();
 
   try {
     await bot.api.editMessageText(chatId, msgId, chunks[0], {
@@ -10266,6 +10300,36 @@ bot.callbackQuery("rl_download", async (ctx) => {
   } catch (err: any) {
     await ctx.reply(`❌ Failed to send file: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
   }
+});
+
+bot.callbackQuery("rl_link_retry", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Loading failed links..." });
+  const userId = ctx.from.id;
+  const cached = rlLinkRetryCache.get(userId);
+  if (!cached || Date.now() > cached.expiresAt) {
+    try {
+      await ctx.reply("⚠️ Retry cache expired. Please run Reset by Link again.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+  const links = [...cached.links];
+  rlLinkRetryCache.delete(userId);
+  resetLinkCancelRequests.delete(userId);
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  let msgId = ctx.callbackQuery.message!.message_id;
+  // Send a new progress message for the retry run
+  try {
+    const newMsg = await bot.api.sendMessage(
+      chatId,
+      `🔄 <b>Retrying ${links.length} Failed Link(s)...</b>\n\n⌛ Starting...`,
+      { parse_mode: "HTML" }
+    );
+    msgId = newMsg.message_id;
+  } catch {}
+  void runRlResolvePipelineBackground(userId, links, chatId, msgId);
 });
 
 async function resetLinkBackground(
@@ -12798,8 +12862,16 @@ for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d
     state.editSettingsData.settings.disappearingMessages = dur;
     state.step = "edit_settings_dp";
     await ctx.editMessageText(
-      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_dp_skip").text("❌ Cancel", "main_menu") }
+      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.\n\n" +
+      "• <b>Skip</b> — DP nahi badlega\n" +
+      "• <b>Remove DP</b> — sabhi selected groups ki DP hata di jayegi",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("⏭️ Skip", "es_dp_skip")
+          .text("🗑️ Remove DP", "es_dp_remove").row()
+          .text("❌ Cancel", "main_menu"),
+      }
     );
   });
 }
@@ -12809,10 +12881,36 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.dpBuffers = [];
+  state.editSettingsData.settings.removeDp = false;
   state.step = "edit_settings_desc";
   await ctx.editMessageText(
     "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu") }
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("⏭️ Skip", "es_desc_skip")
+        .text("🗑️ Remove Description", "es_desc_remove").row()
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("es_dp_remove", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.settings.dpBuffers = [];
+  state.editSettingsData.settings.removeDp = true;
+  state.step = "edit_settings_desc";
+  await ctx.editMessageText(
+    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("⏭️ Skip", "es_desc_skip")
+        .text("🗑️ Remove Description", "es_desc_remove").row()
+        .text("❌ Cancel", "main_menu"),
+    }
   );
 });
 
@@ -12821,6 +12919,16 @@ bot.callbackQuery("es_desc_skip", async (ctx) => {
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.description = "";
+  state.editSettingsData.settings.removeDescription = false;
+  await showEditSettingsReview(ctx);
+});
+
+bot.callbackQuery("es_desc_remove", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.editSettingsData) return;
+  state.editSettingsData.settings.description = "";
+  state.editSettingsData.settings.removeDescription = true;
   await showEditSettingsReview(ctx);
 });
 
@@ -12835,11 +12943,13 @@ async function showEditSettingsReview(ctx: any) {
   const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
   const dmText = settings.disappearingMessages === 86400 ? "24 Hours" : settings.disappearingMessages === 604800 ? "7 Days" : settings.disappearingMessages === 7776000 ? "90 Days" : "Off";
   const on = (v: boolean) => v ? "✅" : "❌";
+  const dpLine = settings.dpBuffers.length > 0 ? "✅ Change" : settings.removeDp ? "🗑️ Remove" : "❌ Skip";
+  const descLine = settings.removeDescription ? "🗑️ Remove" : settings.description ? esc(settings.description) : "Skip";
   const reviewText =
     "📋 <b>Edit Settings — Review</b>\n\n" +
     `📋 <b>Groups (${selectedGroups.length}):</b>\n${groupList}${moreText}\n\n` +
-    `📄 Description: ${settings.description ? esc(settings.description) : "Skip"}\n` +
-    `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Change" : "❌ Skip"}\n` +
+    `📄 Description: ${descLine}\n` +
+    `🖼️ DP: ${dpLine}\n` +
     `⏳ Disappearing: ${dmText}\n\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
@@ -12910,12 +13020,23 @@ async function applyEditSettingsBackground(
     }
     const group = groups[i];
     try {
-      await applyGroupSettings(userId, group.id, perms, settings.description);
+      // Apply permissions + description (or remove description)
+      if (settings.removeDescription) {
+        // Remove description: first apply perms, then explicitly clear description
+        await applyGroupSettings(userId, group.id, perms, "");
+        await new Promise(r => setTimeout(r, 600));
+        await removeGroupDescription(userId, group.id);
+      } else {
+        await applyGroupSettings(userId, group.id, perms, settings.description);
+      }
       if (settings.disappearingMessages >= 0) {
         await new Promise(r => setTimeout(r, 800));
         await setGroupDisappearingMessages(userId, group.id, settings.disappearingMessages);
       }
-      if (settings.dpBuffers.length > 0) {
+      if (settings.removeDp) {
+        await new Promise(r => setTimeout(r, 1500));
+        await removeGroupIcon(userId, group.id);
+      } else if (settings.dpBuffers.length > 0) {
         const dpBuf = settings.dpBuffers[i % settings.dpBuffers.length];
         await new Promise(r => setTimeout(r, 1500));
         await setGroupIcon(userId, group.id, dpBuf);
@@ -12940,16 +13061,17 @@ async function applyEditSettingsBackground(
   const cancelled = results.some(r => r.error === "Cancelled");
   const header = cancelled ? `🛑 <b>Cancelled (${ok}/${total} done)</b>` : `🎉 <b>Done! (${ok}/${total} applied)</b>`;
 
-  // Build settings summary to show at the top of the result
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
   const dmLabel = settings.disappearingMessages === 86400 ? "24 Hours"
     : settings.disappearingMessages === 604800 ? "7 Days"
     : settings.disappearingMessages === 7776000 ? "90 Days"
     : "Off";
+  const dpSummary = settings.dpBuffers.length > 0 ? "✅ Changed" : settings.removeDp ? "🗑️ Removed" : "❌ Skipped";
+  const descSummary = settings.removeDescription ? "🗑️ Removed" : settings.description ? esc(settings.description) : "Skipped";
   const settingsSummary =
     `⚙️ <b>Settings Applied:</b>\n` +
-    `📄 Description: ${settings.description ? esc(settings.description) : "Skipped"}\n` +
-    `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Changed" : "❌ Skipped"}\n` +
+    `📄 Description: ${descSummary}\n` +
+    `🖼️ DP: ${dpSummary}\n` +
     `⏳ Disappearing Messages: ${dmLabel}\n` +
     `📝 Edit Group Info: ${on(settings.editGroupInfo)}\n` +
     `💬 Send Messages: ${on(settings.sendMessages)}\n` +
@@ -15472,11 +15594,18 @@ bot.on("message:photo", async (ctx) => {
       if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
       const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
       state.editSettingsData.settings.dpBuffers = [buf];
+      state.editSettingsData.settings.removeDp = false;
       state.step = "edit_settings_desc";
-      await ctx.reply("✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nDescription bhejo ya skip karo.", {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu"),
-      });
+      await ctx.reply(
+        "✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("⏭️ Skip", "es_desc_skip")
+            .text("🗑️ Remove Description", "es_desc_remove").row()
+            .text("❌ Cancel", "main_menu"),
+        }
+      );
     } catch (err: any) {
       await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
     }
