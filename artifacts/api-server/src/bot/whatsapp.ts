@@ -1346,6 +1346,36 @@ export async function setGroupIcon(
   }
 }
 
+export async function removeGroupIcon(
+  userId: string,
+  groupId: string
+): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.removeProfilePicture(groupId);
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Remove group icon error:`, err?.message);
+    return false;
+  }
+}
+
+export async function removeGroupDescription(
+  userId: string,
+  groupId: string
+): Promise<boolean> {
+  const session = useSession(userId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    await session.socket.groupUpdateDescription(groupId, "");
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${userId}] Remove group description error:`, err?.message);
+    return false;
+  }
+}
+
 function extractInviteCode(link: string): string {
   const withoutQuery = link.split("?")[0];
   return withoutQuery
@@ -1363,8 +1393,8 @@ export async function joinGroupWithLink(
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
   }
-  const MAX_CONFLICT_RETRIES = 3;
-  for (let attempt = 1; attempt <= MAX_CONFLICT_RETRIES; attempt++) {
+  const MAX_RETRIES = 5;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const code = extractInviteCode(link);
       const result = await session.socket.groupAcceptInvite(code);
@@ -1379,18 +1409,40 @@ export async function joinGroupWithLink(
       }
       return { success: true, groupName };
     } catch (err: any) {
-      const msg = (err?.message || "").toLowerCase();
-      console.error(`[WA][${userId}] Join group error (attempt ${attempt}):`, err?.message);
-      if (msg.includes("conflict") && attempt < MAX_CONFLICT_RETRIES) {
-        await new Promise((r) => setTimeout(r, 3000 * attempt));
+      const msg = (err?.message || String(err || "")).toLowerCase();
+      console.error(`[WA][${userId}] Join group error (attempt ${attempt}/${MAX_RETRIES}):`, err?.message);
+
+      // Already a participant — treat as success
+      if (msg.includes("already") && (msg.includes("participant") || msg.includes("member"))) {
+        return { success: true, groupName: "Group (already joined)" };
+      }
+
+      // Permanent errors — don't retry
+      if (msg.includes("gone") || msg.includes("not-found") || msg.includes("invalid invite")) {
+        return { success: false, error: "Link invalid or expired" };
+      }
+
+      // Transient errors (conflict, server busy, rate limit) — retry with backoff
+      const isTransient =
+        msg.includes("conflict") ||
+        msg.includes("rate") ||
+        msg.includes("503") ||
+        msg.includes("429") ||
+        msg.includes("busy");
+
+      if (isTransient && attempt < MAX_RETRIES) {
+        const delay = 5000 * attempt; // 5s, 10s, 15s, 20s
+        console.log(`[WA][${userId}] Join transient error — waiting ${delay}ms before retry ${attempt + 1}/${MAX_RETRIES}...`);
+        await new Promise((r) => setTimeout(r, delay));
         if (!session.socket || !session.connected) {
           return { success: false, error: "WhatsApp not connected" };
         }
         continue;
       }
-      if (msg.includes("conflict")) {
-        return { success: false, error: "Server busy — please wait a moment and try again" };
+      if (isTransient) {
+        return { success: false, error: "Server busy — please try again later" };
       }
+
       return { success: false, error: err?.message || "Failed to join" };
     }
   }
