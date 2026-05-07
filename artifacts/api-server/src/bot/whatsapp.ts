@@ -1393,7 +1393,11 @@ export async function joinGroupWithLink(
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
   }
-  const MAX_RETRIES = 5;
+
+  // Backoff schedule (ms): 8s, 15s, 25s, 35s, 45s, 60s, 60s, 60s, 60s, 60s, 60s, 60s, 60s, 60s
+  const BACKOFF = [8000, 15000, 25000, 35000, 45000, 60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000, 60000];
+  const MAX_RETRIES = BACKOFF.length + 1; // 15 attempts total
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const code = extractInviteCode(link);
@@ -1417,36 +1421,60 @@ export async function joinGroupWithLink(
         return { success: true, groupName: "Group (already joined)" };
       }
 
-      // Permanent errors — don't retry
-      if (msg.includes("gone") || msg.includes("not-found") || msg.includes("invalid invite")) {
+      // Permanent errors — do not retry, tell user link is bad
+      if (
+        msg.includes("gone") ||
+        msg.includes("not-found") ||
+        msg.includes("invalid invite") ||
+        msg.includes("bad request") ||
+        msg.includes("forbidden") ||
+        msg.includes("not-authorized") ||
+        msg.includes("revoked")
+      ) {
         return { success: false, error: "Link invalid or expired" };
       }
 
-      // Transient errors (conflict, server busy, rate limit) — retry with backoff
+      // Transient / server-side throttling — retry silently, never surface to user
       const isTransient =
         msg.includes("conflict") ||
         msg.includes("rate") ||
+        msg.includes("busy") ||
+        msg.includes("temporarily") ||
+        msg.includes("unavailable") ||
+        msg.includes("overloaded") ||
+        msg.includes("timeout") ||
+        msg.includes("timed out") ||
+        msg.includes("econnreset") ||
+        msg.includes("etimedout") ||
         msg.includes("503") ||
+        msg.includes("502") ||
+        msg.includes("500") ||
         msg.includes("429") ||
-        msg.includes("busy");
+        msg.includes("408") ||
+        msg.includes("504");
 
       if (isTransient && attempt < MAX_RETRIES) {
-        const delay = 5000 * attempt; // 5s, 10s, 15s, 20s
+        const delay = BACKOFF[attempt - 1];
         console.log(`[WA][${userId}] Join transient error — waiting ${delay}ms before retry ${attempt + 1}/${MAX_RETRIES}...`);
         await new Promise((r) => setTimeout(r, delay));
-        if (!session.socket || !session.connected) {
+        // Re-check connection after long wait
+        const freshSession = useSession(userId);
+        if (!freshSession?.socket || !freshSession.connected) {
           return { success: false, error: "WhatsApp not connected" };
         }
         continue;
       }
+
       if (isTransient) {
-        return { success: false, error: "Server busy — please try again later" };
+        // Exhausted all retries for transient errors — tell user it's a WA limit issue
+        return { success: false, error: "Could not join (WhatsApp rate limit — try later)" };
       }
 
+      // Unknown error
       return { success: false, error: err?.message || "Failed to join" };
     }
   }
-  return { success: false, error: "Failed to join after retries" };
+  return { success: false, error: "Could not join (WhatsApp rate limit — try later)" };
 }
 
 export async function resetGroupInviteLink(
