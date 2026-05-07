@@ -7,7 +7,6 @@ import makeWASocket, {
 import { Boom } from "@hapi/boom";
 import pino from "pino";
 import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions, savePairingMode } from "./mongo-auth-state";
-import { getCustomDeviceName } from "./mongo-bot-data";
 
 const logger = pino({ level: "silent" });
 
@@ -375,14 +374,9 @@ async function createSocket(
     },
     printQRInTerminal: false,
     logger,
-    // Device name shown in WhatsApp → Linked Devices.
-    // Admin can change it via /devicename command (stored in MongoDB).
-    // Falls back to "Google Chrome (Ubuntu)" when no custom name is set.
-    browser: await (async () => {
-      const custom = await getCustomDeviceName();
-      if (custom) return ["Bot", custom, "1.0.0"] as [string, string, string];
-      return Browsers.ubuntu("Chrome");
-    })(),
+    // Browsers.ubuntu("Chrome") = ["Ubuntu", "Chrome", "20.0.04"]
+    // This is required for phone number pairing to work correctly
+    browser: Browsers.ubuntu("Chrome"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
@@ -1348,30 +1342,6 @@ export async function setGroupIcon(
     return true;
   } catch (err: any) {
     console.error(`[WA][${userId}] Group icon error:`, err?.message);
-    return false;
-  }
-}
-
-export async function removeGroupIcon(userId: string, groupId: string): Promise<boolean> {
-  const session = useSession(userId);
-  if (!session?.socket || !session.connected) return false;
-  try {
-    await session.socket.removeProfilePicture(groupId);
-    return true;
-  } catch (err: any) {
-    console.error(`[WA][${userId}] Remove group icon error:`, err?.message);
-    return false;
-  }
-}
-
-export async function removeGroupDescription(userId: string, groupId: string): Promise<boolean> {
-  const session = useSession(userId);
-  if (!session?.socket || !session.connected) return false;
-  try {
-    await session.socket.groupUpdateDescription(groupId, "");
-    return true;
-  } catch (err: any) {
-    console.error(`[WA][${userId}] Remove group description error:`, err?.message);
     return false;
   }
 }

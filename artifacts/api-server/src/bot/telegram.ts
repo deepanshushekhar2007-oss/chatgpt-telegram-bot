@@ -20,8 +20,6 @@ import {
   getGroupInviteLink,
   leaveGroup,
   deleteGroupChat,
-  removeGroupIcon,
-  removeGroupDescription,
   getGroupParticipants,
   removeGroupParticipant,
   getGroupPendingList,
@@ -91,8 +89,6 @@ import {
   loadAllAutoAccepterJobs,
   deleteAutoAccepterJob,
   type PersistedAutoAccepterJob,
-  getCustomDeviceName,
-  setCustomDeviceName,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -977,8 +973,6 @@ interface GroupSettings {
   finalNames: string[];
   namingMode: "auto" | "custom";
   dpBuffers: Buffer[];
-  removeDp: boolean;
-  removeDescription: boolean;
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
@@ -3233,10 +3227,7 @@ bot.command("admin", async (ctx) => {
     "📱 <b>Session Control (WS Sharing):</b>\n" +
     "📋 <code>/ws</code> — List all WhatsApp sessions (live + offline)\n" +
     "🔗 <code>/ws &lt;user_id&gt;</code> — Borrow a user's WA session (shared access)\n" +
-    "🔓 <code>/ws off</code> — Release borrowed session, return to your own\n\n" +
-    "📛 <b>Device Name (Linked Devices):</b>\n" +
-    "✏️ <code>/devicename &lt;name&gt;</code> — Set custom device name for all users\n" +
-    "🔄 <code>/devicename default</code> — Reset to default (Google Chrome / Ubuntu)",
+    "🔓 <code>/ws off</code> — Release borrowed session, return to your own",
 
     { parse_mode: "HTML" }
   );
@@ -3378,52 +3369,6 @@ bot.command("ws", async (ctx) => {
 // When OFF, the bot reverts to the original behaviour — every user can use
 // every feature for free (subject to existing /access subscription mode if
 // admin enabled it separately).
-// ─── /devicename — Admin device name control ─────────────────────────────────
-bot.command("devicename", async (ctx) => {
-  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
-
-  const parts = (ctx.message?.text || "").split(/\s+/);
-  parts.shift(); // remove /devicename
-  const arg = parts.join(" ").trim();
-
-  if (!arg) {
-    const current = await getCustomDeviceName();
-    await ctx.reply(
-      `📛 <b>Device Name (Linked Devices)</b>\n\n` +
-      `Current: <b>${current ? esc(current) : "Google Chrome (Ubuntu) [default]"}</b>\n\n` +
-      `❓ <b>Usage:</b>\n` +
-      `<code>/devicename &lt;name&gt;</code> — Set custom name\n` +
-      `<code>/devicename default</code> — Reset to default`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  if (arg.toLowerCase() === "default") {
-    await setCustomDeviceName(null);
-    await ctx.reply(
-      `✅ <b>Device name reset to default</b>\n\n` +
-      `New sessions will show as: <b>Google Chrome (Ubuntu)</b>\n\n` +
-      `<i>⚠️ Already connected sessions will still show the old name until they reconnect.</i>`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  if (arg.length > 50) {
-    await ctx.reply("❌ Device name too long (max 50 characters).", { parse_mode: "HTML" });
-    return;
-  }
-
-  await setCustomDeviceName(arg);
-  await ctx.reply(
-    `✅ <b>Device name updated!</b>\n\n` +
-    `New sessions will show as: <b>${esc(arg)} (Bot)</b>\n\n` +
-    `<i>⚠️ Already connected sessions will still show the old name until they reconnect or the session is refreshed.</i>`,
-    { parse_mode: "HTML" }
-  );
-});
-
 bot.command("refermode", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
@@ -4748,7 +4693,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -12853,18 +12798,10 @@ for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d
     state.editSettingsData.settings.disappearingMessages = dur;
     state.step = "edit_settings_dp";
     await ctx.editMessageText(
-      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP change karna hai?\n\n• Photo bhejo — naya DP lagega\n• <b>Remove DP</b> — existing DP hata dega\n• <b>Skip</b> — DP waise hi rahega",
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🗑️ Remove DP", "es_dp_remove").row().text("⏭️ Skip", "es_dp_skip").text("❌ Cancel", "main_menu") }
+      "🖼️ <b>Group DP</b>\n\nSare selected groups mein DP lagana hai?\nPhoto bhejo ya skip karo.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_dp_skip").text("❌ Cancel", "main_menu") }
     );
   });
-}
-
-function showDescriptionStep(ctx: any, state: NonNullable<ReturnType<typeof userStates.get>>) {
-  state.step = "edit_settings_desc";
-  return ctx.editMessageText(
-    "📄 <b>Group Description</b>\n\nSare selected groups mein description change karna hai?\n\n• Description text bhejo — naya description lagega\n• <b>Remove Description</b> — existing description hata dega\n• <b>Skip</b> — description waise hi rahega",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🗑️ Remove Description", "es_desc_remove").row().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu") }
-  );
 }
 
 bot.callbackQuery("es_dp_skip", async (ctx) => {
@@ -12872,17 +12809,11 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.dpBuffers = [];
-  state.editSettingsData.settings.removeDp = false;
-  await showDescriptionStep(ctx, state);
-});
-
-bot.callbackQuery("es_dp_remove", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.editSettingsData) return;
-  state.editSettingsData.settings.dpBuffers = [];
-  state.editSettingsData.settings.removeDp = true;
-  await showDescriptionStep(ctx, state);
+  state.step = "edit_settings_desc";
+  await ctx.editMessageText(
+    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "es_desc_skip").text("❌ Cancel", "main_menu") }
+  );
 });
 
 bot.callbackQuery("es_desc_skip", async (ctx) => {
@@ -12890,16 +12821,6 @@ bot.callbackQuery("es_desc_skip", async (ctx) => {
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.description = "";
-  state.editSettingsData.settings.removeDescription = false;
-  await showEditSettingsReview(ctx);
-});
-
-bot.callbackQuery("es_desc_remove", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.editSettingsData) return;
-  state.editSettingsData.settings.description = "";
-  state.editSettingsData.settings.removeDescription = true;
   await showEditSettingsReview(ctx);
 });
 
@@ -12914,13 +12835,11 @@ async function showEditSettingsReview(ctx: any) {
   const moreText = selectedGroups.length > 5 ? `\n... +${selectedGroups.length - 5} more` : "";
   const dmText = settings.disappearingMessages === 86400 ? "24 Hours" : settings.disappearingMessages === 604800 ? "7 Days" : settings.disappearingMessages === 7776000 ? "90 Days" : "Off";
   const on = (v: boolean) => v ? "✅" : "❌";
-  const dpStatus = settings.dpBuffers.length > 0 ? "✅ Change" : settings.removeDp ? "🗑️ Remove" : "⏭️ Skip";
-  const descStatus = settings.description ? esc(settings.description) : settings.removeDescription ? "🗑️ Remove" : "⏭️ Skip";
   const reviewText =
     "📋 <b>Edit Settings — Review</b>\n\n" +
     `📋 <b>Groups (${selectedGroups.length}):</b>\n${groupList}${moreText}\n\n` +
-    `📄 Description: ${descStatus}\n` +
-    `🖼️ DP: ${dpStatus}\n` +
+    `📄 Description: ${settings.description ? esc(settings.description) : "Skip"}\n` +
+    `🖼️ DP: ${settings.dpBuffers.length > 0 ? "✅ Change" : "❌ Skip"}\n` +
     `⏳ Disappearing: ${dmText}\n\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
@@ -12991,19 +12910,12 @@ async function applyEditSettingsBackground(
     }
     const group = groups[i];
     try {
-      await applyGroupSettings(userId, group.id, perms, settings.removeDescription ? "" : settings.description);
-      if (settings.removeDescription) {
-        await new Promise(r => setTimeout(r, 800));
-        await removeGroupDescription(userId, group.id);
-      }
+      await applyGroupSettings(userId, group.id, perms, settings.description);
       if (settings.disappearingMessages >= 0) {
         await new Promise(r => setTimeout(r, 800));
         await setGroupDisappearingMessages(userId, group.id, settings.disappearingMessages);
       }
-      if (settings.removeDp) {
-        await new Promise(r => setTimeout(r, 1000));
-        await removeGroupIcon(userId, group.id);
-      } else if (settings.dpBuffers.length > 0) {
+      if (settings.dpBuffers.length > 0) {
         const dpBuf = settings.dpBuffers[i % settings.dpBuffers.length];
         await new Promise(r => setTimeout(r, 1500));
         await setGroupIcon(userId, group.id, dpBuf);
