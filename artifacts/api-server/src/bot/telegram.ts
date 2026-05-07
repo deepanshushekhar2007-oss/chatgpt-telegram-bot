@@ -14817,6 +14817,82 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
   })();
 }
 
+// ─── Pair Code Helper ─────────────────────────────────────────────────────────
+// Shared logic used by both awaiting_phone handler and the stateless phone
+// number fallback (handles bot restarts between pressing Pair Code and typing).
+
+async function handlePairCodePhone(ctx: any, userId: number, rawText: string): Promise<void> {
+  const phone = "+" + rawText.replace(/[^0-9]/g, "");
+  if (!/^\+\d{10,15}$/.test(phone)) {
+    await ctx.reply(
+      "❌ <b>Invalid phone number.</b>\n\nExample: <code>+919942222222</code>\nYa: <code>+91 (9999) 222222</code>",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔑 Try Again", "connect_pair_code").text("❌ Cancel", "main_menu") }
+    );
+    return;
+  }
+  userStates.delete(userId);
+  if (isConnected(String(userId))) {
+    await ctx.reply("✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.", {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+  const statusMsg = await ctx.reply(
+    `⏳ <b>Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
+    { parse_mode: "HTML" }
+  );
+  try {
+    await connectWhatsApp(
+      String(userId),
+      phone,
+      async (code) => {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `🔑 <b>Pairing Code:</b>\n\n<code>${esc(code)}</code>\n\n` +
+            `📋 <b>Steps:</b>\n1️⃣ Open WhatsApp on your phone\n2️⃣ Settings → Linked Devices\n` +
+            `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
+            `5️⃣ Enter code: <code>${esc(code)}</code>\n\n⌛ Waiting for confirmation...`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+      },
+      async () => {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            whatsappConnectedText(userId, "🎉 All features are now available."),
+            { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+          );
+        } catch {}
+      },
+      async (reason) => {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `⚠️ <b>WhatsApp Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Try connecting again.`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect Again", "connect_wa").text("🏠 Menu", "main_menu") }
+          );
+        } catch {}
+      }
+    );
+  } catch (err: any) {
+    console.error(`[BOT] connectWhatsApp threw for user ${userId}:`, err?.message);
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Try Again", "connect_wa").text("🏠 Menu", "main_menu") }
+      );
+    } catch {}
+  }
+}
+
 // ─── Text Handler ─────────────────────────────────────────────────────────────
 
 bot.on("message:text", async (ctx) => {
@@ -14847,6 +14923,20 @@ bot.on("message:text", async (ctx) => {
       );
       return;
     }
+
+    // ── Phone number fallback — handles bot restart between "Pair Code" tap and number input
+    // If the user's state was wiped (server restart) but they're typing a phone number,
+    // gracefully re-enter the pairing flow instead of showing a dead-end message.
+    if (!text.startsWith("/")) {
+      const digits = text.replace(/[^0-9]/g, "");
+      if (digits.length >= 10 && digits.length <= 15 && (text.startsWith("+") || text.match(/^\d/))) {
+        if (await hasAccess(userId)) {
+          await handlePairCodePhone(ctx, userId, text);
+          return;
+        }
+      }
+    }
+
     // Block free-text interactions when refer mode is on and the user has
     // no access — same UX as button presses.
     const data = await loadBotData();
@@ -14857,7 +14947,10 @@ bot.on("message:text", async (ctx) => {
         return;
       }
     }
-    await ctx.reply("💬 Use /start to begin.");
+    await ctx.reply(
+      "💬 <b>Session expired.</b> Please use /start to open the menu.",
+      { parse_mode: "HTML" }
+    );
     return;
   }
 
@@ -14925,54 +15018,7 @@ bot.on("message:text", async (ctx) => {
   }
 
   if (state.step === "awaiting_phone") {
-    const phone = "+" + text.replace(/[^0-9]/g, "");
-    if (!/^\+\d{10,15}$/.test(phone)) {
-      await ctx.reply("❌ Invalid phone number.\nExample: <code>+919942222222</code>\nYa: <code>+91 (9999) 222222</code>", { parse_mode: "HTML" }); return;
-    }
-    userStates.delete(userId);
-    const statusMsg = await ctx.reply(
-      `⏳ <b>Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
-      { parse_mode: "HTML" }
-    );
-    try {
-      await connectWhatsApp(String(userId), phone,
-        async (code) => {
-          try {
-            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `🔑 <b>Pairing Code:</b>\n\n<code>${esc(code)}</code>\n\n` +
-              `📋 <b>Steps:</b>\n1️⃣ Open WhatsApp on your phone\n2️⃣ Settings → Linked Devices\n` +
-              `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
-              `5️⃣ Enter code: <code>${esc(code)}</code>\n\n⌛ Waiting for confirmation...`,
-              { parse_mode: "HTML" }
-            );
-          } catch {}
-        },
-        async () => {
-          try {
-            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              whatsappConnectedText(userId, "🎉 All features are now available."),
-              { parse_mode: "HTML", reply_markup: mainMenu(userId) }
-            );
-          } catch {}
-        },
-        async (reason) => {
-          try {
-            await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-              `⚠️ <b>WhatsApp Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Try connecting again.`,
-              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect Again", "connect_wa").text("🏠 Menu", "main_menu") }
-            );
-          } catch {}
-        }
-      );
-    } catch (err: any) {
-      console.error(`[BOT] connectWhatsApp threw for user ${userId}:`, err?.message);
-      try {
-        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id,
-          `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Try Again", "connect_wa").text("🏠 Menu", "main_menu") }
-        );
-      } catch {}
-    }
+    await handlePairCodePhone(ctx, userId, text);
     return;
   }
 
