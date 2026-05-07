@@ -1780,22 +1780,64 @@ export async function checkContactsInGroup(
 export async function getGroupIdFromLink(
   userId: string,
   inviteLink: string
-): Promise<{ id: string; subject: string } | null> {
+): Promise<{ id: string; subject: string; permanent?: boolean } | null> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
   const code = extractInviteCode(inviteLink);
-  let lastErr: any = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      // Back off between retries: 3s, 6s
-      await new Promise((r) => setTimeout(r, 3000 * attempt));
-    }
+
+  // Backoff schedule (ms): 5s, 10s, 20s, 30s, 45s, 60s, 60s, 60s, 60s
+  const BACKOFF = [5000, 10000, 20000, 30000, 45000, 60000, 60000, 60000, 60000];
+  const MAX_RETRIES = BACKOFF.length + 1; // 10 attempts total
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const metadata = await session.socket.groupGetInviteInfo(code);
       return { id: metadata.id, subject: metadata.subject };
     } catch (err: any) {
-      lastErr = err;
-      console.error(`[WA][${userId}] Group info error (attempt ${attempt + 1}/3):`, err?.message);
+      const msg = (err?.message || String(err || "")).toLowerCase();
+      console.error(`[WA][${userId}] getGroupIdFromLink error (attempt ${attempt}/${MAX_RETRIES}):`, err?.message);
+
+      // Permanent errors — link is bad, no point retrying
+      if (
+        msg.includes("gone") ||
+        msg.includes("not-found") ||
+        msg.includes("invalid invite") ||
+        msg.includes("revoked") ||
+        msg.includes("forbidden") ||
+        msg.includes("bad request") ||
+        msg.includes("not-authorized")
+      ) {
+        return null; // caller shows "Link invalid or expired"
+      }
+
+      // Transient errors — rate limit / server overload, retry with backoff
+      const isTransient =
+        msg.includes("conflict") ||
+        msg.includes("rate") ||
+        msg.includes("busy") ||
+        msg.includes("temporarily") ||
+        msg.includes("unavailable") ||
+        msg.includes("overloaded") ||
+        msg.includes("timeout") ||
+        msg.includes("timed out") ||
+        msg.includes("econnreset") ||
+        msg.includes("etimedout") ||
+        msg.includes("503") ||
+        msg.includes("502") ||
+        msg.includes("500") ||
+        msg.includes("429") ||
+        msg.includes("408") ||
+        msg.includes("504");
+
+      if (attempt < MAX_RETRIES) {
+        // For any error (transient or unknown), retry — but use longer delay for transient
+        const delay = isTransient ? BACKOFF[attempt - 1] : Math.min(5000 * attempt, 30000);
+        console.log(`[WA][${userId}] getGroupIdFromLink waiting ${delay}ms before retry ${attempt + 1}/${MAX_RETRIES}...`);
+        await new Promise((r) => setTimeout(r, delay));
+        const freshSession = useSession(userId);
+        if (!freshSession?.socket || !freshSession.connected) return null;
+        continue;
+      }
     }
   }
   return null;
