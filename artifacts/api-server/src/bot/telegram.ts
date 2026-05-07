@@ -1426,10 +1426,13 @@ interface JoinSession {
   queue: string[];
   done: number;
   results: string[];
+  failedLinks: Array<{ link: string; reason: string }>;
   running: boolean;
   cancelled: boolean;
 }
 const joinSessions = new Map<number, JoinSession>();
+// Caches failed join links for .txt download. Expires after 30 min.
+const joinFailedLinksCache = new Map<number, { text: string; expiresAt: number }>();
 
 // ─── Reset-by-Link Resolve Session ───────────────────────────────────────────
 // Allows users to send multiple batches of links while resolution is running.
@@ -1587,20 +1590,18 @@ async function runJoinBackground(userId: number): Promise<void> {
   const session = joinSessions.get(userId);
   if (!session || session.running) return;
   session.running = true;
-  // Track consecutive failures to apply adaptive backoff
-  let consecutiveFails = 0;
   try {
     while (session.queue.length > 0 && !session.cancelled) {
       if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
       const link = session.queue.shift()!;
       const res = await joinGroupWithLink(String(userId), link);
       if (res.success) {
-        consecutiveFails = 0;
         session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
       } else {
-        consecutiveFails++;
         const errMsg = res.error || "Unknown";
-        session.results.push(`❌ Failed: ${esc(errMsg)}`);
+        // Show the original invite link so user knows exactly which group failed
+        session.results.push(`❌ ${esc(errMsg)}\n🔗 <code>${esc(link)}</code>`);
+        session.failedLinks.push({ link, reason: errMsg });
       }
       session.done++;
       if (!cancelDialogActiveFor.has(userId)) {
@@ -1611,23 +1612,32 @@ async function runJoinBackground(userId: number): Promise<void> {
           });
         } catch {}
       }
-      if (session.queue.length > 0) {
-        // Adaptive delay: longer backoff when WA is throttling (3+ consecutive fails)
-        const delay = consecutiveFails >= 3 ? 6000 : consecutiveFails >= 1 ? 3000 : 2000;
-        await new Promise((r) => setTimeout(r, delay));
-      }
+      // Fixed 2s between joins — backoff is now handled inside joinGroupWithLink itself
+      if (session.queue.length > 0) await new Promise((r) => setTimeout(r, 2000));
     }
     joinCancelRequests.delete(userId);
     cancelDialogActiveFor.delete(userId);
     const ok = session.results.filter((r) => r.startsWith("✅")).length;
     const total = session.done;
+    const failed = session.failedLinks.length;
     const header = session.cancelled
       ? `⛔ <b>Joining Stopped (${ok}/${total} joined)</b>`
       : `🎉 <b>Done! (${ok}/${total} joined)</b>`;
     const last = session.results.slice(-25);
     const more = session.results.length > 25 ? `... +${session.results.length - 25} more\n\n` : "";
     const finalText = `${header}\n\n${more}${last.join("\n")}`;
-    const finalKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
+
+    // Cache failed links for .txt download (30 min)
+    const showDownload = failed > 0;
+    if (showDownload) {
+      const txt = session.failedLinks.map(f => `${f.link}  (${f.reason})`).join("\n");
+      joinFailedLinksCache.set(userId, { text: txt, expiresAt: Date.now() + 30 * 60 * 1000 });
+    }
+
+    const finalKb = new InlineKeyboard();
+    if (showDownload) finalKb.text(`📥 Download Failed Links (${failed})`, "join_failed_download").row();
+    finalKb.text("🏠 Main Menu", "main_menu");
+
     let editSuccess = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -5286,6 +5296,36 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
   // the "❌ Cancel" button back. The background task clears the flag in
   // its finally cleanup.
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+});
+
+bot.callbackQuery("join_failed_download", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Preparing file..." });
+  const userId = ctx.from.id;
+  const cached = joinFailedLinksCache.get(userId);
+  if (!cached || Date.now() > cached.expiresAt) {
+    try {
+      await ctx.reply("⚠️ Download expired. Please run Join Groups again.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+  try {
+    const fileContent = Buffer.from(cached.text, "utf-8");
+    const fileName = `failed_join_links_${new Date().toISOString().slice(0, 10)}.txt`;
+    await bot.api.sendDocument(
+      ctx.chat.id,
+      new InputFile(fileContent, fileName),
+      {
+        caption: `📥 <b>Failed Join Links</b>\n${cached.text.split("\n").filter(l => l.startsWith("https://")).length} link(s) that could not be joined`,
+        parse_mode: "HTML",
+      }
+    );
+    joinFailedLinksCache.delete(userId);
+  } catch (err: any) {
+    await ctx.reply(`❌ Failed to send file: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
+  }
 });
 
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
@@ -15207,6 +15247,7 @@ bot.on("message:text", async (ctx) => {
       queue: [...cleanLinks],
       done: 0,
       results: [],
+      failedLinks: [],
       running: false,
       cancelled: false,
     };
