@@ -5489,28 +5489,49 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   saveUserState(userId, ctcInitState).catch((e: any) => console.error("[CTC-STEP-5] saveUserState FAILED:", e?.message));
   console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
 
-  const ctcPrompt =
+  // notr() skips auto-translation — prevents Google Translate from mangling
+  // the HTML tags (<b>, <code>) and URLs inside sentinel tokens, which causes
+  // Telegram to reject the message with "can't parse entities" for non-English users.
+  const ctcPrompt = notr(
     "🔍 <b>CTC Checker</b>\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"
+  );
 
-  const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
+  const cancelKb = new InlineKeyboard().text(notr("❌ Cancel"), "main_menu");
 
-  // Step 5: Edit menu message in-place with the CTC prompt (same pattern as join_groups, reset-by-link etc.)
-  console.error(`[CTC-STEP-6] Editing menu message in-place — chatId=${chatId} msgId=${msgId}`);
+  // Step 5: Show the CTC prompt. Try 3 approaches in order:
+  //   A) Edit the menu message in-place (cleanest, no extra message)
+  //   B) Send a new message to chatId (covers cases where edit fails — e.g. message too old)
+  //   C) Send directly to userId (last resort for any chatId confusion)
+  console.error(`[CTC-STEP-6] Showing CTC prompt — chatId=${chatId} msgId=${msgId}`);
+  let promptShown = false;
   try {
     await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    promptShown = true;
     console.error("[CTC-STEP-6] editMessageText OK ✅");
   } catch (err: any) {
-    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err, "| Falling back to reply");
+    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err);
+  }
+  if (!promptShown) {
     try {
-      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-      console.error("[CTC-STEP-6] reply fallback OK ✅");
-    } catch (err2: any) {
-      console.error("[CTC-STEP-6] reply fallback ALSO FAILED:", err2?.message ?? err2);
+      await ctx.api.sendMessage(chatId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      promptShown = true;
+      console.error("[CTC-STEP-6] sendMessage(chatId) OK ✅");
+    } catch (err: any) {
+      console.error("[CTC-STEP-6] sendMessage(chatId) FAILED:", err?.message ?? err);
     }
   }
-  console.error("[CTC-STEP-8] Handler complete");
+  if (!promptShown) {
+    try {
+      await ctx.api.sendMessage(userId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      promptShown = true;
+      console.error("[CTC-STEP-6] sendMessage(userId) OK ✅");
+    } catch (err: any) {
+      console.error("[CTC-STEP-6] sendMessage(userId) FAILED:", err?.message ?? err);
+    }
+  }
+  console.error(`[CTC-STEP-8] Handler complete — promptShown=${promptShown}`);
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
