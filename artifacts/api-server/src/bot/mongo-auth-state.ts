@@ -185,7 +185,12 @@ export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: stri
       const rawId = creds?.me?.id || creds?.me?.lid || "";
       const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
       phoneNumber = digits ? `+${digits}` : "";
-      const hasConnected = creds?.registered === true || (creds?.me?.id && String(creds.me.id).includes("@"));
+      // Only trust registered=true. The me.id fallback fires during a pair-code
+      // request — Baileys writes me.id to MongoDB BEFORE the user enters the code
+      // in WhatsApp (registered is still false). Counting me.id alone as "connected"
+      // makes hasStoredWhatsAppSession() return true for an incomplete pairing,
+      // causing the bot to show "Reconnecting…" instead of the Connect flow.
+      const hasConnected = creds?.registered === true;
       if (!hasConnected) continue;
     } catch {
       continue;
