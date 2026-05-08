@@ -643,32 +643,39 @@ function esc(text: string): string {
 function connectedStatusText(userId: number): string {
   const mainConnected = isConnected(String(userId));
   const autoConnected = isAutoConnected(String(userId));
-  let text = "";
+
+  const lines: string[] = [];
 
   if (!mainConnected) {
-    text += "📱 <b>Status:</b> WhatsApp not connected\n";
+    lines.push("│ ❌  WhatsApp: Not Connected");
   } else {
     const number = getConnectedWhatsAppNumber(String(userId));
-    text += "✅ <b>Status:</b> WhatsApp connected\n" +
-      (number ? `📞 <b>Connected Number:</b> <code>${esc(number)}</code>\n` : "📞 <b>Connected Number:</b> Detecting from session\n");
+    lines.push(`│ ✅  WhatsApp: ${number ? `<code>${esc(number)}</code>` : "Connected"}`);
   }
 
   if (autoConnected) {
     const autoNumber = getAutoConnectedNumber(String(userId));
-    text += "🤖 <b>Auto Chat WA:</b> Connected\n" +
-      (autoNumber ? `📞 <b>Auto Number:</b> <code>${esc(autoNumber)}</code>\n` : "");
+    lines.push(`│ 🤖  Auto WA: ${autoNumber ? `<code>${esc(autoNumber)}</code>` : "Connected"}`);
   }
 
-  return text;
+  return (
+    `╭─── 📡 Status ─────────╮\n` +
+    lines.join("\n") + "\n" +
+    `╰───────────────────────╯`
+  );
 }
 
-function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu"): string {
-  const greeting = mode === "welcome" ? "👋 <b>Welcome!</b>" : "✨ <b>Main Menu</b>";
+function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu", name?: string): string {
+  const safeName = name ? esc(name) : "";
+  const greeting = mode === "welcome"
+    ? `👋 Hey ${safeName}, Welcome!`
+    : `👋 Hey ${safeName}, Welcome Back!`;
   return (
-    `🤖 <b>${BOT_DISPLAY_NAME}</b>\n\n` +
-    `${greeting}\n` +
+    `🤖 <b>${BOT_DISPLAY_NAME}</b> 🤖\n` +
+    `▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n` +
+    `${greeting}\n\n` +
     connectedStatusText(userId) +
-    "\nChoose an option below:"
+    `\n\n› Choose an option:`
   );
 }
 
@@ -2254,7 +2261,7 @@ bot.callbackQuery("check_joined", async (ctx) => {
       }
 
       await ctx.editMessageText(
-        mainMenuText(userId, "welcome"),
+        mainMenuText(userId, "welcome", ctx.from?.first_name),
         { parse_mode: "HTML", reply_markup: mainMenu(userId) }
       );
       if (trialJustStarted) {
@@ -2515,7 +2522,7 @@ bot.command("start", async (ctx) => {
     await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
   }
   await ctx.reply(
-    mainMenuText(userId, "welcome"),
+    mainMenuText(userId, "welcome", ctx.from?.first_name),
     { parse_mode: "HTML", reply_markup: mainMenu(userId) }
   );
 });
@@ -2691,7 +2698,7 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
     await new Promise((r) => setTimeout(r, 300));
     try {
       await ctx.editMessageText(
-        mainMenuText(userId, "welcome"),
+        mainMenuText(userId, "welcome", ctx.from?.first_name),
         { parse_mode: "HTML", reply_markup: mainMenu(userId) }
       );
     } catch {
@@ -2736,7 +2743,7 @@ async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
   // Done — show the main menu in the new language. The transformer auto-translates.
   try {
     await ctx.editMessageText(
-      mainMenuText(userId, "welcome"),
+      mainMenuText(userId, "welcome", ctx.from?.first_name),
       { parse_mode: "HTML", reply_markup: mainMenu(userId) }
     );
   } catch {
@@ -3050,7 +3057,7 @@ bot.callbackQuery("main_menu", async (ctx) => {
   if (!(await checkAccessMiddleware(ctx))) return;
   userStates.delete(userId);
   await ctx.editMessageText(
-    mainMenuText(userId, "menu"),
+    mainMenuText(userId, "menu", ctx.from?.first_name),
     { parse_mode: "HTML", reply_markup: mainMenu(userId) }
   );
 });
@@ -15204,7 +15211,7 @@ bot.on("message:text", async (ctx) => {
       if (await isBanned(userId)) return;
       if (await hasAccess(userId)) {
         await ctx.reply(
-          mainMenuText(userId, "welcome"),
+          mainMenuText(userId, "welcome", ctx.from?.first_name),
           { parse_mode: "HTML", reply_markup: mainMenu(userId) }
         );
       } else {
