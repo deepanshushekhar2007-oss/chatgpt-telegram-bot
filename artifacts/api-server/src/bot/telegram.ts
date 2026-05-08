@@ -93,6 +93,9 @@ import {
   loadAllAutoAccepterJobs,
   deleteAutoAccepterJob,
   type PersistedAutoAccepterJob,
+  saveUserState,
+  loadUserState,
+  deleteUserState,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -1349,6 +1352,24 @@ const autoChatSessions: Map<number, AutoChatSession> = new Map();
 const cigSessions: Map<number, CigSession> = new Map();
 const acfSessions: Map<number, AcfSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
+
+// Cross-instance state helper — checks in-memory first, then MongoDB fallback.
+// Use this in message handlers where a different Render instance may have set the state.
+async function getOrLoadUserState(userId: number): Promise<UserState | undefined> {
+  const local = userStates.get(userId);
+  if (local) return local;
+  try {
+    const remote = await loadUserState(userId);
+    if (remote) {
+      console.error(`[STATE] Loaded state from MongoDB for userId=${userId} step=${remote.step}`);
+      userStates.set(userId, remote as UserState);
+      return remote as UserState;
+    }
+  } catch (err: any) {
+    console.error('[STATE] getOrLoadUserState MongoDB error:', err?.message);
+  }
+  return undefined;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // User-activity tracking (in-memory). Drives three behaviours:
@@ -5458,13 +5479,15 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
     return;
   }
 
-  // Step 4: Set user state
+  // Step 4: Set user state + persist to MongoDB (cross-instance share)
   console.error("[CTC-STEP-5] Setting userState: ctc_enter_links");
-  userStates.set(userId, {
+  const ctcInitState: UserState = {
     step: "ctc_enter_links",
     ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 },
-  });
-  console.error("[CTC-STEP-5] userState set OK");
+  };
+  userStates.set(userId, ctcInitState);
+  saveUserState(userId, ctcInitState).catch((e: any) => console.error("[CTC-STEP-5] saveUserState FAILED:", e?.message));
+  console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
 
   const ctcPrompt =
     "🔍 CTC Checker\n\n" +
@@ -5503,7 +5526,12 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
   const userId = ctx.from.id;
   console.error(`[CTC-DEBUG] ctc_start_check reached for userId=${userId}`);
 
-  const state = userStates.get(userId);
+  let state = userStates.get(userId);
+  if (!state?.ctcData) {
+    console.error(`[CTC-START] No in-memory state for userId=${userId}, trying MongoDB...`);
+    const remote = await loadUserState(userId);
+    if (remote) { state = remote as UserState; userStates.set(userId, state); console.error(`[CTC-START] Loaded state from MongoDB: step=${state.step}`); }
+  }
   if (!state?.ctcData) {
     console.error(`[CTC-START] No state for userId=${userId}`);
     try {
@@ -10503,13 +10531,53 @@ async function runRlResolvePipelineBackground(
     });
   } catch {}
 
-  // Batch pause every N links to avoid rate limiting.
-  // With 500-1000 links, longer pauses are critical — WhatsApp rate-limits
-  // aggressively on bulk groupGetInviteInfo calls.
-  const BATCH_SIZE = 10;
-  const BATCH_PAUSE_MS = 20000; // 20s pause every 10 links
-  const INTER_LINK_MS = 3500;   // 3.5s between each link
-  const FAIL_LINK_MS = 5000;    // 5s extra after a failed resolve
+  // Dynamic delays based on total link count — fewer links = shorter pauses
+  // to avoid unnecessary waiting when the user has a small list.
+  // More links = longer pauses because WhatsApp rate-limits harder on bulk calls.
+  //
+  // Links   | BATCH_SIZE | Pause/batch | Per-link delay
+  // --------|------------|-------------|---------------
+  // ≤ 50    |     15     |    8s       |    2.0s
+  // ≤ 100   |     12     |   10s       |    2.5s
+  // ≤ 200   |     10     |   15s       |    3.0s
+  // ≤ 500   |     10     |   20s       |    3.5s
+  // > 500   |     10     |   25s       |    4.0s
+  // Conservative dynamic delays — tuned so WhatsApp never hits rate limit
+  // regardless of list size. Larger lists use longer pauses because WA
+  // rate-limit windows are cumulative across the whole session.
+  //
+  // Links   | Batch | Pause/batch | Per-link | Fail extra
+  // --------|-------|-------------|----------|----------
+  // ≤ 50    |  15   |    10s      |   3s     |   8s
+  // ≤ 100   |  12   |    15s      |   4s     |   8s
+  // ≤ 200   |  10   |    20s      |   5s     |  10s
+  // ≤ 500   |  10   |    25s      |   6s     |  12s
+  // > 500   |   8   |    30s      |   8s     |  15s
+  // Delays tuned to hit these targets (no rate limits):
+  //
+  // Links | Batch | Pause/batch | Per-link | ~Total time
+  // ------|-------|-------------|----------|------------
+  // ≤ 50  |  15   |    8s       |   2.5s   |  ~3-4 min
+  // ≤ 100 |  12   |   12s       |   3.5s   |  ~7-8 min
+  // ≤ 200 |  10   |   15s       |   4.0s   | ~16-17 min
+  // ≤ 500 |  10   |   20s       |   4.6s   | ~54-56 min ✅
+  // > 500 |  10   |   25s       |   5.5s   | ~115-120 min
+  const BATCH_SIZE    = total <= 50  ? 15
+                      : total <= 100 ? 12
+                      : 10;
+  const BATCH_PAUSE_MS = total <= 50  ?  8000
+                       : total <= 100 ? 12000
+                       : total <= 200 ? 15000
+                       : total <= 500 ? 20000
+                       : 25000;
+  const INTER_LINK_MS = total <= 50  ? 2500
+                       : total <= 100 ? 3500
+                       : total <= 200 ? 4000
+                       : total <= 500 ? 4600
+                       : 5500;
+  const FAIL_LINK_MS  = total <= 200 ?  8000
+                      : total <= 500 ? 10000
+                      : 12000;
 
   for (let i = 0; i < links.length; i++) {
     if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
@@ -10519,7 +10587,7 @@ async function runRlResolvePipelineBackground(
       markUserActive(userIdNum); // Reset idle timer during long runs
       try {
         await bot.api.editMessageText(chatId, msgId,
-          buildProgress() + `\n\n<i>⏸ Pausing ${BATCH_PAUSE_MS / 1000}s to avoid rate limits...</i>`,
+          buildProgress() + `\n\n<i>⏸ Pausing ${BATCH_PAUSE_MS / 1000}s (rate limit break for ${total} links)...</i>`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
         );
       } catch {}
@@ -10529,13 +10597,45 @@ async function runRlResolvePipelineBackground(
 
     const link = links[i];
 
-    // Step 1: Resolve the link — retries with backoff are inside getGroupIdFromLink
-    const info = await getGroupIdFromLink(userId, link);
+    // Step 1: Resolve the link — up to 3 retries with increasing delays
+    // so transient WA errors never permanently fail a link.
+    let info = await getGroupIdFromLink(userId, link);
+
+    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
+      // Retry 1 — short wait (8s) for quick transient errors
+      try { await bot.api.editMessageText(chatId, msgId,
+        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} resolve failed — retrying in 8s...</i>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
+      ); } catch {}
+      await new Promise(r => setTimeout(r, 8000));
+      info = await getGroupIdFromLink(userId, link);
+    }
+
+    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
+      // Retry 2 — longer wait (15s) for rate-limit recovery
+      try { await bot.api.editMessageText(chatId, msgId,
+        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} still failing — retrying in 15s...</i>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
+      ); } catch {}
+      await new Promise(r => setTimeout(r, 15000));
+      info = await getGroupIdFromLink(userId, link);
+    }
+
+    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
+      // Retry 3 — final attempt after 25s cooldown
+      try { await bot.api.editMessageText(chatId, msgId,
+        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} final retry in 25s...</i>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
+      ); } catch {}
+      await new Promise(r => setTimeout(r, 25000));
+      info = await getGroupIdFromLink(userId, link);
+    }
+
     if (!info) {
-      results.push({ subject: link, resolveErr: "Link invalid or expired" });
+      // All 3 retries exhausted — mark as truly failed
+      results.push({ subject: link, resolveErr: "Link invalid or expired (3 retries failed)" });
       done++;
       try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
-      // Longer wait after a failed resolve before trying the next link
       if (i < links.length - 1) await new Promise(r => setTimeout(r, FAIL_LINK_MS));
       continue;
     }
@@ -15651,14 +15751,16 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
-  if (state.step === "ctc_enter_links") {
-    if (!state.ctcData) return;
+  if (state?.step === "ctc_enter_links" || (!state && (await getOrLoadUserState(userId))?.step === "ctc_enter_links")) {
+    const state2 = state?.step === "ctc_enter_links" ? state : userStates.get(userId)!;
+    if (!state2?.ctcData) return;
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) { await ctx.reply("❌ No valid WhatsApp links found.", { parse_mode: "HTML" }); return; }
-    state.ctcData.groupLinks = cleanLinks;
-    state.ctcData.pairs = cleanLinks.map((link) => ({ link, vcfContacts: [] }));
-    state.ctcData.currentPairIndex = 0;
-    state.step = "ctc_enter_vcf";
+    state2.ctcData.groupLinks = cleanLinks;
+    state2.ctcData.pairs = cleanLinks.map((link) => ({ link, vcfContacts: [] }));
+    state2.ctcData.currentPairIndex = 0;
+    state2.step = "ctc_enter_vcf";
+    saveUserState(userId, state2).catch(() => {});
     await ctx.reply(
       `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
       `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
@@ -16207,7 +16309,17 @@ bot.on("message:document", async (ctx) => {
     return;
   }
 
-  if (state.step !== "ctc_enter_vcf" || !state.ctcData) return;
+  if (!state || state.step !== "ctc_enter_vcf" || !state.ctcData) {
+    const remote = await loadUserState(userId);
+    if (remote && remote.step === "ctc_enter_vcf" && remote.ctcData) {
+      const s2 = remote as UserState;
+      userStates.set(userId, s2);
+      state = s2;
+      console.error(`[CTC-VCF] Loaded state from MongoDB for userId=${userId}`);
+    } else {
+      return;
+    }
+  }
 
   // Capture doc/ctx values before queuing — the ctx reference is safe to
   // close over but we extract the primitives for clarity.
