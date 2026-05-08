@@ -1629,17 +1629,17 @@ async function runJoinBackground(userId: number): Promise<void> {
       : `🎉 <b>Done! (${ok}/${total} joined)</b>`;
     const last = session.results.slice(-25);
     const more = session.results.length > 25 ? `... +${session.results.length - 25} more\n\n` : "";
-    const finalText = `${header}\n\n${more}${last.join("\n")}`;
+    let finalText = `${header}\n\n${more}${last.join("\n")}`;
 
-    // Cache failed links for .txt download (30 min)
-    const showDownload = failed > 0;
-    if (showDownload) {
-      const txt = session.failedLinks.map(f => `${f.link}  (${f.reason})`).join("\n");
-      joinFailedLinksCache.set(userId, { text: txt, expiresAt: Date.now() + 30 * 60 * 1000 });
+    // Append failed links inline at the end instead of a download button
+    if (failed > 0) {
+      finalText += `\n\n━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed Links (${failed}):</b>\n`;
+      for (const f of session.failedLinks) {
+        finalText += `❌ <code>${esc(f.link)}</code> — ${esc(f.reason)}\n`;
+      }
     }
 
     const finalKb = new InlineKeyboard();
-    if (showDownload) finalKb.text(`📥 Download Failed Links (${failed})`, "join_failed_download").row();
     finalKb.text("🏠 Main Menu", "main_menu");
 
     let editSuccess = false;
@@ -1677,6 +1677,8 @@ const removeFriendCancelRequests: Set<number> = new Set();
 const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
 const resetLinkCancelRequests: Set<number> = new Set();
+// Tracks users currently running a Reset-by-Link pipeline — exempted from idle-disconnect sweep.
+const resetLinkActiveSessions: Set<number> = new Set();
 // Caches failed links from a Reset-by-Link run so the user can retry them.
 // Key = userId, Value = list of original invite links. Auto-expires after 30 min.
 const rlLinkRetryCache = new Map<number, { links: string[]; expiresAt: number }>();
@@ -1909,6 +1911,7 @@ setInterval(async () => {
       ...autoChatSessions.keys(),
       ...cigSessions.keys(),
       ...acfSessions.keys(),
+      ...resetLinkActiveSessions,
     ]);
     for (const uidStr of liveSessions) {
       const uid = Number(uidStr);
@@ -10378,17 +10381,40 @@ async function runRlResolvePipelineBackground(
   let wasCancelled = false;
   const results: Array<{ subject: string; newLink?: string; resolveErr?: string; resetErr?: string }> = [];
 
+  // Track start time for ETA calculation
+  const startedAt = Date.now();
+
   const buildProgress = () => {
     const pct = total === 0 ? 0 : Math.round((done / total) * 100);
     const filled = Math.round((done / Math.max(total, 1)) * 20);
     const bar = `[${"█".repeat(filled)}${"░".repeat(20 - filled)}] ${pct}% (${done}/${total})`;
+
+    // ETA: only show after we've processed at least 3 links
+    let etaLine = "";
+    if (done >= 3 && done < total) {
+      const elapsed = Date.now() - startedAt;
+      const msPerLink = elapsed / done;
+      const remaining = total - done;
+      const etaMs = msPerLink * remaining;
+      const etaMins = Math.floor(etaMs / 60000);
+      const etaSecs = Math.round((etaMs % 60000) / 1000);
+      etaLine = etaMins > 0
+        ? `\n⏱ <b>~${etaMins}m ${etaSecs}s remaining</b>`
+        : `\n⏱ <b>~${etaSecs}s remaining</b>`;
+    }
+
     return (
       `⏳ <b>Resolving & Resetting Links...</b>\n\n` +
-      `${bar}\n\n` +
+      `${bar}${etaLine}\n\n` +
       `✅ Reset: <b>${resetOk}</b> | ❌ Failed: <b>${done - resetOk}</b>\n` +
       (done < total ? `⌛ <b>${total - done}</b> remaining...` : `⏳ Finishing up...`)
     );
   };
+
+  // Protect session from idle-disconnect for the entire run duration
+  resetLinkActiveSessions.add(userIdNum);
+  protectSessionFromEviction(userId);
+  markUserActive(userIdNum);
 
   try {
     await bot.api.editMessageText(chatId, msgId, buildProgress(), {
@@ -10397,17 +10423,20 @@ async function runRlResolvePipelineBackground(
     });
   } catch {}
 
-  // Batch pause every N links to avoid rate limiting
+  // Batch pause every N links to avoid rate limiting.
+  // With 500-1000 links, longer pauses are critical — WhatsApp rate-limits
+  // aggressively on bulk groupGetInviteInfo calls.
   const BATCH_SIZE = 10;
-  const BATCH_PAUSE_MS = 8000;
-  const INTER_LINK_MS = 2500; // delay between each link after success
-  const FAIL_LINK_MS = 5000;  // longer delay after a resolve failure
+  const BATCH_PAUSE_MS = 20000; // 20s pause every 10 links
+  const INTER_LINK_MS = 3500;   // 3.5s between each link
+  const FAIL_LINK_MS = 5000;    // 5s extra after a failed resolve
 
   for (let i = 0; i < links.length; i++) {
     if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
 
-    // Pause every BATCH_SIZE links to let WhatsApp recover
+    // Pause every BATCH_SIZE links to let WhatsApp recover, also bump keepalive
     if (i > 0 && i % BATCH_SIZE === 0) {
+      markUserActive(userIdNum); // Reset idle timer during long runs
       try {
         await bot.api.editMessageText(chatId, msgId,
           buildProgress() + `\n\n<i>⏸ Pausing ${BATCH_PAUSE_MS / 1000}s to avoid rate limits...</i>`,
@@ -10471,6 +10500,10 @@ async function runRlResolvePipelineBackground(
 
   resetLinkCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
+  // Release session protection — allow normal idle-disconnect again
+  resetLinkActiveSessions.delete(userIdNum);
+  unprotectSession(userId);
+  markUserActive(userIdNum);
 
   const successResults = results.filter(r => r.newLink);
   const failedResults = results.filter(r => !r.newLink);
