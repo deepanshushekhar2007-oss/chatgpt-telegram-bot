@@ -5429,8 +5429,9 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   // ── WhatsApp connection check ─────────────────────────────────────────────
   if (!isConnected(String(userId))) {
     console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
+    try { await ctx.deleteMessage(); } catch {}
     try {
-      await ctx.editMessageText(
+      await ctx.reply(
         "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
         {
           parse_mode: "HTML",
@@ -5440,7 +5441,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
         }
       );
     } catch (err: any) {
-      console.error("[CTC] wa-not-connected edit failed:", err?.message ?? err);
+      console.error("[CTC] wa-not-connected reply failed:", err?.message ?? err);
     }
     return;
   }
@@ -5458,17 +5459,12 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Edit the existing message in-place — same behaviour as every other button.
+  // Delete the menu message first, then send a fresh CTC Checker message
+  try { await ctx.deleteMessage(); } catch {}
   try {
-    await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
   } catch (err: any) {
-    console.error("[CTC] prompt edit failed:", err?.message ?? err);
-    // Fallback: send a new message only if editing fails (e.g. message too old)
-    try {
-      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-    } catch (err2: any) {
-      console.error("[CTC] prompt reply fallback also failed:", err2?.message ?? err2);
-    }
+    console.error("[CTC] prompt reply failed:", err?.message ?? err);
   }
 });
 
