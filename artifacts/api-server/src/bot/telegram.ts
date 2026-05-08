@@ -5521,10 +5521,11 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   saveUserState(userId, ctcInitState).catch((e: any) => console.error("[CTC-STEP-5] saveUserState FAILED:", e?.message));
   console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
 
-  const ctcPrompt =
+  const ctcPrompt = notr(
     "🔍 <b>CTC Checker</b>\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"
+  );
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
@@ -5599,14 +5600,14 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
 
   try {
     await ctx.editMessageText(
-      `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
+      notr(`⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`),
       { parse_mode: "HTML" }
     );
   } catch {
     try {
       await bot.api.sendMessage(
         chatId,
-        `⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`,
+        notr(`⏳ <b>Checking ${activePairs.length} group(s)...</b>\n\n⌛ Please wait...`),
         { parse_mode: "HTML" }
       );
     } catch {}
@@ -15788,13 +15789,15 @@ bot.on("message:text", async (ctx) => {
     state2.step = "ctc_enter_vcf";
     saveUserState(userId, state2).catch(() => {});
     await ctx.reply(
-      `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
-      `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
-      `You can send:\n` +
-      `• One VCF for all groups\n` +
-      `• Multiple VCFs one by one (one per group in order)\n\n` +
-      `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
-      `When ready, tap <b>Start Check</b>:`,
+      notr(
+        `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
+        `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
+        `You can send:\n` +
+        `• One VCF for all groups\n` +
+        `• Multiple VCFs one by one (one per group in order)\n\n` +
+        `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
+        `When ready, tap <b>Start Check</b>:`
+      ),
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
     );
     return;
@@ -16377,7 +16380,7 @@ bot.on("message:document", async (ctx) => {
         s.ctcData.pairs[lastIdx].vcfContacts.push(...contacts);
         const total = s.ctcData.pairs[lastIdx].vcfContacts.length;
         await ctx.reply(
-          `✅ <b>${contacts.length} contacts added to Group ${lastIdx + 1}</b> (total: ${total})\n\n🚀 Ready to check!`,
+          notr(`✅ <b>${contacts.length} contacts added to Group ${lastIdx + 1}</b> (total: ${total})\n\n🚀 Ready to check!`),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
         return;
@@ -16391,12 +16394,12 @@ bot.on("message:document", async (ctx) => {
 
       if (nextIdx < s.ctcData.pairs.length) {
         await ctx.reply(
-          `✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n<code>${esc(s.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`,
+          notr(`✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n<code>${esc(s.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       } else {
         await ctx.reply(
-          `✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`,
+          notr(`✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       }
