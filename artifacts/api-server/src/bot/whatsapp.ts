@@ -561,33 +561,42 @@ async function createSocket(
       const reconnectMode: "code" | "qr" = (session.wasConnected && hasPhone) ? "code" : pairingMode;
       const reconnectOnQr = session.wasConnected ? () => {} : onQr;
 
-      // ── QR session already-connected disconnect: limited retries ────────────
-      // Phone/code sessions can silently reconnect using saved credentials.
-      // QR sessions have NO phone number stored — but Baileys CAN still
-      // restore the session using saved creds (creds.json) WITHOUT showing
-      // a new QR code. This handles 30-minute keepalive drops, network blips,
-      // and WhatsApp server-side evictions. We allow up to MAX_QR_RETRIES
-      // attempts; if all fail the user gets one notification to re-scan.
+      // ── QR session SCAN-PHASE disconnect: limited retries ───────────────────
+      // This block only applies to QR sessions that have NEVER successfully
+      // connected (wasConnected=false) — i.e. the user is still waiting to
+      // scan the QR code and the socket dropped mid-scan. We allow a small
+      // number of retries; if they all fail the user must start a fresh scan.
+      //
+      // IMPORTANT: Already-connected QR sessions (wasConnected=true, e.g. after
+      // a bot restart or idle eviction) are intentionally NOT handled here.
+      // They fall through to the generic 50-retry exponential-backoff block
+      // below, same as pairing-code sessions. This is correct because:
+      //   • A previously-connected QR session has registered=true creds in
+      //     MongoDB and CAN reconnect silently without a new QR scan.
+      //   • After a bot restart WhatsApp servers hold the old connection for
+      //     ~30 s (Stream Conflict / code 440). With only 5 retries, QR sessions
+      //     would give up before the conflict clears; code sessions survive
+      //     because they get 50 retries. The fix is to give both the same budget.
       //
       // Exception: statusCode 515 ("Stream Errored") is the normal Baileys
-      // post-scan restart — handled below.
+      // post-scan restart — handled below in its own block.
       const isQrSession = !hasPhone;
-      const MAX_QR_RETRIES = 5;
-      if (isQrSession && session.wasConnected && statusCode !== 515 && !reason.includes("Stream Errored")) {
-        if (session.retryCount >= MAX_QR_RETRIES) {
-          console.log(`[WA][${userId}] QR session failed to reconnect after ${session.retryCount} tries — stopping. User must re-scan.`);
+      const MAX_QR_SCAN_RETRIES = 5;
+      if (isQrSession && !session.wasConnected && statusCode !== 515 && !reason.includes("Stream Errored")) {
+        if (session.retryCount >= MAX_QR_SCAN_RETRIES) {
+          console.log(`[WA][${userId}] QR scan-phase: failed after ${session.retryCount} tries — stopping. User must re-scan.`);
           closeSocketSafe(sock);
           session.socket = null;
           clearAllSessionTimers(userId);
           sessions.delete(userId);
-          onDisconnected("Reconnect via QR code");
+          onDisconnected("QR scan failed. Please start a new QR connection from the menu.");
           void forceMemoryReclaim();
           return;
         }
         session.retryCount++;
         session.codeRequested = false;
-        const delay = Math.min(5000 * session.retryCount, 30000); // 5s, 10s, 15s, 20s, 25s
-        console.log(`[WA][${userId}] QR session disconnected (code=${statusCode}) — retry ${session.retryCount}/${MAX_QR_RETRIES} in ${delay / 1000}s`);
+        const delay = Math.min(5000 * session.retryCount, 30000);
+        console.log(`[WA][${userId}] QR scan-phase disconnected (code=${statusCode}) — retry ${session.retryCount}/${MAX_QR_SCAN_RETRIES} in ${delay / 1000}s`);
         closeSocketSafe(sock);
         session.socket = null;
         trackSessionTimer(userId, async () => {
@@ -721,9 +730,13 @@ async function createSocket(
         return;
       }
 
-      // All other close reasons — reconnect after delay with a safety cap
-      // QR sessions that reach here have wasConnected=false (still in QR scan phase).
-      // Phone/code sessions: up to 50 retries with exponential backoff.
+      // All other close reasons — reconnect after delay with a safety cap.
+      // This covers:
+      //   • Phone/code sessions (all disconnect codes not handled above)
+      //   • QR sessions with wasConnected=true (already-connected; can silently
+      //     reconnect using saved creds — same retry budget as code sessions)
+      //   • QR sessions with wasConnected=false that got 515 (post-scan restart)
+      // Up to 50 retries with exponential backoff.
       const MAX_RETRIES = 50;
       session.codeRequested = false;
       session.retryCount++;
