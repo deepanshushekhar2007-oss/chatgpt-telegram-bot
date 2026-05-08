@@ -5429,9 +5429,11 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   // ── WhatsApp connection check ─────────────────────────────────────────────
   if (!isConnected(String(userId))) {
     console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
+    const chatId1 = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
     try { await ctx.deleteMessage(); } catch {}
     try {
-      await ctx.reply(
+      await ctx.api.sendMessage(
+        chatId1,
         "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
         {
           parse_mode: "HTML",
@@ -5441,7 +5443,9 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
         }
       );
     } catch (err: any) {
-      console.error("[CTC] wa-not-connected reply failed:", err?.message ?? err);
+      console.error("[CTC] wa-not-connected sendMessage failed:", err?.message ?? err);
+      // Last fallback: DM the user directly
+      try { await ctx.api.sendMessage(ctx.from.id, "❌ WhatsApp not connected! Use /start."); } catch {}
     }
     return;
   }
@@ -5459,12 +5463,19 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Delete the menu message first, then send a fresh CTC Checker message
+  // Delete menu message, then send fresh CTC Checker using explicit chatId
+  const chatId2 = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
   try { await ctx.deleteMessage(); } catch {}
   try {
-    await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    await ctx.api.sendMessage(chatId2, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
   } catch (err: any) {
-    console.error("[CTC] prompt reply failed:", err?.message ?? err);
+    console.error("[CTC] sendMessage failed, trying DM fallback:", err?.message ?? err);
+    // Last fallback: send directly to user DM
+    try {
+      await ctx.api.sendMessage(ctx.from.id, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    } catch (err2: any) {
+      console.error("[CTC] DM fallback also failed:", err2?.message ?? err2);
+    }
   }
 });
 
