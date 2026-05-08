@@ -652,3 +652,59 @@ export async function deleteAutoAccepterJob(userId: number): Promise<void> {
     await col.deleteOne({ userId });
   } catch {}
 }
+
+// ─── Cross-Instance UserState Persistence ───────────────────────────────────
+// Stores user conversation states in MongoDB so multiple Render instances
+// share the same state. TTL: 2 hours.
+
+function serializeState(state: any): string {
+  return JSON.stringify(state, (_key, value) => {
+    if (value instanceof Set) return { __set__: [...value] };
+    if (value instanceof Map) return { __map__: [...value.entries()] };
+    return value;
+  });
+}
+
+function deserializeState(json: string): any {
+  return JSON.parse(json, (_key, value) => {
+    if (value && typeof value === 'object' && '__set__' in value) return new Set(value.__set__);
+    if (value && typeof value === 'object' && '__map__' in value) return new Map(value.__map__);
+    return value;
+  });
+}
+
+export async function saveUserState(userId: number, state: any): Promise<void> {
+  try {
+    const col = await getCollection('user_states');
+    await col.replaceOne(
+      { userId },
+      { userId, stateJson: serializeState(state), updatedAt: Date.now(), expiresAt: Date.now() + 7200000 },
+      { upsert: true }
+    );
+  } catch (err: any) {
+    console.error('[MongoDB] saveUserState error:', err?.message);
+  }
+}
+
+export async function loadUserState(userId: number): Promise<any | null> {
+  try {
+    const col = await getCollection('user_states');
+    const doc = await col.findOne({ userId });
+    if (!doc || !doc.stateJson) return null;
+    if (doc.expiresAt && Date.now() > (doc.expiresAt as number)) {
+      await col.deleteOne({ userId }).catch(() => {});
+      return null;
+    }
+    return deserializeState(doc.stateJson as string);
+  } catch (err: any) {
+    console.error('[MongoDB] loadUserState error:', err?.message);
+    return null;
+  }
+}
+
+export async function deleteUserState(userId: number): Promise<void> {
+  try {
+    const col = await getCollection('user_states');
+    await col.deleteOne({ userId });
+  } catch {}
+}
