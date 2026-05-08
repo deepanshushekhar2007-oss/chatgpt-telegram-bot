@@ -2429,6 +2429,21 @@ export function getActiveSessionUserIds(): Set<string> {
   return new Set(sessions.keys());
 }
 
+// Returns true if the user was permanently disconnected and has NOT yet
+// successfully reconnected. Used by /start to skip the silent-reconnect
+// progress bar when the user already knows their WA is down.
+export function isDisconnectPending(userId: string): boolean {
+  return disconnectNotifiedUsers.has(userId);
+}
+
+// Returns true if a session is currently in the process of connecting
+// (socket open but not yet authenticated, or connectLock held).
+// Used by /start to wait for an in-progress connection before showing menu.
+export function isWhatsAppConnecting(userId: string): boolean {
+  const s = sessions.get(resolveSessionId(userId));
+  return s !== undefined && !s.connected && (s.connecting || s.connectLock);
+}
+
 // Check whether a user has WhatsApp credentials saved in MongoDB. Used by
 // /start to decide whether to show the "connecting WhatsApp" progress bar.
 // Returns false on any DB error so we never block the menu on transient issues.
