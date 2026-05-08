@@ -16193,7 +16193,7 @@ bot.on("message:photo", async (ctx) => {
 
 bot.on("message:document", async (ctx) => {
   const userId = ctx.from.id;
-  const state = userStates.get(userId);
+  let state = userStates.get(userId);
   if (!state) return;
   const doc = ctx.message.document;
   if (!(doc.file_name || "").toLowerCase().endsWith(".vcf")) { await ctx.reply("❌ Please send a .vcf file only."); return; }
