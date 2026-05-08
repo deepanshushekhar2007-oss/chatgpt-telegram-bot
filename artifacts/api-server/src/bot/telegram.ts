@@ -5490,30 +5490,24 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
 
   const ctcPrompt =
-    "🔍 CTC Checker\n\n" +
+    "🔍 <b>CTC Checker</b>\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
     "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Step 5: Delete menu message
-  console.error(`[CTC-STEP-6] Deleting menu message — chatId=${chatId} msgId=${msgId}`);
-  try { await ctx.deleteMessage(); console.error("[CTC-STEP-6] deleteMessage OK"); } catch (e: any) { console.error("[CTC-STEP-6] deleteMessage FAILED:", e?.message ?? e); }
-
-  // Step 6: Send CTC Checker prompt
-  console.error(`[CTC-STEP-7] Sending CTC prompt to chatId=${chatId}`);
+  // Step 5: Edit menu message in-place with the CTC prompt (same pattern as join_groups, reset-by-link etc.)
+  console.error(`[CTC-STEP-6] Editing menu message in-place — chatId=${chatId} msgId=${msgId}`);
   try {
-    await ctx.api.sendMessage(chatId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-    console.error("[CTC-STEP-7] sendMessage CTC prompt OK ✅");
+    await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    console.error("[CTC-STEP-6] editMessageText OK ✅");
   } catch (err: any) {
-    console.error("[CTC-STEP-7] sendMessage FAILED:", err?.message ?? err, "| Full error:", JSON.stringify(err));
-    // Fallback: try sending to userId directly
-    console.error(`[CTC-STEP-7] Trying DM fallback to userId=${userId}`);
+    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err, "| Falling back to reply");
     try {
-      await ctx.api.sendMessage(userId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-      console.error("[CTC-STEP-7] DM fallback OK ✅");
+      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      console.error("[CTC-STEP-6] reply fallback OK ✅");
     } catch (err2: any) {
-      console.error("[CTC-STEP-7] DM fallback ALSO FAILED:", err2?.message ?? err2);
+      console.error("[CTC-STEP-6] reply fallback ALSO FAILED:", err2?.message ?? err2);
     }
   }
   console.error("[CTC-STEP-8] Handler complete");
