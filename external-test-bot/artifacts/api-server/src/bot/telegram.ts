@@ -1748,13 +1748,15 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
-    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", {
+    try { await ctx.deleteMessage(); } catch {}
+    await ctx.reply("❌ <b>WhatsApp not connected!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu"),
     }); return;
   }
   userStates.set(userId, { step: "ctc_enter_links", ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 } });
-  await ctx.editMessageText(
+  try { await ctx.deleteMessage(); } catch {}
+  await ctx.reply(
     "🔍 <b>CTC Checker</b>\n\nStep 1: Send all WhatsApp group links, one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
