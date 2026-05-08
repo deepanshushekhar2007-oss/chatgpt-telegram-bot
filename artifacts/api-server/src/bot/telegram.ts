@@ -5001,9 +5001,14 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   state.step = "group_enter_description";
   const preview = state.groupSettings.finalNames.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   await ctx.editMessageText(
-    `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
-    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    notr(`✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
+    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:"),
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(notr("🔙 Back"), "naming_back")
+        .text(notr("❌ Cancel"), "main_menu"),
+    }
   );
 });
 
@@ -5016,9 +5021,51 @@ bot.callbackQuery("naming_custom", async (ctx) => {
   state.groupSettings.finalNames = [];
   state.step = "group_enter_custom_names";
   await ctx.editMessageText(
-    `✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    notr(`✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`),
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(notr("🔙 Back"), "naming_back")
+        .text(notr("❌ Cancel"), "main_menu"),
+    }
   );
+});
+
+// Back button handler: returns user to the naming mode selection screen
+// (re-shown after tapping Auto-numbered or Custom Names by mistake).
+bot.callbackQuery("naming_back", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.groupSettings) return;
+  // Reset any naming choices made so far
+  state.groupSettings.finalNames = [];
+  state.groupSettings.namingMode = undefined as any;
+  state.step = "group_naming_mode";
+  const count = state.groupSettings.count;
+  try {
+    await ctx.editMessageText(
+      notr(`🏷️ <b>Naming Mode</b>\n\nCreating <b>${count} groups</b>. How to name them?`),
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text(notr("🔢 Auto-numbered"), "naming_auto")
+          .text(notr("✏️ Custom Names"), "naming_custom").row()
+          .text(notr("❌ Cancel"), "main_menu"),
+      }
+    );
+  } catch {
+    await ctx.reply(
+      notr(`🏷️ <b>Naming Mode</b>\n\nCreating <b>${count} groups</b>. How to name them?`),
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text(notr("🔢 Auto-numbered"), "naming_auto")
+          .text(notr("✏️ Custom Names"), "naming_custom").row()
+          .text(notr("❌ Cancel"), "main_menu"),
+      }
+    );
+  }
 });
 
 async function showGroupSummary(ctx: any) {
@@ -5351,8 +5398,8 @@ bot.callbackQuery("join_groups", async (ctx) => {
   }
   userStates.set(userId, { step: "join_enter_links", joinData: { links: [] } });
   await ctx.editMessageText(
-    "🔗 <b>Join Groups</b>\n\nSend WhatsApp group link(s), one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    notr("🔗 <b>Join Groups</b>\n\nSend WhatsApp group link(s), one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(notr("❌ Cancel"), "main_menu") }
   );
 });
 
