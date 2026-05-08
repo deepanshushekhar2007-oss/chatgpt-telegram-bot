@@ -5397,43 +5397,51 @@ bot.callbackQuery("join_failed_download", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  // Always answer the callback query immediately — stops the spinner and
-  // prevents Telegram's 10-second silent-drop from kicking in.
-  try { await ctx.answerCallbackQuery(); } catch (e: any) {
-    console.error("[CTC] answerCallbackQuery failed:", e?.message ?? e);
+  console.error("[CTC-STEP-1] Handler triggered");
+
+  // Step 1: Answer callback query
+  try {
+    await ctx.answerCallbackQuery();
+    console.error("[CTC-STEP-1] answerCallbackQuery OK");
+  } catch (e: any) {
+    console.error("[CTC-STEP-1] answerCallbackQuery FAILED:", e?.message ?? e);
   }
 
   const userId = ctx.from.id;
-  console.error(`[CTC-DEBUG] ctc_checker handler reached for userId=${userId}`);
+  const chatId = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+  console.error(`[CTC-STEP-2] userId=${userId} | chatId=${chatId} | msgId=${msgId}`);
 
-  // ── Access check ──────────────────────────────────────────────────────────
+  // Step 2: Access check
+  console.error("[CTC-STEP-3] Running access check...");
   let accessOk = false;
   try {
     accessOk = await checkAccessMiddleware(ctx);
+    console.error(`[CTC-STEP-3] accessOk=${accessOk}`);
   } catch (err: any) {
-    console.error("[CTC] checkAccessMiddleware threw:", err?.message ?? err);
-    // Fall through — show generic error reply below
+    console.error("[CTC-STEP-3] checkAccessMiddleware THREW:", err?.message ?? err);
   }
   if (!accessOk) {
-    console.error(`[CTC-DEBUG] accessOk=false for userId=${userId}`);
-    // checkAccessMiddleware usually sends its own feedback (ban/force-sub/
-    // subscription popup). Send a safety-net reply in case it didn't.
+    console.error("[CTC-STEP-3] Access DENIED — returning");
     try {
-      await ctx.reply("❌ Access denied. Please contact the bot owner.", {
+      await ctx.api.sendMessage(chatId, "❌ Access denied. Contact bot owner.", {
         reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
       });
-    } catch {}
+    } catch (e: any) {
+      console.error("[CTC-STEP-3] sendMessage access-denied FAILED:", e?.message ?? e);
+    }
     return;
   }
 
-  // ── WhatsApp connection check ─────────────────────────────────────────────
-  if (!isConnected(String(userId))) {
-    console.error(`[CTC-DEBUG] WhatsApp not connected for userId=${userId}`);
-    const chatId1 = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
-    try { await ctx.deleteMessage(); } catch {}
+  // Step 3: WhatsApp connection check
+  const waConnected = isConnected(String(userId));
+  console.error(`[CTC-STEP-4] WhatsApp connected=${waConnected}`);
+  if (!waConnected) {
+    console.error("[CTC-STEP-4] WA not connected — deleting menu and sending error msg");
+    try { await ctx.deleteMessage(); console.error("[CTC-STEP-4] deleteMessage OK"); } catch (e: any) { console.error("[CTC-STEP-4] deleteMessage FAILED:", e?.message ?? e); }
     try {
       await ctx.api.sendMessage(
-        chatId1,
+        chatId,
         "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
         {
           parse_mode: "HTML",
@@ -5442,19 +5450,21 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
             .text("🏠 Main Menu", "main_menu"),
         }
       );
+      console.error("[CTC-STEP-4] sendMessage WA-not-connected OK");
     } catch (err: any) {
-      console.error("[CTC] wa-not-connected sendMessage failed:", err?.message ?? err);
-      // Last fallback: DM the user directly
-      try { await ctx.api.sendMessage(ctx.from.id, "❌ WhatsApp not connected! Use /start."); } catch {}
+      console.error("[CTC-STEP-4] sendMessage WA-not-connected FAILED:", err?.message ?? err);
+      try { await ctx.api.sendMessage(userId, "❌ WhatsApp not connected! Use /start."); } catch {}
     }
     return;
   }
 
-  // ── Set state + show prompt ───────────────────────────────────────────────
+  // Step 4: Set user state
+  console.error("[CTC-STEP-5] Setting userState: ctc_enter_links");
   userStates.set(userId, {
     step: "ctc_enter_links",
     ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 },
   });
+  console.error("[CTC-STEP-5] userState set OK");
 
   const ctcPrompt =
     "🔍 CTC Checker\n\n" +
@@ -5463,20 +5473,27 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
 
   const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Delete menu message, then send fresh CTC Checker using explicit chatId
-  const chatId2 = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
-  try { await ctx.deleteMessage(); } catch {}
+  // Step 5: Delete menu message
+  console.error(`[CTC-STEP-6] Deleting menu message — chatId=${chatId} msgId=${msgId}`);
+  try { await ctx.deleteMessage(); console.error("[CTC-STEP-6] deleteMessage OK"); } catch (e: any) { console.error("[CTC-STEP-6] deleteMessage FAILED:", e?.message ?? e); }
+
+  // Step 6: Send CTC Checker prompt
+  console.error(`[CTC-STEP-7] Sending CTC prompt to chatId=${chatId}`);
   try {
-    await ctx.api.sendMessage(chatId2, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    await ctx.api.sendMessage(chatId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+    console.error("[CTC-STEP-7] sendMessage CTC prompt OK ✅");
   } catch (err: any) {
-    console.error("[CTC] sendMessage failed, trying DM fallback:", err?.message ?? err);
-    // Last fallback: send directly to user DM
+    console.error("[CTC-STEP-7] sendMessage FAILED:", err?.message ?? err, "| Full error:", JSON.stringify(err));
+    // Fallback: try sending to userId directly
+    console.error(`[CTC-STEP-7] Trying DM fallback to userId=${userId}`);
     try {
-      await ctx.api.sendMessage(ctx.from.id, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      await ctx.api.sendMessage(userId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      console.error("[CTC-STEP-7] DM fallback OK ✅");
     } catch (err2: any) {
-      console.error("[CTC] DM fallback also failed:", err2?.message ?? err2);
+      console.error("[CTC-STEP-7] DM fallback ALSO FAILED:", err2?.message ?? err2);
     }
   }
+  console.error("[CTC-STEP-8] Handler complete");
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
