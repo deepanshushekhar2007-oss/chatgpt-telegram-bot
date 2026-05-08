@@ -1035,6 +1035,10 @@ interface UserState {
     excludeNumbers: Set<string>;
     excludePrefixes: Set<string>;
   };
+  removeFriendData?: {
+    selectedGroups: Array<{ id: string; subject: string }>;
+    phoneNumbers?: string[];
+  };
   similarData?: {
     patterns: SimilarGroup[];
     allGroups: Array<{ id: string; subject: string }>;
@@ -1669,6 +1673,7 @@ const joinCancelRequests: Set<number> = new Set();
 const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
 const removeMembersCancelRequests: Set<number> = new Set();
+const removeFriendCancelRequests: Set<number> = new Set();
 const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
 const resetLinkCancelRequests: Set<number> = new Set();
@@ -1867,6 +1872,7 @@ setInterval(() => {
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
   removeMembersCancelRequests.clear();
+  removeFriendCancelRequests.clear();
   // Double-pass GC with a small wait between passes. A single gc() leaves
   // partially-promoted objects in the old generation; doing a second pass
   // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
@@ -4466,12 +4472,13 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
 
   // 6. Cancel-request flag sets
   const cancelCleared = joinCancelRequests.size + getLinkCancelRequests.size +
-    addMembersCancelRequests.size + removeMembersCancelRequests.size +
+    addMembersCancelRequests.size + removeMembersCancelRequests.size + removeFriendCancelRequests.size +
     approvalCancelRequests.size + makeAdminCancelRequests.size + resetLinkCancelRequests.size + demoteAdminCancelRequests.size;
   joinCancelRequests.clear();
   getLinkCancelRequests.clear();
   addMembersCancelRequests.clear();
   removeMembersCancelRequests.clear();
+  removeFriendCancelRequests.clear();
   approvalCancelRequests.clear();
   makeAdminCancelRequests.clear();
   resetLinkCancelRequests.clear();
@@ -8204,32 +8211,79 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
 
   const selectedGroups = Array.from(state.removeData.selectedIndices).map(i => state.removeData!.allGroups[i]);
 
-  // Move to exclude numbers step
   userStates.set(userId, {
-    step: "remove_exclude_numbers",
+    step: "remove_mode_select",
     removeExcludeData: {
       selectedGroups,
       excludeNumbers: new Set(),
       excludePrefixes: new Set(),
     },
+    removeFriendData: { selectedGroups },
   });
 
-  const groupList = selectedGroups.map(g => `• ${esc(g.subject)}`).join("\n");
+  const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
   await ctx.editMessageText(
-    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}\n\n` +
+    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}${more}\n\n` +
+    `<b>Choose what to remove:</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🗑️ Remove All Members", "rm_mode_members").row()
+        .text("👥 Remove Friend", "rm_mode_friend").row()
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("rm_mode_members", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeExcludeData) return;
+
+  state.step = "remove_exclude_numbers";
+  const selectedGroups = state.removeExcludeData.selectedGroups;
+  const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+  await ctx.editMessageText(
+    `✅ <b>${selectedGroups.length} group(s) selected:</b>\n\n${groupList}${more}\n\n` +
     `📱 <b>Exclude Numbers</b>\n\n` +
-    `🛡️ <b>Admins hamesha safe rahenge</b> — unhe kabhi remove nahi karta, chahe aap exclude karo ya na karo.\n\n` +
-    `Aap do tarah se exclude kar sakte ho (ek per line, dono mix bhi kar sakte ho):\n\n` +
-    `1️⃣ <b>Pura number</b> — sirf wahi number exclude hoga.\n` +
+    `🛡️ Admins are always safe — they are never removed regardless of exclusion list.\n\n` +
+    `You can exclude numbers in two ways (one per line, mix both):\n\n` +
+    `1️⃣ <b>Full number</b> — only that number is excluded.\n` +
     `   Example:\n   <code>+919912345678\n   +919998887777</code>\n\n` +
-    `2️⃣ <b>Sirf country code</b> (1-4 digits, + optional) — uss country ke <i>saare</i> numbers exclude honge.\n` +
-    `   Example:\n   <code>+91\n   +92</code>\n   (India aur Pakistan ke saare numbers safe rahenge)\n\n` +
-    `Agar kuch bhi exclude nahi karna to <b>Skip</b> dabao:`,
+    `2️⃣ <b>Country code only</b> (1–4 digits, + optional) — <i>all</i> numbers from that country are excluded.\n` +
+    `   Example:\n   <code>+91\n   +92</code>\n\n` +
+    `If you don't want to exclude anyone, tap <b>Skip</b>:`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
         .text("⏭️ Skip", "rm_skip_exclude")
         .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("rm_mode_friend", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeFriendData) return;
+
+  state.step = "remove_friend_enter_numbers";
+  const selectedGroups = state.removeFriendData.selectedGroups;
+  const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+  await ctx.editMessageText(
+    `👥 <b>Remove Friend</b>\n\n` +
+    `<b>${selectedGroups.length} group(s) selected:</b>\n${groupList}${more}\n\n` +
+    `⚠️ <b>Note:</b> If a number is an admin in a group, it will still be removed.\n\n` +
+    `Send the phone numbers you want to remove (one per line):\n\n` +
+    `Example:\n<code>+919912345678\n+919998887777</code>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
     }
   );
 });
@@ -8242,6 +8296,167 @@ bot.callbackQuery("rm_skip_exclude", async (ctx) => {
 
   await startRemoveMembersProcess(ctx, userId, state.removeExcludeData.selectedGroups, new Set(), new Set());
 });
+
+// ─── Remove Friend callbacks ──────────────────────────────────────────────────
+
+bot.callbackQuery("rf_cancel_request", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  cancelDialogActiveFor.add(ctx.from.id);
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard()
+      .text("✅ Yes, Stop Removing", "rf_cancel_confirm")
+      .text("↩️ Continue", "rf_cancel_no"),
+  });
+});
+
+bot.callbackQuery("rf_cancel_no", async (ctx) => {
+  cancelDialogActiveFor.delete(ctx.from.id);
+  await ctx.answerCallbackQuery({ text: "Removing continued" });
+  await ctx.editMessageReplyMarkup({
+    reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request"),
+  });
+});
+
+bot.callbackQuery("rf_cancel_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
+  removeFriendCancelRequests.add(ctx.from.id);
+  await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+});
+
+bot.callbackQuery("rf_confirm", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeFriendData?.phoneNumbers?.length) return;
+
+  const { selectedGroups, phoneNumbers } = state.removeFriendData;
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+
+  userStates.delete(userId);
+  removeFriendCancelRequests.delete(userId);
+
+  const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+  try {
+    await ctx.editMessageText(
+      `⏳ <b>Removing friend(s) from ${selectedGroups.length} group(s)...</b>\n\n${groupList}${more}\n\n⌛ Please wait...`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
+    );
+  } catch {}
+
+  void removeFriendBackground(String(userId), selectedGroups, phoneNumbers, chatId, msgId);
+});
+
+async function removeFriendBackground(
+  userId: string,
+  groups: Array<{ id: string; subject: string }>,
+  rawPhones: string[],
+  chatId: number,
+  msgId: number
+): Promise<void> {
+  // Normalise input phones to digits-only for reliable comparison
+  // (same approach used by demoteSelectedBackground)
+  const targetPhones = rawPhones.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 7);
+  const userIdNum = Number(userId);
+  let wasCancelled = false;
+  let fullResult = "👥 <b>Remove Friend Result</b>\n\n";
+
+  for (let gi = 0; gi < groups.length; gi++) {
+    if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+    const group = groups[gi];
+    const groupLines: string[] = [];
+    let removed = 0, failed = 0, notFound = 0;
+
+    try {
+      if (!cancelDialogActiveFor.has(userIdNum)) {
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Processing group ${gi + 1}/${groups.length}:</b>\n${esc(group.subject)}\n\n⌛ Fetching members...`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
+        );
+      }
+    } catch {}
+
+    // p.phone is populated by getGroupParticipants even in LID mode.
+    // p.jid is already the correct operation JID (phone-based JID in LID groups).
+    const participants = await getGroupParticipants(userId, group.id);
+
+    for (let pi = 0; pi < targetPhones.length; pi++) {
+      if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+
+      const phone = targetPhones[pi];
+      const phoneLast10 = phone.slice(-10);
+
+      // Match by full digits or last-10-digits — same as demoteSelectedBackground
+      const participant = participants.find(p => {
+        const pPhone = p.phone.replace(/[^0-9]/g, "");
+        return pPhone === phone || (phoneLast10.length >= 7 && pPhone.slice(-10) === phoneLast10);
+      });
+
+      if (!participant) {
+        groupLines.push(`  ❌ +${phone} — Not found in group`);
+        notFound++;
+      } else {
+        // If admin: demote first so the remove call succeeds
+        if (participant.isAdmin) {
+          await demoteGroupAdmin(userId, group.id, participant.jid);
+          await new Promise(r => setTimeout(r, 800));
+        }
+
+        const ok = await removeGroupParticipant(userId, group.id, participant.jid);
+        if (ok) {
+          groupLines.push(`  ✅ +${phone} — Removed`);
+          removed++;
+        } else {
+          groupLines.push(`  ❌ +${phone} — Failed to remove`);
+          failed++;
+        }
+      }
+
+      // Live progress update every 3 numbers
+      if (pi % 3 === 0 || pi === targetPhones.length - 1) {
+        if (!cancelDialogActiveFor.has(userIdNum)) {
+          try {
+            await bot.api.editMessageText(chatId, msgId,
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+              `Processing: ${pi + 1}/${targetPhones.length}\n` +
+              `✅ Removed: ${removed} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
+            );
+          } catch {}
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 600));
+    }
+
+    fullResult += `📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Removed: ${removed} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}\n\n`;
+    if (wasCancelled) break;
+  }
+
+  wasCancelled = removeFriendCancelRequests.has(userIdNum);
+  removeFriendCancelRequests.delete(userIdNum);
+  cancelDialogActiveFor.delete(userIdNum);
+
+  if (wasCancelled) fullResult += `⛔ <b>Stopped by user.</b>\n\n`;
+  fullResult += `━━━━━━━━━━━━━━━━━━\n✅ <b>Done!</b>`;
+
+  const chunks = splitMessage(fullResult, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    await bot.api.sendMessage(chatId, chunks[i], {
+      parse_mode: "HTML",
+      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+    });
+  }
+}
+
+// ─── Remove Members (existing cancel flow) ───────────────────────────────────
 
 bot.callbackQuery("rm_cancel_request", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -14905,22 +15120,17 @@ bot.on("message:text", async (ctx) => {
   if (!state) {
     if (text.toLowerCase() === "start") {
       if (await isBanned(userId)) return;
-      if (!(await hasAccess(userId))) {
-        const data = await loadBotData();
-        if (data.referMode) {
-          await sendReferRequired(ctx, userId);
-        } else {
-          await ctx.reply(
-            `🔒 <b>Subscription Required!</b>\n\n👤 Contact owner: <b>${OWNER_USERNAME}</b>`,
-            { parse_mode: "HTML" }
-          );
-        }
-        return;
+      if (await hasAccess(userId)) {
+        await ctx.reply(
+          mainMenuText(userId, "welcome"),
+          { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+        );
+      } else {
+        await ctx.reply(
+          "💬 <b>Session expired.</b> Please use /start to open the menu.",
+          { parse_mode: "HTML" }
+        );
       }
-      await ctx.reply(
-        mainMenuText(userId, "welcome"),
-        { parse_mode: "HTML", reply_markup: mainMenu(userId) }
-      );
       return;
     }
 
@@ -14937,16 +15147,6 @@ bot.on("message:text", async (ctx) => {
       }
     }
 
-    // Block free-text interactions when refer mode is on and the user has
-    // no access — same UX as button presses.
-    const data = await loadBotData();
-    if (data.referMode && !isAdmin(userId)) {
-      const state2 = await getAccessState(userId);
-      if (state2.kind === "none") {
-        await sendReferRequired(ctx, userId);
-        return;
-      }
-    }
     await ctx.reply(
       "💬 <b>Session expired.</b> Please use /start to open the menu.",
       { parse_mode: "HTML" }
@@ -15382,10 +15582,10 @@ bot.on("message:text", async (ctx) => {
 
     if (excludeNumbers.size === 0 && excludePrefixes.size === 0) {
       await ctx.reply(
-        "❌ Koi valid input nahi mila.\n\n" +
-        "• Pura number bhejo with country code (e.g. <code>+919912345678</code>), ya\n" +
-        "• Sirf country code bhejo (1-4 digits, e.g. <code>+91</code> ya <code>91</code>)\n\n" +
-        "Ya Skip dabao to kuch bhi exclude nahi hoga.",
+        "❌ No valid input found.\n\n" +
+        "• Send a full number with country code (e.g. <code>+919912345678</code>), or\n" +
+        "• Send only a country code (1–4 digits, e.g. <code>+91</code> or <code>91</code>)\n\n" +
+        "Or tap Skip to exclude nobody.",
         {
           parse_mode: "HTML",
           reply_markup: new InlineKeyboard().text("⏭️ Skip", "rm_skip_exclude").text("❌ Cancel", "main_menu"),
@@ -15400,18 +15600,56 @@ bot.on("message:text", async (ctx) => {
       sections.push(`✅ <b>${excludeNumbers.size} number(s) will be excluded:</b>\n\n${numList}`);
     }
     if (excludePrefixes.size > 0) {
-      const prefList = Array.from(excludePrefixes).map(p => `• +${esc(p)} <i>(saare numbers iss country code se)</i>`).join("\n");
+      const prefList = Array.from(excludePrefixes).map(p => `• +${esc(p)} <i>(all numbers from this country code)</i>`).join("\n");
       sections.push(`🌐 <b>${excludePrefixes.size} country code(s) will be excluded:</b>\n\n${prefList}`);
     }
 
     await ctx.reply(
       sections.join("\n\n") +
-      `\n\n⚠️ Ye sab numbers groups se NOT remove honge.`,
+      `\n\n⚠️ These numbers will NOT be removed from the groups.`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm & Start", "rm_confirm_with_exclude").text("❌ Cancel", "main_menu") }
     );
     state.removeExcludeData.excludeNumbers = excludeNumbers;
     state.removeExcludeData.excludePrefixes = excludePrefixes;
     state.step = "remove_exclude_confirm";
+    return;
+  }
+
+  // Handle phone numbers input for Remove Friend
+  if (state.step === "remove_friend_enter_numbers") {
+    if (!state.removeFriendData) return;
+    const phoneLines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const phoneNumbers: string[] = [];
+    for (const line of phoneLines) {
+      const cleaned = line.replace(/[^0-9+]/g, "");
+      if (cleaned.replace(/[^0-9]/g, "").length >= 7) phoneNumbers.push(cleaned);
+    }
+    if (phoneNumbers.length === 0) {
+      await ctx.reply(
+        "❌ No valid phone numbers found.\n\nSend numbers with country code, one per line:\n<code>+919912345678\n+919998887777</code>",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+      );
+      return;
+    }
+    state.removeFriendData.phoneNumbers = phoneNumbers;
+    const { selectedGroups } = state.removeFriendData;
+    const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+    const moreGroups = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+    const numList = phoneNumbers.slice(0, 15).map(p => `• ${esc(p)}`).join("\n");
+    const moreNums = phoneNumbers.length > 15 ? `\n<i>...+${phoneNumbers.length - 15} more</i>` : "";
+    await ctx.reply(
+      `👥 <b>Remove Friend — Confirm</b>\n\n` +
+      `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+      `<b>${phoneNumbers.length} number(s) to remove:</b>\n${numList}${moreNums}\n\n` +
+      `⚠️ <b>Note:</b> If any of these numbers are admins in a group, they will be demoted first and then removed.\n\n` +
+      `Confirm?`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Confirm & Remove", "rf_confirm")
+          .text("❌ Cancel", "main_menu"),
+      }
+    );
     return;
   }
 
