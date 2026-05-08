@@ -449,48 +449,80 @@ bot.use(async (ctx, next) => {
       if (hasStored === undefined) {
         try { hasStored = await hasStoredWhatsAppSession(String(userId)); hasSessionCache.set(String(userId), hasStored); } catch { hasStored = false; }
       }
-      if (hasStored) {
+      // Guard 1: skip reconnect if user was permanently disconnected and notified
+      // (e.g. pair code failed, 401 logout, 403 ban). The menu's "Connect WhatsApp"
+      // button is the right next step, not a silent reconnect attempt.
+      if (hasStored && !isDisconnectPending(String(userId))) {
         // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
         // does not fire and cause a silent "nothing happens" drop.
-        // The spinner stops here; the reconnect message below gives feedback.
         try { await ctx.answerCallbackQuery(); } catch {}
 
-        try {
-          await ctx.editMessageText(
+        const rcChatId = ctx.callbackQuery?.message?.chat.id;
+        const rcMsgId  = ctx.callbackQuery?.message?.message_id;
+        const rcStart  = Date.now();
+        let rcLastText = "";
+        let rcDone     = false;
+
+        // Edit the existing message to a live progress bar so the user sees
+        // real-time feedback instead of a static "reconnecting..." text.
+        const renderReconnectBar = async (pct: number) => {
+          const elapsed = Math.floor((Date.now() - rcStart) / 1000);
+          const text =
             `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
-            `<i>Your session was idle and got disconnected. ` +
-            `It will reconnect automatically in 5–15 seconds.</i>`,
-            { parse_mode: "HTML" }
-          );
-        } catch {}
+            `${renderProgressBar(pct)}\n\n` +
+            `<i>Your session was idle and got disconnected.\n` +
+            `Reconnecting automatically... (${elapsed}s)</i>`;
+          if (text === rcLastText) return;
+          rcLastText = text;
+          try {
+            if (rcChatId && rcMsgId) {
+              await ctx.api.editMessageText(rcChatId, rcMsgId, text, { parse_mode: "HTML" });
+            } else {
+              await ctx.editMessageText(text, { parse_mode: "HTML" });
+            }
+          } catch {}
+        };
+
+        await renderReconnectBar(0);
+
+        // Tick the progress bar every 1.5s while waiting for the socket to reconnect.
+        // Maps elapsed time (0→20s) to progress (0→90%); jumps to result state at end.
+        const rcTicker = setInterval(async () => {
+          if (rcDone) return;
+          const elapsed = (Date.now() - rcStart) / 1000;
+          const pct = Math.min(90, Math.floor((elapsed / 20) * 90));
+          await renderReconnectBar(pct);
+        }, 1500);
 
         let connected = false;
         try {
           connected = await waitForWhatsAppConnected(String(userId), {
             timeoutMs: 20_000,
-            pollMs: 200, // reduced from 500 ms → faster detection
+            pollMs: 200,
           });
         } catch {}
 
+        rcDone = true;
+        clearInterval(rcTicker);
+
         if (!connected) {
+          const failText =
+            `❌ <b>WhatsApp disconnected</b>\n\n` +
+            `${renderProgressBar(0)}\n\n` +
+            `Your WhatsApp session has been disconnected.\n\n` +
+            `Please connect a fresh session from the menu:\n` +
+            `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`;
+          const failKb = new InlineKeyboard()
+            .text("📱 Connect WhatsApp", "connect_wa").row()
+            .text("🏠 Main Menu", "main_menu");
           try {
-            await ctx.editMessageText(
-              `❌ <b>WhatsApp disconnected</b>\n\n` +
-              `Your WhatsApp session has been disconnected.\n\n` +
-              `Please connect a fresh session from the menu:\n` +
-              `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
-              { parse_mode: "HTML" }
-            );
+            if (rcChatId && rcMsgId) {
+              await ctx.api.editMessageText(rcChatId, rcMsgId, failText, { parse_mode: "HTML", reply_markup: failKb });
+            } else {
+              await ctx.editMessageText(failText, { parse_mode: "HTML", reply_markup: failKb });
+            }
           } catch {
-            try {
-              await ctx.reply(
-                `❌ <b>WhatsApp disconnected</b>\n\n` +
-                `Your WhatsApp session has been disconnected.\n\n` +
-                `Please connect a fresh session from the menu:\n` +
-                `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`,
-                { parse_mode: "HTML" }
-              );
-            } catch {}
+            try { await ctx.reply(failText, { parse_mode: "HTML", reply_markup: failKb }); } catch {}
           }
           return;
         }
@@ -5001,14 +5033,9 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   state.step = "group_enter_description";
   const preview = state.groupSettings.finalNames.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   await ctx.editMessageText(
-    notr(`✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
-    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:"),
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text(notr("🔙 Back"), "naming_back")
-        .text(notr("❌ Cancel"), "main_menu"),
-    }
+    `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
+    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
 
@@ -5021,51 +5048,9 @@ bot.callbackQuery("naming_custom", async (ctx) => {
   state.groupSettings.finalNames = [];
   state.step = "group_enter_custom_names";
   await ctx.editMessageText(
-    notr(`✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`),
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text(notr("🔙 Back"), "naming_back")
-        .text(notr("❌ Cancel"), "main_menu"),
-    }
+    `✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
-});
-
-// Back button handler: returns user to the naming mode selection screen
-// (re-shown after tapping Auto-numbered or Custom Names by mistake).
-bot.callbackQuery("naming_back", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  const state = userStates.get(userId);
-  if (!state?.groupSettings) return;
-  // Reset any naming choices made so far
-  state.groupSettings.finalNames = [];
-  state.groupSettings.namingMode = undefined as any;
-  state.step = "group_naming_mode";
-  const count = state.groupSettings.count;
-  try {
-    await ctx.editMessageText(
-      notr(`🏷️ <b>Naming Mode</b>\n\nCreating <b>${count} groups</b>. How to name them?`),
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text(notr("🔢 Auto-numbered"), "naming_auto")
-          .text(notr("✏️ Custom Names"), "naming_custom").row()
-          .text(notr("❌ Cancel"), "main_menu"),
-      }
-    );
-  } catch {
-    await ctx.reply(
-      notr(`🏷️ <b>Naming Mode</b>\n\nCreating <b>${count} groups</b>. How to name them?`),
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard()
-          .text(notr("🔢 Auto-numbered"), "naming_auto")
-          .text(notr("✏️ Custom Names"), "naming_custom").row()
-          .text(notr("❌ Cancel"), "main_menu"),
-      }
-    );
-  }
 });
 
 async function showGroupSummary(ctx: any) {
@@ -5398,8 +5383,8 @@ bot.callbackQuery("join_groups", async (ctx) => {
   }
   userStates.set(userId, { step: "join_enter_links", joinData: { links: [] } });
   await ctx.editMessageText(
-    notr("🔗 <b>Join Groups</b>\n\nSend WhatsApp group link(s), one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"),
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(notr("❌ Cancel"), "main_menu") }
+    "🔗 <b>Join Groups</b>\n\nSend WhatsApp group link(s), one per line:\n\n<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
 
@@ -5536,49 +5521,28 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
   saveUserState(userId, ctcInitState).catch((e: any) => console.error("[CTC-STEP-5] saveUserState FAILED:", e?.message));
   console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
 
-  // notr() skips auto-translation — prevents Google Translate from mangling
-  // the HTML tags (<b>, <code>) and URLs inside sentinel tokens, which causes
-  // Telegram to reject the message with "can't parse entities" for non-English users.
-  const ctcPrompt = notr(
+  const ctcPrompt =
     "🔍 <b>CTC Checker</b>\n\n" +
     "Step 1: Send all WhatsApp group links, one per line:\n\n" +
-    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"
-  );
+    "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>";
 
-  const cancelKb = new InlineKeyboard().text(notr("❌ Cancel"), "main_menu");
+  const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
 
-  // Step 5: Show the CTC prompt. Try 3 approaches in order:
-  //   A) Edit the menu message in-place (cleanest, no extra message)
-  //   B) Send a new message to chatId (covers cases where edit fails — e.g. message too old)
-  //   C) Send directly to userId (last resort for any chatId confusion)
-  console.error(`[CTC-STEP-6] Showing CTC prompt — chatId=${chatId} msgId=${msgId}`);
-  let promptShown = false;
+  // Step 5: Edit menu message in-place with the CTC prompt (same pattern as join_groups, reset-by-link etc.)
+  console.error(`[CTC-STEP-6] Editing menu message in-place — chatId=${chatId} msgId=${msgId}`);
   try {
     await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-    promptShown = true;
     console.error("[CTC-STEP-6] editMessageText OK ✅");
   } catch (err: any) {
-    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err);
-  }
-  if (!promptShown) {
+    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err, "| Falling back to reply");
     try {
-      await ctx.api.sendMessage(chatId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-      promptShown = true;
-      console.error("[CTC-STEP-6] sendMessage(chatId) OK ✅");
-    } catch (err: any) {
-      console.error("[CTC-STEP-6] sendMessage(chatId) FAILED:", err?.message ?? err);
+      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
+      console.error("[CTC-STEP-6] reply fallback OK ✅");
+    } catch (err2: any) {
+      console.error("[CTC-STEP-6] reply fallback ALSO FAILED:", err2?.message ?? err2);
     }
   }
-  if (!promptShown) {
-    try {
-      await ctx.api.sendMessage(userId, ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-      promptShown = true;
-      console.error("[CTC-STEP-6] sendMessage(userId) OK ✅");
-    } catch (err: any) {
-      console.error("[CTC-STEP-6] sendMessage(userId) FAILED:", err?.message ?? err);
-    }
-  }
-  console.error(`[CTC-STEP-8] Handler complete — promptShown=${promptShown}`);
+  console.error("[CTC-STEP-8] Handler complete");
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
