@@ -56,6 +56,8 @@ import {
   setSessionAlias,
   clearSessionAlias,
   getSessionAlias,
+  isDisconnectPending,
+  isWhatsAppConnecting,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1406,22 +1408,48 @@ const newSessionFlag: Map<number, boolean> = new Map();
 // background reload. Returns immediately — the menu/button flow continues
 // without waiting. The connect handlers in connectWhatsApp itself will set the
 // connected flag once the socket is up.
+// Also restores the auto-chat WA session (userId_auto) so that users who
+// connected an autochat WA but went idle will have both sessions restored
+// on next interaction — not just the primary one.
 async function ensureWhatsAppRestored(userId: number): Promise<void> {
   const uid = String(userId);
-  if (isConnected(uid)) return;
-  try {
-    // Use session cache to avoid a MongoDB round-trip on every update.
-    let stored = hasSessionCache.get(uid);
-    if (stored === undefined) {
-      stored = await hasStoredWhatsAppSession(uid);
-      hasSessionCache.set(uid, stored);
-    }
-    if (!stored) return;
-    // Fire-and-forget — ensureSessionLoaded handles its own concurrency guards.
-    ensureSessionLoaded(uid).catch((err) => {
-      console.error(`[BOT] silent restore failed for ${userId}:`, err?.message);
-    });
-  } catch {}
+
+  // ── Restore primary WA session ────────────────────────────────────────────
+  if (!isConnected(uid)) {
+    try {
+      let stored = hasSessionCache.get(uid);
+      if (stored === undefined) {
+        stored = await hasStoredWhatsAppSession(uid);
+        hasSessionCache.set(uid, stored);
+      }
+      if (stored) {
+        ensureSessionLoaded(uid).catch((err) => {
+          console.error(`[BOT] silent restore failed for ${userId}:`, err?.message);
+        });
+      }
+    } catch {}
+  }
+
+  // ── Bug fix: Restore autochat WA session too ──────────────────────────────
+  // If the user had an autochat (secondary) WA connected and it was evicted by
+  // the idle timer, restore it alongside the primary session. Without this fix,
+  // only the primary WA reconnects silently — the auto WA stays dead until the
+  // user manually navigates to Auto Chat and reconnects it.
+  const autoUid = `${uid}_auto`;
+  if (!isAutoConnected(uid)) {
+    try {
+      let autoStored = hasSessionCache.get(autoUid);
+      if (autoStored === undefined) {
+        autoStored = await hasStoredWhatsAppSession(autoUid);
+        hasSessionCache.set(autoUid, autoStored);
+      }
+      if (autoStored) {
+        ensureSessionLoaded(autoUid).catch((err) => {
+          console.error(`[BOT] silent auto-WA restore failed for ${userId}:`, err?.message);
+        });
+      }
+    } catch {}
+  }
 }
 // ─── Join Session (batching + live progress bar) ──────────────────────────────
 interface JoinSession {
@@ -2254,6 +2282,14 @@ function renderProgressBar(pct: number): string {
 async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise<void> {
   const uid = String(userId);
 
+  // ── Bug fix: Don't try to reconnect a permanently-disconnected session ──
+  // If the user already received a "⚠️ WhatsApp Disconnected" notification
+  // (e.g. pairing code failed, logged out, 403 ban), their old session creds
+  // may still be in MongoDB but the connection will just fail again. Skip
+  // the reconnect progress bar entirely — the menu's "Connect WhatsApp"
+  // button is the correct next step for them.
+  if (isDisconnectPending(uid)) return;
+
   // Only surface the connection toast/progress bar when this /start kicks
   // off a brand-new active window (first /start of the session, or first
   // /start after a 30-min idle gap). Otherwise the user sees the same
@@ -2261,7 +2297,20 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
   // which is exactly what the user reported. If the user is mid-session,
   // the menu appears immediately with no toast.
   const isNewSession = newSessionFlag.get(userId) === true;
-  if (!isNewSession) return;
+  if (!isNewSession) {
+    // ── Bug fix: /start sent 2-3 times quickly ────────────────────────────
+    // If a previous /start already kicked off a connection attempt that is
+    // still in progress, wait for it to finish before showing the menu so
+    // the menu reflects the real connected state. Without this wait, rapid
+    // /start presses show "WhatsApp not connected" in the menu even though
+    // the connection succeeds 2 seconds later.
+    if (isWhatsAppConnecting(uid)) {
+      try {
+        await waitForWhatsAppConnected(uid, { timeoutMs: 20_000, pollMs: 300 });
+      } catch {}
+    }
+    return;
+  }
 
   // Already live? Just show a quick confirmation, no progress bar needed.
   if (isConnected(uid)) {
