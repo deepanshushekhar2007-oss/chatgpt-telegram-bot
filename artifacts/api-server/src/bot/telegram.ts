@@ -5035,7 +5035,7 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   await ctx.editMessageText(
     `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
     "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
   );
 });
 
@@ -5049,7 +5049,21 @@ bot.callbackQuery("naming_custom", async (ctx) => {
   state.step = "group_enter_custom_names";
   await ctx.editMessageText(
     `✏️ <b>Custom Names</b>\n\nSend all <b>${state.groupSettings.count}</b> names, one per line:\n\n<i>Example:\nSpidy Squad\nSpidy Gang\nSpidy Army</i>`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("back_to_naming_mode", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.groupSettings) return;
+  state.step = "group_naming_mode";
+  state.groupSettings.namingMode = "auto";
+  state.groupSettings.finalNames = [];
+  await ctx.editMessageText(
+    `🏷️ <b>Naming Mode</b>\n\nCreating <b>${state.groupSettings.count} groups</b>. How to name them?`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔢 Auto-numbered", "naming_auto").text("✏️ Custom Names", "naming_custom").row().text("❌ Cancel", "main_menu") }
   );
 });
 
