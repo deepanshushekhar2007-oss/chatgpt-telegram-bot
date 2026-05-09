@@ -1640,7 +1640,7 @@ async function runRlResolveBackground(userId: number): Promise<void> {
       `🔗 <b>Reset Invite Links — Confirm</b>\n\n` +
       `✅ <b>${session.resolved.length} group(s) resolved</b> — invite links will be reset.\n`;
     if (session.failed.length > 0) {
-      reviewText += `⚠️ <b>${session.failed.length} link(s) could not be resolved</b> (will be skipped).\n`;
+      reviewText += `⚠️ <b>${session.failed.length} link(s) will be skipped</b>.\n`;
     }
     reviewText +=
       `\n⚠️ <b>Current invite links will be revoked.</b>\n` +
@@ -10603,22 +10603,22 @@ async function runRlResolvePipelineBackground(
   // ≤ 200 |  10   |   15s       |   4.0s   | ~16-17 min
   // ≤ 500 |  10   |   20s       |   4.6s   | ~54-56 min ✅
   // > 500 |  10   |   25s       |   5.5s   | ~115-120 min
-  const BATCH_SIZE    = total <= 50  ? 15
-                      : total <= 100 ? 12
-                      : 10;
-  const BATCH_PAUSE_MS = total <= 50  ?  8000
-                       : total <= 100 ? 12000
-                       : total <= 200 ? 15000
-                       : total <= 500 ? 20000
-                       : 25000;
-  const INTER_LINK_MS = total <= 50  ? 2500
-                       : total <= 100 ? 3500
-                       : total <= 200 ? 4000
-                       : total <= 500 ? 4600
-                       : 5500;
-  const FAIL_LINK_MS  = total <= 200 ?  8000
-                      : total <= 500 ? 10000
-                      : 12000;
+  const BATCH_SIZE    = total <= 50  ? 50
+                      : total <= 100 ? 50
+                      : 50;
+  const BATCH_PAUSE_MS = total <= 50  ?   500
+                       : total <= 100 ?   800
+                       : total <= 200 ?  1000
+                       : total <= 500 ?  1500
+                       : 2000;
+  const INTER_LINK_MS = total <= 50  ?  100
+                       : total <= 100 ?  150
+                       : total <= 200 ?  200
+                       : total <= 500 ?  250
+                       : 300;
+  const FAIL_LINK_MS  = total <= 200 ?   500
+                      : total <= 500 ?   800
+                      : 1000;
 
   for (let i = 0; i < links.length; i++) {
     if (resetLinkCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
@@ -10628,7 +10628,7 @@ async function runRlResolvePipelineBackground(
       markUserActive(userIdNum); // Reset idle timer during long runs
       try {
         await bot.api.editMessageText(chatId, msgId,
-          buildProgress() + `\n\n<i>⏸ Pausing ${BATCH_PAUSE_MS / 1000}s (rate limit break for ${total} links)...</i>`,
+          buildProgress(),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
         );
       } catch {}
@@ -10642,39 +10642,17 @@ async function runRlResolvePipelineBackground(
     // so transient WA errors never permanently fail a link.
     let info = await getGroupIdFromLink(userId, link);
 
-    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
-      // Retry 1 — short wait (8s) for quick transient errors
-      try { await bot.api.editMessageText(chatId, msgId,
-        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} resolve failed — retrying in 8s...</i>`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
-      ); } catch {}
-      await new Promise(r => setTimeout(r, 8000));
-      info = await getGroupIdFromLink(userId, link);
-    }
-
-    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
-      // Retry 2 — longer wait (15s) for rate-limit recovery
-      try { await bot.api.editMessageText(chatId, msgId,
-        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} still failing — retrying in 15s...</i>`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
-      ); } catch {}
-      await new Promise(r => setTimeout(r, 15000));
-      info = await getGroupIdFromLink(userId, link);
-    }
-
-    if (!info && !resetLinkCancelRequests.has(userIdNum)) {
-      // Retry 3 — final attempt after 25s cooldown
-      try { await bot.api.editMessageText(chatId, msgId,
-        buildProgress() + `\n\n<i>⚠️ Link ${i + 1} final retry in 25s...</i>`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }
-      ); } catch {}
-      await new Promise(r => setTimeout(r, 25000));
+    // Silent retries for resolve — keep trying until success, no error shown to user
+    const resolveWaits = [500, 800, 1000, 1200, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000];
+    for (const wait of resolveWaits) {
+      if (info || resetLinkCancelRequests.has(userIdNum)) break;
+      await new Promise(r => setTimeout(r, wait));
       info = await getGroupIdFromLink(userId, link);
     }
 
     if (!info) {
-      // All 3 retries exhausted — mark as truly failed
-      results.push({ subject: link, resolveErr: "Link invalid or expired (3 retries failed)" });
+      // All retries exhausted — skip silently, show generic skipped message
+      results.push({ subject: link, resolveErr: "Skipped" });
       done++;
       try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
       if (i < links.length - 1) await new Promise(r => setTimeout(r, FAIL_LINK_MS));
@@ -10698,11 +10676,11 @@ async function runRlResolvePipelineBackground(
         errLower.includes("forbidden") ||
         errLower.includes("405");
       if (isTransient && !resetLinkCancelRequests.has(userIdNum)) {
-        await new Promise(r => setTimeout(r, 8000));
-        res = await resetGroupInviteLink(userId, info.id);
-        // One more retry if still failing
-        if (!res.success && !resetLinkCancelRequests.has(userIdNum)) {
-          await new Promise(r => setTimeout(r, 15000));
+        // Silent retries — keep trying until success, no error shown to user
+        const resetWaits = [500, 800, 1000, 1200, 1500, 2000, 2500, 3000, 3500, 4000];
+        for (const wait of resetWaits) {
+          if (res.success || resetLinkCancelRequests.has(userIdNum)) break;
+          await new Promise(r => setTimeout(r, wait));
           res = await resetGroupInviteLink(userId, info.id);
         }
       }
@@ -10712,7 +10690,7 @@ async function runRlResolvePipelineBackground(
       results.push({ subject: info.subject, newLink: res.newLink });
       resetOk++;
     } else {
-      results.push({ subject: info.subject, resetErr: res.error || "Failed" });
+      results.push({ subject: info.subject, resetErr: "Could not reset" });
     }
     done++;
     try { await bot.api.editMessageText(chatId, msgId, buildProgress(), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rl_cancel_request") }); } catch {}
@@ -10736,11 +10714,15 @@ async function runRlResolvePipelineBackground(
     resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
   if (failedResults.length > 0) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed (${failedResults.length}):</b>\n`;
+    resultText += `━━━━━━━━━━━━━━━━━━
+⚠️ <b>Could Not Reset (${failedResults.length}):</b>
+`;
     for (const r of failedResults) {
-      const reason = r.resolveErr ? "Link resolve failed" : (r.resetErr || "Failed");
-      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(reason)}\n`;
+      resultText += `❌ <b>${esc(r.subject)}</b>
+`;
     }
+    resultText += "
+";
   }
 
   // Cache links for optional .txt download (valid 15 min)
@@ -10923,9 +10905,11 @@ async function resetLinkBackground(
         errLower.includes("405") ||
         errLower.includes("not authorized")
       ) {
-        // Wait 6 seconds to clear the rate-limit window, then retry once
-        await new Promise((r) => setTimeout(r, 6000));
-        if (!resetLinkCancelRequests.has(userIdNum)) {
+        // Silent retries — keep trying until success, no error shown to user
+        const rlWaits = [400, 600, 800, 1000, 1200, 1500, 2000, 2500, 3000, 3500];
+        for (const wait of rlWaits) {
+          if (res.success || resetLinkCancelRequests.has(userIdNum)) break;
+          await new Promise((r) => setTimeout(r, wait));
           res = await resetGroupInviteLink(userId, group.id);
         }
       }
@@ -10935,10 +10919,10 @@ async function resetLinkBackground(
       results.push({ subject: group.subject, newLink: res.newLink });
       successCount++;
     } else {
-      results.push({ subject: group.subject, error: res.error || "Failed" });
+      results.push({ subject: group.subject, error: "Could not reset" });
     }
     await updateProgress(gi + 1);
-    if (gi < groups.length - 1) await new Promise((r) => setTimeout(r, 1500));
+    if (gi < groups.length - 1) await new Promise((r) => setTimeout(r, 50));
   }
 
   resetLinkCancelRequests.delete(userIdNum);
@@ -10955,13 +10939,17 @@ async function resetLinkBackground(
     resultText += `✅ <b>${esc(r.subject)}</b>\n${r.newLink}\n\n`;
   }
 
-  // Show all failed groups together at the end
+  // Show all failed groups together at the end (sirf naam, koi reason nahi)
   if (failedResults.length > 0) {
-    resultText += `━━━━━━━━━━━━━━━━━━\n⚠️ <b>Failed to Reset (${failedResults.length} group(s)):</b>\n`;
+    resultText += `━━━━━━━━━━━━━━━━━━
+⚠️ <b>Could Not Reset (${failedResults.length} group(s)):</b>
+`;
     for (const r of failedResults) {
-      resultText += `❌ <b>${esc(r.subject)}</b> — ${esc(r.error || "Failed")}\n`;
+      resultText += `❌ <b>${esc(r.subject)}</b>
+`;
     }
-    resultText += "\n";
+    resultText += "
+";
   }
 
   if (!wasCancelled) {
