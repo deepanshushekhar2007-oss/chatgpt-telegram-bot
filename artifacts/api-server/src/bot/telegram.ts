@@ -10721,8 +10721,7 @@ async function runRlResolvePipelineBackground(
       resultText += `❌ <b>${esc(r.subject)}</b>
 `;
     }
-    resultText += "
-";
+    resultText += "\n";
   }
 
   // Cache links for optional .txt download (valid 15 min)
@@ -10948,8 +10947,7 @@ async function resetLinkBackground(
       resultText += `❌ <b>${esc(r.subject)}</b>
 `;
     }
-    resultText += "
-";
+    resultText += "\n";
   }
 
   if (!wasCancelled) {
