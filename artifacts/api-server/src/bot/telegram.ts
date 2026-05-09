@@ -1073,6 +1073,8 @@ interface UserState {
     allGroups: Array<{ id: string; subject: string }>;
     selectedIndices: Set<number>;
     page: number;
+    patterns?: SimilarGroup[];
+    patternPage?: number;
   };
   removeExcludeData?: {
     selectedGroups: Array<{ id: string; subject: string }>;
@@ -8276,6 +8278,25 @@ function buildRemoveMembersKeyboard(state: UserState): InlineKeyboard {
   return kb;
 }
 
+const RM_SIM_PAGE_SIZE = 10;
+
+function buildRmSimilarKeyboard(patterns: SimilarGroup[], page: number): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const totalPages = Math.max(1, Math.ceil(patterns.length / RM_SIM_PAGE_SIZE));
+  const start = page * RM_SIM_PAGE_SIZE;
+  const end = Math.min(start + RM_SIM_PAGE_SIZE, patterns.length);
+  for (let i = start; i < end; i++) {
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length} groups)`, `rm_sim_${i}`).row();
+  }
+  if (totalPages > 1) {
+    const prev = page > 0 ? "⬅️ Previous" : " ";
+    const next = page < totalPages - 1 ? "Next ➡️" : " ";
+    kb.text(prev, "rm_sim_prev_page").text(`📄 ${page + 1}/${totalPages}`, "rm_sim_page_info").text(next, "rm_sim_next_page").row();
+  }
+  kb.text("🔙 Back", "remove_members").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
 bot.callbackQuery("remove_members", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -8296,21 +8317,125 @@ bot.callbackQuery("remove_members", async (ctx) => {
     }); return;
   }
 
+  const adminGroupsSimple = adminGroups.map((g) => ({ id: g.id, subject: g.subject }));
+  const patterns = detectSimilarGroups(adminGroupsSimple);
+
   userStates.set(userId, {
-    step: "remove_members_select",
+    step: "remove_members_menu",
     removeData: {
-      allGroups: adminGroups.map((g) => ({ id: g.id, subject: g.subject })),
+      allGroups: adminGroupsSimple,
       selectedIndices: new Set(),
       page: 0,
+      patterns,
     },
   });
 
-  const state = userStates.get(userId)!;
-  const rmKb = buildRemoveMembersKeyboard(state);
-  rmKb.row().text("🔗 By Link", "rm_by_link");
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "rm_similar").text("📋 All Groups", "rm_show_all").row();
+  else kb.text("📋 All Groups", "rm_show_all").row();
+  kb.text("🔗 By Link", "rm_by_link").row();
+  kb.text("🏠 Main Menu", "main_menu");
+
   await ctx.editMessageText(
-    `🗑️ <b>Remove Members</b>\n\n👑 <b>${adminGroups.length} admin group(s) found</b>\n\nSelect the group(s) from which you want to remove members:\n<i>Tap to select/deselect</i>`,
-    { parse_mode: "HTML", reply_markup: rmKb }
+    `🗑️ <b>Remove Members</b>\n\n` +
+    `👑 Admin Groups: ${adminGroups.length} (Total: ${allGroups.length})\n` +
+    (patterns.length > 0 ? `🔍 Similar Patterns: ${patterns.length}\n` : "") +
+    `\n📌 Choose an option:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("rm_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeData) return;
+
+  const patterns = state.removeData.patterns || [];
+  if (!patterns.length) {
+    await ctx.editMessageText("⚠️ No similar group patterns found.", {
+      reply_markup: new InlineKeyboard().text("🔙 Back", "remove_members").text("🏠 Menu", "main_menu"),
+    }); return;
+  }
+
+  state.removeData.patternPage = 0;
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
+    { parse_mode: "HTML", reply_markup: buildRmSimilarKeyboard(patterns, 0) }
+  );
+});
+
+bot.callbackQuery("rm_sim_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeData) return;
+  const current = state.removeData.patternPage || 0;
+  if (current > 0) state.removeData.patternPage = current - 1;
+  const page = state.removeData.patternPage || 0;
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
+    { parse_mode: "HTML", reply_markup: buildRmSimilarKeyboard(state.removeData.patterns || [], page) }
+  );
+});
+
+bot.callbackQuery("rm_sim_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeData) return;
+  const patterns = state.removeData.patterns || [];
+  const totalPages = Math.ceil(patterns.length / RM_SIM_PAGE_SIZE);
+  const current = state.removeData.patternPage || 0;
+  if (current < totalPages - 1) state.removeData.patternPage = current + 1;
+  const page = state.removeData.patternPage || 0;
+  await ctx.editMessageText(
+    "🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:",
+    { parse_mode: "HTML", reply_markup: buildRmSimilarKeyboard(patterns, page) }
+  );
+});
+
+bot.callbackQuery("rm_sim_page_info", async (ctx) => {
+  await ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
+});
+
+bot.callbackQuery(/^rm_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeData) return;
+
+  const idx = parseInt(ctx.match![1]);
+  const patterns = state.removeData.patterns || [];
+  const pattern = patterns[idx];
+  if (!pattern) return;
+
+  const patternIds = new Set(pattern.groups.map((g: { id: string }) => g.id));
+  state.removeData.selectedIndices = new Set();
+  for (let i = 0; i < state.removeData.allGroups.length; i++) {
+    if (patternIds.has(state.removeData.allGroups[i].id)) {
+      state.removeData.selectedIndices.add(i);
+    }
+  }
+  state.step = "remove_members_select";
+  state.removeData.page = 0;
+  const selectedCount = state.removeData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${state.removeData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to remove members from:\n<i>${selectedCount > 0 ? `${selectedCount} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("rm_show_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeData) return;
+  state.step = "remove_members_select";
+  state.removeData.page = 0;
+  await ctx.editMessageText(
+    `🗑️ <b>Remove Members</b>\n\n👑 <b>${state.removeData.allGroups.length} admin group(s)</b>\n\nSelect group(s) to remove members from:\n<i>Tap to select/deselect</i>`,
+    { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
   );
 });
 
@@ -15394,6 +15519,129 @@ bot.on("message:text", async (ctx) => {
   if (await isBanned(userId)) return;
   const state = userStates.get(userId);
   const text = ctx.message.text.trim();
+
+  // ── By-link accumulation steps — must be handled before other state checks ──
+  if (state) {
+    if (state.step === "lv_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.lvLinkBuffer) state.lvLinkBuffer = [];
+      state.lvLinkBuffer.push(...links);
+      const total = state.lvLinkBuffer.length;
+      const prompt = byLinkPrompt("Leave Group", "🚪", total, "lv_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "lv_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = lvLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      lvLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "rm_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.rmLinkBuffer) state.rmLinkBuffer = [];
+      state.rmLinkBuffer.push(...links);
+      const total = state.rmLinkBuffer.length;
+      const prompt = byLinkPrompt("Remove Members", "🗑️", total, "rm_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "rm_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = rmLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      rmLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "ap_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.apLinkBuffer) state.apLinkBuffer = [];
+      state.apLinkBuffer.push(...links);
+      const total = state.apLinkBuffer.length;
+      const prompt = byLinkPrompt("Approval", "✅", total, "ap_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "ap_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = apLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      apLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "ma_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.maLinkBuffer) state.maLinkBuffer = [];
+      state.maLinkBuffer.push(...links);
+      const total = state.maLinkBuffer.length;
+      const prompt = byLinkPrompt("Make Admin", "👑", total, "ma_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "ma_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = maLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      maLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "da_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.daLinkBuffer) state.daLinkBuffer = [];
+      state.daLinkBuffer.push(...links);
+      const total = state.daLinkBuffer.length;
+      const prompt = byLinkPrompt("Demote Admin", "👤", total, "da_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "da_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = daLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      daLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "es_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.esLinkBuffer) state.esLinkBuffer = [];
+      state.esLinkBuffer.push(...links);
+      const total = state.esLinkBuffer.length;
+      const prompt = byLinkPrompt("Edit Settings", "⚙️", total, "es_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "es_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = esLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      esLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+
+    if (state.step === "cgn_enter_links_bl") {
+      const links = extractLinksFromText(text);
+      if (!links.length) return;
+      if (!state.cgnLinkBuffer) state.cgnLinkBuffer = [];
+      state.cgnLinkBuffer.push(...links);
+      const total = state.cgnLinkBuffer.length;
+      const prompt = byLinkPrompt("Change Group Name", "🏷️", total, "cgn_links_done");
+      const kb = new InlineKeyboard().text("✅ Done", "cgn_links_done").row().text("❌ Cancel", "main_menu");
+      const existingId = cgnLinkCollectMsgId.get(userId);
+      if (existingId) {
+        try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+      }
+      const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+      cgnLinkCollectMsgId.set(userId, m.message_id);
+      return;
+    }
+  }
+  // ── End by-link accumulation steps ──
 
   if (!state) {
     if (text.toLowerCase() === "start") {
