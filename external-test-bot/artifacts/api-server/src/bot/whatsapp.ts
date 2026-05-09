@@ -208,12 +208,20 @@ async function createSocket(
     console.log(`[WA][${userId}] Update gen=${myGenId}: connection=${connection}`);
 
     if (pairingMode === "qr" && qr && !session.connected) {
-      const expiresAt = Date.now() + 60000;
-      session.qrCode = qr;
-      session.qrExpiresAt = expiresAt;
-      session.connecting = false;
-      console.log(`[WA][${userId}] QR generated gen=${myGenId}`);
-      onQr(qr, expiresAt);
+      if (session.wasConnected) {
+        // Already paired — QR during reconnect means WhatsApp is requesting re-auth.
+        // The original onQr callback is stale/expired; calling it would fail or send
+        // an unexpected QR to the user. Don't call it. If auth is truly gone,
+        // WhatsApp will send loggedOut and the session will be cleared cleanly.
+        console.log(`[WA][${userId}] QR during reconnect gen=${myGenId} — ignoring (session already paired, wasConnected=true)`);
+      } else {
+        const expiresAt = Date.now() + 60000;
+        session.qrCode = qr;
+        session.qrExpiresAt = expiresAt;
+        session.connecting = false;
+        console.log(`[WA][${userId}] QR generated gen=${myGenId}`);
+        onQr(qr, expiresAt);
+      }
     }
 
     if (connection === "open") {
@@ -448,7 +456,7 @@ export async function restoreWhatsAppSessions(): Promise<void> {
       pairingCode: null,
       qrCode: null,
       qrExpiresAt: null,
-      pairingMode: "code",
+      pairingMode: stored.pairingMode,
       connecting: true,
       phoneNumber: stored.phoneNumber,
       codeRequested: false,
@@ -463,10 +471,10 @@ export async function restoreWhatsAppSessions(): Promise<void> {
       await createSocket(
         stored.userId,
         stored.phoneNumber,
-        "code",
+        stored.pairingMode,
         () => {},
-        () => {},
-        () => console.log(`[WA][RESTORE][${stored.userId}] Session restored`),
+        () => {},  // No QR callback for restore — wasConnected=true prevents stale onQr from firing
+        () => console.log(`[WA][RESTORE][${stored.userId}] Session restored (mode=${stored.pairingMode})`),
         (reason) => console.log(`[WA][RESTORE][${stored.userId}] Restore disconnected: ${reason}`),
         session
       );

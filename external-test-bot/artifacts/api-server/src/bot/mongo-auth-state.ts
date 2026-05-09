@@ -170,27 +170,32 @@ export async function useMongoDBAuthState(userId: string) {
   };
 }
 
-export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: string; phoneNumber: string }>> {
+export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: string; phoneNumber: string; pairingMode: "code" | "qr" }>> {
   const credsCollection = await getCollection("wa_creds");
   const docs = await credsCollection.find({}, { projection: { _id: 1, userId: 1, creds: 1 } }).toArray();
-  const sessions: Array<{ userId: string; phoneNumber: string }> = [];
+  const sessions: Array<{ userId: string; phoneNumber: string; pairingMode: "code" | "qr" }> = [];
 
   for (const doc of docs) {
     const userId = String(doc.userId || doc._id || "");
     if (!userId || !doc.creds) continue;
 
     let phoneNumber = "";
+    let pairingMode: "code" | "qr" = "code";
     try {
       const creds = deserialize(doc.creds);
+      // registered=true  → paired via pairing code (Baileys sets this flag only in pairing code flow)
+      // registered=false but me.id set → paired via QR (successfully connected but registered stays false)
+      // registered=false and no me.id → never connected, skip
+      if (!creds?.registered && !creds?.me?.id) continue;
+      pairingMode = creds?.registered ? "code" : "qr";
       const rawId = creds?.me?.id || creds?.me?.lid || "";
       const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
       phoneNumber = digits ? `+${digits}` : "";
-      if (!creds?.registered) continue;
     } catch {
       continue;
     }
 
-    sessions.push({ userId, phoneNumber });
+    sessions.push({ userId, phoneNumber, pairingMode });
   }
 
   return sessions;
