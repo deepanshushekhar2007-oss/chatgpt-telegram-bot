@@ -1149,6 +1149,14 @@ interface UserState {
     }>;
   };
   sgLinkBuffer?: string[];
+  rmLinkBuffer?: string[];
+  esLinkBuffer?: string[];
+  apLinkBuffer?: string[];
+  cgnLinkBuffer?: string[];
+  maLinkBuffer?: string[];
+  daLinkBuffer?: string[];
+  lvLinkBuffer?: string[];
+  ctcLinkBuffer?: string[];
   addMembersData?: {
     groupLink: string;
     groupId: string;
@@ -1546,6 +1554,14 @@ interface RlResolveSession {
 
 const rlResolveSessions = new Map<number, RlResolveSession>();
 const rlLinkCollectMsgId = new Map<number, number>();
+const rmLinkCollectMsgId = new Map<number, number>();
+const esLinkCollectMsgId = new Map<number, number>();
+const apLinkCollectMsgId = new Map<number, number>();
+const cgnLinkCollectMsgId = new Map<number, number>();
+const maLinkCollectMsgId = new Map<number, number>();
+const daLinkCollectMsgId = new Map<number, number>();
+const lvLinkCollectMsgId = new Map<number, number>();
+const ctcLinkCollectMsgId = new Map<number, number>();
 
 function buildRlProgressBar(done: number, total: number): string {
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
@@ -1686,12 +1702,19 @@ async function runJoinBackground(userId: number): Promise<void> {
     while (session.queue.length > 0 && !session.cancelled) {
       if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
       const link = session.queue.shift()!;
-      const res = await joinGroupWithLink(String(userId), link);
+      let res: { success: boolean; groupName?: string; error?: string };
+      try {
+        const timeout = new Promise<{ success: false; error: string }>((r) =>
+          setTimeout(() => r({ success: false, error: "Timeout" }), 90000)
+        );
+        res = await Promise.race([joinGroupWithLink(String(userId), link), timeout]);
+      } catch (e: any) {
+        res = { success: false, error: e?.message || "Unknown error" };
+      }
       if (res.success) {
         session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
       } else {
         const errMsg = res.error || "Unknown";
-        // Show the original invite link so user knows exactly which group failed
         session.results.push(`❌ ${esc(errMsg)}\n🔗 <code>${esc(link)}</code>`);
         session.failedLinks.push({ link, reason: errMsg });
       }
@@ -7985,6 +8008,7 @@ bot.callbackQuery("leave_group", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "lv_similar").text("📋 All Groups", "lv_show_all").row();
   else kb.text("📋 All Groups", "lv_show_all").row();
+  kb.text("🔗 By Link", "lv_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -8175,7 +8199,10 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       if (leaveJobCancel.has(userId)) { cancelled = true; break; }
       const g = groups[li];
       const ok = await leaveGroup(String(userId), g.id);
-      if (ok) { lines.push(`✅ Left: ${esc(g.subject)}`); success++; }
+      if (ok) {
+        try { await deleteGroupChat(String(userId), g.id); } catch {}
+        lines.push(`✅ Left: ${esc(g.subject)}`); success++;
+      }
       else { lines.push(`❌ Failed: ${esc(g.subject)}`); failed++; }
       try {
         await bot.api.editMessageText(chatId, msgId,
@@ -8279,9 +8306,11 @@ bot.callbackQuery("remove_members", async (ctx) => {
   });
 
   const state = userStates.get(userId)!;
+  const rmKb = buildRemoveMembersKeyboard(state);
+  rmKb.row().text("🔗 By Link", "rm_by_link");
   await ctx.editMessageText(
     `🗑️ <b>Remove Members</b>\n\n👑 <b>${adminGroups.length} admin group(s) found</b>\n\nSelect the group(s) from which you want to remove members:\n<i>Tap to select/deselect</i>`,
-    { parse_mode: "HTML", reply_markup: buildRemoveMembersKeyboard(state) }
+    { parse_mode: "HTML", reply_markup: rmKb }
   );
 });
 
@@ -8870,6 +8899,7 @@ bot.callbackQuery("make_admin", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "ma_similar").text("📋 All Groups", "ma_show_all").row();
   else kb.text("📋 All Groups", "ma_show_all").row();
+  kb.text("🔗 By Link", "ma_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -9122,6 +9152,7 @@ bot.callbackQuery("approval", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "ap_similar").text("📋 All Groups", "ap_show_all").row();
   else kb.text("📋 All Groups", "ap_show_all").row();
+  kb.text("🔗 By Link", "ap_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -9675,6 +9706,7 @@ async function approveOneByOneBackground(
     if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break outer; }
     const group = groups[gi];
 
+    try {
     await safeBackgroundEdit(userIdNum, chatId, msgId,
       `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n⌛ Fetching pending members...`,
       { parse_mode: "HTML", reply_markup: progressMarkup }
@@ -9723,6 +9755,9 @@ async function approveOneByOneBackground(
     // is now (post-approval). Stays as "?" if metadata fetch fails.
     const total = await getGroupMemberCountSafe(userId, group.id);
     lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ Approved: ${approved} | ❌ Failed: ${failed} | 👥 Total: ${total}`);
+    } catch (groupErr: any) {
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n⚠️ Error processing group`);
+    }
   }
 
   // Cleanup flags so the next run starts clean (and so any racing dialog
@@ -11049,6 +11084,7 @@ bot.callbackQuery("demote_admin", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "da_similar").text("📋 All Groups", "da_show_all").row();
   else kb.text("📋 All Groups", "da_show_all").row();
+  kb.text("🔗 By Link", "da_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
 
   await ctx.editMessageText(
@@ -13221,6 +13257,7 @@ bot.callbackQuery("edit_settings", async (ctx) => {
   const kb = new InlineKeyboard();
   if (patterns.length > 0) kb.text("🔍 Similar Groups", "es_similar").text("📋 All Groups", "es_show_all").row();
   else kb.text("📋 All Groups", "es_show_all").row();
+  kb.text("🔗 By Link", "es_by_link").row();
   kb.text("🏠 Main Menu", "main_menu");
   await ctx.editMessageText(
     `⚙️ <b>Edit Settings</b>\n\n📊 Admin Groups: ${adminGroups.length}\n` +
@@ -13667,6 +13704,7 @@ bot.callbackQuery("change_group_name", async (ctx) => {
   const kb = new InlineKeyboard()
     .text("✏️ Manual (by name)", "cgn_manual").row()
     .text("📁 Auto (VCF + name)", "cgn_auto").row()
+    .text("🔗 By Link", "cgn_by_link").row()
     .text("🏠 Main Menu", "main_menu");
   await ctx.editMessageText(
     "🏷️ <b>Change Group Name</b>\n\n" +
@@ -15783,23 +15821,30 @@ bot.on("message:text", async (ctx) => {
     if (!state2?.ctcData) return;
     const cleanLinks = extractLinksFromText(text);
     if (!cleanLinks.length) { await ctx.reply("❌ No valid WhatsApp links found.", { parse_mode: "HTML" }); return; }
-    state2.ctcData.groupLinks = cleanLinks;
-    state2.ctcData.pairs = cleanLinks.map((link) => ({ link, vcfContacts: [] }));
-    state2.ctcData.currentPairIndex = 0;
-    state2.step = "ctc_enter_vcf";
-    saveUserState(userId, state2).catch(() => {});
-    await ctx.reply(
-      notr(
-        `✅ <b>${cleanLinks.length} group link(s) saved!</b>\n\n` +
-        `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
-        `You can send:\n` +
-        `• One VCF for all groups\n` +
-        `• Multiple VCFs one by one (one per group in order)\n\n` +
-        `Send VCF for <b>Group 1/${cleanLinks.length}</b>:\n<code>${esc(cleanLinks[0])}</code>\n\n` +
-        `When ready, tap <b>Start Check</b>:`
-      ),
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
-    );
+    // Accumulate links (1-by-1 mode like rl_enter_links)
+    if (!state2.ctcLinkBuffer) state2.ctcLinkBuffer = [];
+    state2.ctcLinkBuffer.push(...cleanLinks);
+    const total = state2.ctcLinkBuffer.length;
+    const ctcCollectMsgId = ctcLinkCollectMsgId.get(userId);
+    const ctcCollectText =
+      "🔍 <b>CTC Checker — Group Links</b>\n\n" +
+      `📎 <b>${total} link(s) collected</b>\n\n` +
+      "Send more links, or tap <b>Done</b> to proceed:\n" +
+      "<code>https://chat.whatsapp.com/ABC123</code>";
+    const ctcCollectKb = new InlineKeyboard()
+      .text("✅ Done", "ctc_links_done").row()
+      .text("❌ Cancel", "main_menu");
+    if (ctcCollectMsgId) {
+      try {
+        await bot.api.editMessageText(ctx.chat.id, ctcCollectMsgId, ctcCollectText, { parse_mode: "HTML", reply_markup: ctcCollectKb });
+      } catch {
+        const nm = await ctx.reply(ctcCollectText, { parse_mode: "HTML", reply_markup: ctcCollectKb });
+        ctcLinkCollectMsgId.set(userId, nm.message_id);
+      }
+    } else {
+      const nm = await ctx.reply(ctcCollectText, { parse_mode: "HTML", reply_markup: ctcCollectKb });
+      ctcLinkCollectMsgId.set(userId, nm.message_id);
+    }
     return;
   }
 
@@ -16405,7 +16450,7 @@ bot.on("message:document", async (ctx) => {
       }
     } catch (err: any) {
       const msg = err?.message || err?.description || String(err) || "Unknown error";
-      await ctx.reply(`❌ Error processing <b>${esc(docFileName)}</b>: ${esc(msg)}\n\nPlease resend this file.`, { parse_mode: "HTML" });
+      try { await ctx.reply(`⚠️ Could not process <b>${esc(docFileName)}</b>. Please resend this file.`, { parse_mode: "HTML" }); } catch {}
     }
   });
 });
@@ -16901,5 +16946,548 @@ export async function startBot() {
 
   launchBot();
 }
+
+// ══════════════════════════════════════════════════════════════════
+// BY-LINK HANDLERS for all 7 features + CTC Done
+// ══════════════════════════════════════════════════════════════════
+
+// ─── Helper: Show link-collection prompt ─────────────────────────
+function byLinkPrompt(feature: string, emoji: string, count: number, doneCallback: string): string {
+  return `${emoji} <b>${feature} — By Link</b>\n\n` +
+    `📎 <b>${count} link(s) collected</b>\n\n` +
+    `Send WhatsApp group invite links (one per message or multiple at once):\n` +
+    `<code>https://chat.whatsapp.com/ABC123</code>\n\n` +
+    `<i>Tap <b>Done</b> when all links are sent.</i>`;
+}
+
+// ─── CTC Links Done ───────────────────────────────────────────────
+bot.callbackQuery("ctc_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "ctc_enter_links") return;
+  const buffer = state.ctcLinkBuffer || [];
+  if (!buffer.length) {
+    await ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!", show_alert: true });
+    return;
+  }
+  ctcLinkCollectMsgId.delete(userId);
+  if (!state.ctcData) return;
+  state.ctcData.groupLinks = buffer;
+  state.ctcData.pairs = buffer.map((link) => ({ link, vcfContacts: [] }));
+  state.ctcData.currentPairIndex = 0;
+  state.step = "ctc_enter_vcf";
+  state.ctcLinkBuffer = undefined;
+  saveUserState(userId, state).catch(() => {});
+  await ctx.editMessageText(
+    `✅ <b>${buffer.length} group link(s) saved!</b>\n\n` +
+    `📁 <b>Step 2: Send VCF file(s)</b>\n\n` +
+    `You can send:\n• One VCF for all groups\n• Multiple VCFs one per group (in order)\n\n` +
+    `Send VCF for <b>Group 1/${buffer.length}</b>:\n<code>${esc(buffer[0])}</code>\n\n` +
+    `When ready, tap <b>Start Check</b>:`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
+  );
+});
+
+// ─── Leave Group — By Link ────────────────────────────────────────
+bot.callbackQuery("lv_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "lv_enter_links_bl", lvLinkBuffer: [] });
+  lvLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Leave Group", "🚪", 0, "lv_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("lv_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "lv_enter_links_bl") return;
+  const buffer = state.lvLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  lvLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string; isAdmin: boolean }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject, isAdmin: true });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "lv_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, {
+    step: "lv_menu",
+    leaveData: {
+      groups,
+      mode: "all",
+      patterns: detectSimilarGroups(groups),
+      selectedIndices: new Set(groups.map((_, i) => i)),
+      page: 0,
+      selectedGroups: groups,
+    },
+  });
+  const preview = groups.slice(0, 20).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = groups.length > 20 ? `\n... +${groups.length - 20} more` : "";
+  await ctx.editMessageText(
+    `🚪 <b>Leave Groups — Confirm</b>\n\n` +
+    `📊 <b>${groups.length} group(s) will be left:</b>\n\n${preview}${more}\n\n` +
+    `⚠️ Are you sure you want to leave these groups?`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Yes, Leave", "lv_confirm").text("❌ Cancel", "main_menu") }
+  );
+});
+
+// ─── Remove Members — By Link ─────────────────────────────────────
+bot.callbackQuery("rm_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "rm_enter_links_bl", rmLinkBuffer: [] });
+  rmLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Remove Members", "🗑️", 0, "rm_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("rm_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "rm_enter_links_bl") return;
+  const buffer = state.rmLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  rmLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "rm_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, {
+    step: "remove_mode_select",
+    removeExcludeData: { selectedGroups: groups, excludeNumbers: new Set(), excludePrefixes: new Set() },
+    removeFriendData: { selectedGroups: groups },
+  });
+  const groupList = groups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = groups.length > 10 ? `\n<i>...+${groups.length - 10} more</i>` : "";
+  await ctx.editMessageText(
+    `✅ <b>${groups.length} group(s) selected:</b>\n\n${groupList}${more}\n\n<b>Choose what to remove:</b>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🗑️ Remove All Members", "rm_mode_members").row().text("👥 Remove Friend", "rm_mode_friend").row().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// ─── Approval — By Link ───────────────────────────────────────────
+bot.callbackQuery("ap_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "ap_enter_links_bl", apLinkBuffer: [] });
+  apLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Approval", "✅", 0, "ap_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("ap_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "ap_enter_links_bl") return;
+  const buffer = state.apLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  apLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "ap_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  const allIdxs = new Set(groups.map((_, i) => i));
+  userStates.set(userId, {
+    step: "approval_menu",
+    approvalData: { allGroups: groups, patterns: detectSimilarGroups(groups), selectedIndices: allIdxs, page: 0 },
+  });
+  const preview = groups.slice(0, 30).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = groups.length > 30 ? `\n... +${groups.length - 30} more` : "";
+  await ctx.editMessageText(
+    `✅ <b>${groups.length} group(s) selected:</b>\n\n${preview}${more}\n\n📌 <b>Choose approval type:</b>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("👥 All Approval", "ap_type_all").text("👑 Admin Approval", "ap_type_admin").row().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// ─── Make Admin — By Link ─────────────────────────────────────────
+bot.callbackQuery("ma_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "ma_enter_links_bl", maLinkBuffer: [] });
+  maLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Make Admin", "👑", 0, "ma_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("ma_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "ma_enter_links_bl") return;
+  const buffer = state.maLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  maLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "ma_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  const allIdxs = new Set(groups.map((_, i) => i));
+  userStates.set(userId, {
+    step: "make_admin_enter_numbers",
+    makeAdminData: { allGroups: groups, patterns: detectSimilarGroups(groups), selectedIndices: allIdxs, page: 0 },
+  });
+  const groupList = groups.slice(0, 60).map(g => `• ${esc(g.subject)}`).join("\n");
+  const moreText = groups.length > 60 ? `\n... +${groups.length - 60} more group(s)` : "";
+  await ctx.editMessageText(
+    `✅ <b>${groups.length} group(s) selected:</b>\n\n${groupList}${moreText}\n\n` +
+    `📱 <b>Send phone number(s)</b>\n\nSend the phone numbers (with country code) of people you want to make admin, one per line:\n\n` +
+    `Example:\n<code>+919912345678\n+919998887777</code>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+// ─── Demote Admin — By Link ───────────────────────────────────────
+bot.callbackQuery("da_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "da_enter_links_bl", daLinkBuffer: [] });
+  daLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Demote Admin", "👤", 0, "da_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("da_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "da_enter_links_bl") return;
+  const buffer = state.daLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  daLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "da_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  const allIdxs = new Set(groups.map((_, i) => i));
+  userStates.set(userId, {
+    step: "demote_admin_menu",
+    demoteAdminData: { allGroups: groups, patterns: detectSimilarGroups(groups), selectedIndices: allIdxs, page: 0 },
+  });
+  const groupList = groups.slice(0, 20).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = groups.length > 20 ? `\n... +${groups.length - 20} more` : "";
+  await ctx.editMessageText(
+    `👤 <b>Demote Admin</b>\n\n<b>${groups.length} group(s) selected:</b>\n${groupList}${more}\n\nChoose demote mode:`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔴 Demote All Admins", "da_mode_all").row().text("📱 Demote Selected Numbers", "da_mode_numbers").row().text("🏠 Menu", "main_menu") }
+  );
+});
+
+// ─── Edit Settings — By Link ──────────────────────────────────────
+bot.callbackQuery("es_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "es_enter_links_bl", esLinkBuffer: [] });
+  esLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Edit Settings", "⚙️", 0, "es_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("es_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "es_enter_links_bl") return;
+  const buffer = state.esLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  esLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "es_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  const allIdxs = new Set(groups.map((_, i) => i));
+  userStates.set(userId, {
+    step: "edit_settings_menu",
+    editSettingsData: { allGroups: groups, patterns: detectSimilarGroups(groups), selectedIndices: allIdxs, page: 0, settings: defaultGroupSettings(), cancelled: false },
+  });
+  await ctx.editMessageText(
+    `⚙️ <b>Edit Settings</b>\n\n<i>${groups.length} group(s) selected via links</i>`,
+    { parse_mode: "HTML", reply_markup: buildEditSettingsGroupKeyboard(userStates.get(userId)!) }
+  );
+});
+
+// ─── Change Group Name — By Link ──────────────────────────────────
+bot.callbackQuery("cgn_by_link", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+  userStates.set(userId, { step: "cgn_enter_links_bl", cgnLinkBuffer: [] });
+  cgnLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText(
+    byLinkPrompt("Change Group Name", "🏷️", 0, "cgn_links_done"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+  );
+});
+
+bot.callbackQuery("cgn_links_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "cgn_enter_links_bl") return;
+  const buffer = state.cgnLinkBuffer || [];
+  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  cgnLinkCollectMsgId.delete(userId);
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (const link of buffer) {
+    try {
+      const info = await getGroupIdFromLink(String(userId), link);
+      if (info) groups.push({ id: info.id, subject: info.subject });
+    } catch {}
+  }
+  if (!groups.length) {
+    await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "cgn_by_link").text("🏠 Menu", "main_menu") }); return;
+  }
+  // Enter manual naming flow with pre-selected groups
+  const groupIds = groups.map(g => g.id);
+  userStates.set(userId, {
+    step: "cgn_manual_naming_choose",
+    changeGroupNameData: {
+      mode: "manual",
+      allGroups: groups,
+      patterns: detectSimilarGroups(groups),
+      selectionPool: groups,
+      selectionPoolLabel: "By Link",
+      selectedGroupIds: groupIds,
+      page: 0,
+    },
+  });
+  await ctx.editMessageText(
+    `🏷️ <b>Change Group Name — ${groups.length} group(s) from links</b>\n\n` +
+    `Groups (in order):\n` +
+    groups.slice(0, 15).map((g, i) => `${i + 1}. ${esc(g.subject)}`).join("\n") +
+    (groups.length > 15 ? `\n... +${groups.length - 15} more` : "") +
+    `\n\n📌 <b>Choose naming method:</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔢 Auto-numbered", "cgn_m_naming_auto").row()
+        .text("✏️ Custom Names", "cgn_m_naming_custom").row()
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════
+// TEXT HANDLERS for by-link accumulation steps
+// ══════════════════════════════════════════════════════════════════
+
+// These are injected before the catch-all text handler
+// They accumulate links in the buffer and show a running count.
+
+// Note: These handlers are registered below BEFORE the main text handler
+// to ensure they intercept first. The main text handler is already registered
+// above, so we use a separate middleware to handle these states.
+
+bot.on("message:text", async (ctx, next) => {
+  const userId = ctx.from?.id;
+  if (!userId) return next();
+  const state = userStates.get(userId);
+  if (!state) return next();
+  const text = ctx.message.text || "";
+
+  // ── lv_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "lv_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.lvLinkBuffer) state.lvLinkBuffer = [];
+    state.lvLinkBuffer.push(...links);
+    const total = state.lvLinkBuffer.length;
+    const prompt = byLinkPrompt("Leave Group", "🚪", total, "lv_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "lv_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = lvLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    lvLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── rm_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "rm_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.rmLinkBuffer) state.rmLinkBuffer = [];
+    state.rmLinkBuffer.push(...links);
+    const total = state.rmLinkBuffer.length;
+    const prompt = byLinkPrompt("Remove Members", "🗑️", total, "rm_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "rm_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = rmLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    rmLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── ap_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "ap_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.apLinkBuffer) state.apLinkBuffer = [];
+    state.apLinkBuffer.push(...links);
+    const total = state.apLinkBuffer.length;
+    const prompt = byLinkPrompt("Approval", "✅", total, "ap_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "ap_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = apLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    apLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── ma_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "ma_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.maLinkBuffer) state.maLinkBuffer = [];
+    state.maLinkBuffer.push(...links);
+    const total = state.maLinkBuffer.length;
+    const prompt = byLinkPrompt("Make Admin", "👑", total, "ma_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "ma_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = maLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    maLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── da_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "da_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.daLinkBuffer) state.daLinkBuffer = [];
+    state.daLinkBuffer.push(...links);
+    const total = state.daLinkBuffer.length;
+    const prompt = byLinkPrompt("Demote Admin", "👤", total, "da_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "da_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = daLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    daLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── es_enter_links_bl ────────────────────────────────────────────
+  if (state.step === "es_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.esLinkBuffer) state.esLinkBuffer = [];
+    state.esLinkBuffer.push(...links);
+    const total = state.esLinkBuffer.length;
+    const prompt = byLinkPrompt("Edit Settings", "⚙️", total, "es_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "es_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = esLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    esLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── cgn_enter_links_bl ───────────────────────────────────────────
+  if (state.step === "cgn_enter_links_bl") {
+    const links = extractLinksFromText(text);
+    if (!links.length) return;
+    if (!state.cgnLinkBuffer) state.cgnLinkBuffer = [];
+    state.cgnLinkBuffer.push(...links);
+    const total = state.cgnLinkBuffer.length;
+    const prompt = byLinkPrompt("Change Group Name", "🏷️", total, "cgn_links_done");
+    const kb = new InlineKeyboard().text("✅ Done", "cgn_links_done").row().text("❌ Cancel", "main_menu");
+    const existingId = cgnLinkCollectMsgId.get(userId);
+    if (existingId) {
+      try { await bot.api.editMessageText(ctx.chat.id, existingId, prompt, { parse_mode: "HTML", reply_markup: kb }); return; } catch {}
+    }
+    const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
+    cgnLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  return next();
+});
 
 export { bot };
