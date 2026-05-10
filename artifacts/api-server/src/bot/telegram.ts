@@ -4837,6 +4837,27 @@ async function showGroupFriendsStep(ctx: any) {
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
   state.step = "group_enter_friends";
+
+  // ── Checkpoint: save to MongoDB so Skip/Done buttons survive a bot restart ──
+  // group_skip_friends and group_dp_done use loadPendingGroupCreation as
+  // fallback when RAM state is gone. Without this save the Skip button
+  // silently does nothing after a server restart.
+  const gs = state.groupSettings;
+  void savePendingGroupCreation(userId, {
+    name: gs.name,
+    description: gs.description,
+    count: gs.count,
+    finalNames: gs.finalNames,
+    namingMode: gs.namingMode,
+    editGroupInfo: gs.editGroupInfo,
+    sendMessages: gs.sendMessages,
+    addMembers: gs.addMembers,
+    approveJoin: gs.approveJoin,
+    disappearingMessages: gs.disappearingMessages,
+    friendNumbers: gs.friendNumbers,
+    makeFriendAdmin: gs.makeFriendAdmin,
+  }).catch(() => {});
+
   const friendsText =
     "👫 <b>Add Friends While Creating Group</b>\n\n" +
     "⚠️ <b>Important:</b> The friend's number must be saved in your contact list on WhatsApp. If the number is not saved, it may not be added.\n\n" +
@@ -4877,8 +4898,36 @@ async function showGroupFriendAdminStep(ctx: any) {
 
 bot.callbackQuery("group_skip_friends", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.groupSettings) return;
+  const userId = ctx.from.id;
+  let state = userStates.get(userId);
+
+  // ── MongoDB fallback: RAM state lost after bot restart ────────────────────
+  // showGroupFriendsStep saves a checkpoint to MongoDB. If state is missing
+  // from RAM (e.g. Render restarted between the Friends message appearing and
+  // the user tapping Skip), recover from MongoDB instead of silently doing
+  // nothing — which was the "Skip button doesn't work" bug for some users.
+  if (!state?.groupSettings) {
+    const persisted = await loadPendingGroupCreation(userId);
+    if (persisted) {
+      state = {
+        step: "group_enter_friends",
+        groupSettings: { ...persisted, dpBuffers: [] },
+      };
+      userStates.set(userId, state);
+    }
+  }
+
+  if (!state?.groupSettings) {
+    // State truly gone (>20 min expiry or never saved) — tell user clearly.
+    try {
+      await ctx.editMessageText(
+        "⚠️ <b>Session Expired</b>\n\nYour group creation session has expired.\nPlease start again from the menu.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("👥 Create Groups", "create_groups").text("🏠 Main Menu", "main_menu") }
+      );
+    } catch {}
+    return;
+  }
+
   state.groupSettings.friendNumbers = [];
   state.groupSettings.makeFriendAdmin = false;
   await showGroupSummary(ctx);
