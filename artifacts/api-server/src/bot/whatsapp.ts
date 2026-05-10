@@ -1426,7 +1426,8 @@ function extractInviteCode(link: string): string {
 
 export async function joinGroupWithLink(
   userId: string,
-  link: string
+  link: string,
+  signal?: AbortSignal
 ): Promise<{ success: boolean; groupName?: string; error?: string }> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) {
@@ -1438,6 +1439,8 @@ export async function joinGroupWithLink(
   const MAX_RETRIES = BACKOFF.length + 1; // 15 attempts total
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    // Abort early if the outer timeout already fired
+    if (signal?.aborted) return { success: false, error: "Cancelled" };
     try {
       const code = extractInviteCode(link);
       const result = await session.socket.groupAcceptInvite(code);
@@ -1495,7 +1498,12 @@ export async function joinGroupWithLink(
       if (isTransient && attempt < MAX_RETRIES) {
         const delay = BACKOFF[attempt - 1];
         console.log(`[WA][${userId}] Join transient error — waiting ${delay}ms before retry ${attempt + 1}/${MAX_RETRIES}...`);
-        await new Promise((r) => setTimeout(r, delay));
+        // Abortable sleep: clears immediately when outer timeout fires the signal
+        await new Promise<void>((r) => {
+          const t = setTimeout(r, delay);
+          signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+        });
+        if (signal?.aborted) return { success: false, error: "Cancelled" };
         // Re-check connection after long wait
         const freshSession = useSession(userId);
         if (!freshSession?.socket || !freshSession.connected) {
