@@ -5731,7 +5731,12 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
 
     let groupInfo;
     try {
-      groupInfo = await getGroupIdFromLink(userId, cleanLink);
+      // 30 s hard cap — getGroupIdFromLink retries up to 15× with long backoffs
+      // and can block for 30+ minutes on a rate-limited link without this guard.
+      groupInfo = await Promise.race([
+        getGroupIdFromLink(userId, cleanLink),
+        new Promise<null>(r => setTimeout(() => r(null), 30_000)),
+      ]);
     } catch (err: any) {
       runningFailed++;
       groupResults.push({
@@ -5779,7 +5784,14 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     const phones = pair.vcfContacts.map((c) => c.phone);
     let checkResult;
     try {
-      checkResult = await checkContactsInGroup(userId, groupInfo.id, phones);
+      // 60 s hard cap — groupMetadata + pending list for large groups can stall
+      // the socket indefinitely; sentinel null means we timed out.
+      const membersRace = await Promise.race([
+        checkContactsInGroup(userId, groupInfo.id, phones),
+        new Promise<null>(r => setTimeout(() => r(null), 60_000)),
+      ]);
+      if (!membersRace) throw new Error("Timeout fetching members / pending list");
+      checkResult = membersRace;
     } catch (err: any) {
       runningFailed++;
       groupResults.push({
