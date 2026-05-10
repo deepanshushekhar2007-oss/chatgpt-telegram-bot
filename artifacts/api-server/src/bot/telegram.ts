@@ -2847,186 +2847,38 @@ bot.command("help", async (ctx) => {
 
   const codeBlock =
     `🤖 WhatsApp Bot Manager — Help Guide\n\n` +
-
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `📌 All Features:\n\n` +
-
-    `📱 1. Connect WhatsApp\n` +
-    `• Bot se apna WhatsApp link karo\n` +
-    `• Phone number do → Pairing code milega (koi bhi format chalega, jaise +91 9999-999999)\n` +
-    `• WhatsApp → Linked Devices → Link with phone number → code daalo\n` +
-    `• Ek baar connect hone ke baad sab features use karo\n\n` +
-
-    `🏗️ 2. Create Groups\n` +
-    `• Ek saath kaafi saare WhatsApp groups banao\n` +
-    `• Custom ya auto-numbered names (e.g. Group 1, Group 2...)\n` +
-    `• Group description set kar sakte ho\n` +
-    `• 🖼️ Multiple Group DPs (max 50): 1 DP do to sab groups mein same lagega.\n` +
-    `  Multiple DPs do to 1st DP→1st group, 2nd DP→2nd group...\n` +
-    `  Groups DPs se zyada hue to DPs rotate ho jayenge.\n` +
-    `• Permissions: kaun message, kaun add kar sakta hai, approval mode\n` +
-    `• ⏳ Disappearing Messages: 24 Hours / 7 Days / 90 Days / Off\n` +
-    `• 👫 Friends Add: Group bante waqt seedha friends ko add karo\n` +
-    `  (koi bhi number format — +919999999999, +91 9999-999999, 919999999999)\n` +
-    `• Live progress dikhta hai jaise groups bante hain\n\n` +
-
-    `🔗 3. Get Group Links\n` +
-    `• Apne sabhi WhatsApp groups ke invite links lo\n` +
-    `• Sabhi ya similar name ke groups filter karke\n` +
-    `• Links copy karke kahin bhi paste kar sakte ho\n\n` +
-
-    `🔗 4. Join Groups\n` +
-    `• Multiple invite links paste karo\n` +
-    `• Bot automatically sabhi groups join kar leta hai\n` +
-    `• Live progress dikhta hai\n\n` +
-
-    `🚪 5. Leave Groups\n` +
-    `• Sirf member wale, sirf admin wale, ya sabhi ek saath\n` +
-    `• Similar name wale groups batch mein leave\n\n` +
-
-    `📊 6. CTC Checker\n` +
-    `• Group links do → VCF files do → bot check karta hai:\n` +
-    `  ✅ Pehle se group mein hai\n` +
-    `  ⏳ Pending approval mein hai\n` +
-    `  ❌ Group mein nahi mila\n` +
-    `  ⚠️ Wrong add — group mein hai par VCF mein nahi\n` +
-    `  🔁 Duplicate pending — ek contact multiple groups mein\n` +
-    `• Multiple VCF files ek saath bhej sakte ho\n\n` +
-
-    `🗑️ 7. Remove Members\n` +
-    `• Ek ya zyada groups select karo\n` +
-    `• Optionally kuch numbers exclude karo\n` +
-    `• Baki sabhi non-admin members remove ho jayenge\n\n` +
-
-    `👑 8. Make Admin\n` +
-    `• Admin groups select karo\n` +
-    `• Phone numbers bhejo\n` +
-    `• Bot dhundhke unhe admin promote kar dega\n\n` +
-
-    `✅ 9. Approval\n` +
-    `• Admin groups select karo → pending members approve karo:\n` +
-    `  ☝️ 1 by 1: Har pending member individually approve\n` +
-    `  👥 Together: Approval OFF phir ON — sabhi ek saath approve\n` +
-    `• Similar name wale groups ek saath select kar sakte ho\n\n` +
-
-    `📋 10. Get Pending List\n` +
-    `• Sabhi admin groups ka pending members count dikhata hai\n` +
-    `• Similar name wale groups grouped dikhate hain\n` +
-    `• Pata chal jata hai kaun se group mein kitne log pending\n\n` +
-
-    `➕ 11. Add Members\n` +
-    `• Single group: Link do → Friend numbers + Admin/Navy/Member VCF do\n` +
-    `• Multiple groups: Ek se zyada links ek per line do → sirf Friend numbers bhejo\n` +
-    `  → Sabhi groups mein ek saath add ho jayenge\n` +
-    `• 3 modes:\n` +
-    `   👆 Add 1 by 1 (safe, with delay)\n` +
-    `   👥 Add Together (fast, ek baar mein)\n` +
-    `   🎯 Custom — har category ke liye apni pace (1-1, 2-2, 3-3, 4-4, 5-5, 6-6, 7-7, 8-8, 9-9, 10-10, 15-15, 20-20 ya All)\n` +
-    `• Sirf wahi categories show hoti hain jinka VCF ya numbers diya ho\n` +
-    `  (e.g. Admin VCF nahi diya to Admin option nahi dikhega)\n` +
-    `• Fail hone par specific reason dikhta hai:\n` +
-    `   • Privacy block / invite required\n` +
-    `   • Number not on WhatsApp\n` +
-    `   • Already in group / Recently left\n` +
-    `   • Rate limit hit\n` +
-    `   • WhatsApp ban / restricted\n` +
-    `   • Group/account limit reached\n` +
-    `• Live progress dikhta hai, beech mein cancel kar sakte ho\n\n` +
-
-    `⚙️ 12. Edit Settings\n` +
-    `• Admin groups scan hote hain → Similar Groups ya All Groups choose karo\n` +
-    `• Multiple groups ek saath select karo (pagination + Select All)\n` +
-    `• Permissions toggle karo (message, add members, approval mode)\n` +
-    `• ⏳ Disappearing Messages set karo: 24h / 7 Days / 90 Days / Off\n` +
-    `• Group DP change karo ya skip karo\n` +
-    `• Description update karo ya skip karo\n` +
-    `• Review karke Apply — har group ka live progress dikhega\n` +
-    `• Beech mein cancel bhi kar sakte ho\n\n` +
-
-    `🔗 13. Reset Link\n` +
-    `• Two modes available:\n` +
-    `   📋 Select Groups: choose Similar Groups or All Groups → tap groups to select → confirm\n` +
-    `      - Similar Groups list supports Previous/Next pagination\n` +
-    `   🔗 Reset by Group Link: paste group invite links (one per line) → bot resolves & shows review → confirm\n` +
-    `      - You can paste multiple links at once\n` +
-    `      - Bot shows group names for review before resetting\n` +
-    `• Bot revokes current invite links and generates new ones\n` +
-    `• ⚠️ Old links will stop working immediately\n` +
-    `• Rate limit errors are automatically retried (waits and retries once)\n` +
-    `• Successful new links are shown first, failed groups listed at the end\n` +
-    `• Live progress shows current group being processed\n` +
-    `• Cancel button to stop at any time\n\n` +
-
-    `🏷️ 14. Change Group Name\n` +
-    `• Rename multiple groups in one go. Two modes:\n` +
-    `  ✏️ Manual (by name):\n` +
-    `   • Pick Similar Groups or All Groups (like Get Link)\n` +
-    `   • Tap groups to select — buttons show 1, 2, 3… in tap order\n` +
-    `   • Choose Auto-numbered (e.g. "Spidy 1, Spidy 2…") or Custom Names (one per line)\n` +
-    `   • Review and confirm — bot renames in your tap order with live progress + Cancel\n` +
-    `  📁 Auto (VCF + name):\n` +
-    `   • Only groups with pending requests are shown (like Pending List)\n` +
-    `   • Select groups, then upload one VCF file per selected group (any order)\n` +
-    `   • Bot matches each VCF to a group by checking pending phone numbers\n` +
-    `   • Choose name source:\n` +
-    `      ◦ Same as VCF name → group name = VCF filename without .vcf\n` +
-    `        (e.g. "SPIDY 酒店回饋活動FL_61.vcf" → "SPIDY 酒店回饋活動FL_61")\n` +
-    `      ◦ Customize name → you give a prefix template; bot keeps the trailing number from the VCF\n` +
-    `        (e.g. prefix "SPIDY 酒店EMPIRE動FL_" + VCF "..._61.vcf" → "SPIDY 酒店EMPIRE動FL_61")\n` +
-    `   • Review and confirm — live progress + Cancel\n\n` +
-
-    `👤 15. Demote Admin\n` +
-    `• Select admin groups — choose Similar Groups or All Groups\n` +
-    `• Choose demote mode:\n` +
-    `   🔴 Demote All Admins: removes admin from every non-owner admin in selected groups\n` +
-    `   📱 Demote Selected Numbers: send numbers (one per line) → only those admins get demoted\n` +
-    `• Confirm before starting in both modes\n` +
-    `• Live progress shows each group and number being processed\n` +
-    `• Cancel button to stop at any time\n` +
-    `• Group owners (super-admins) are never demoted\n\n` +
-
-    (canUserSeeAutoChat(userId) ?
-    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
-    `• Auto Chat ke liye 2nd WhatsApp connect karo\n` +
-    `• Chat Friend: funny/study messages auto send hote rahenge jab tak Stop na dabao\n` +
-    `• Chat In Group: selected common groups mein funny/study messages rotate hote rahenge\n` +
-    `• Messages fast-fast nahi jaate; random delay rotation use hota hai\n` +
-    `• Delay rotation: 10 sec, 1 min, 10 min, 20 min, 30 min, 1 hour, 2 hours\n` +
-    `• Live status, sent/failed count, refresh aur stop controls milte hain\n\n`
-    :
-    `🤖 16. Auto Chat  ⭐ Paid Service\n` +
-    `• Automatically send messages to friends or groups on WhatsApp\n` +
-    `• Random delay rotation keeps it natural and safe\n` +
-    `• To buy Auto Chat access, message ${OWNER_USERNAME} on Telegram\n\n`) +
-
-    `🛡️ 17. Auto Request Accepter\n` +
-    `• Automatically accept pending join requests in selected groups\n` +
-    `• Only accepts users who joined via invite link (NOT direct admin-adds)\n` +
-    `• How to use:\n` +
-    `   1. Tap "Auto Accepter" in main menu\n` +
-    `   2. Select groups — choose Similar Groups or All Groups\n` +
-    `   3. Pick duration: 15 min, 30 min, 1 hr, or 2 hrs\n` +
-    `   4. Review selected groups and confirm to start\n` +
-    `   5. Bot will poll every 10 seconds and auto-accept invite-link joiners\n` +
-    `   6. Tap "Cancel" button to stop early at any time\n` +
-    `• When the timer ends, you get a notification\n` +
-    `• Group must have "Approval required" mode ON\n` +
-    `• You must be admin in the group\n\n` +
-
+    `📌 Features:\n\n` +
+    `📱 1. Connect WhatsApp — Phone number do, pairing code aayega\n` +
+    `   WhatsApp → Linked Devices → Link with phone number → code daalo\n\n` +
+    `🏗️ 2. Create Groups — Batch mein groups banao (naam, DP, description, permissions, disappearing msgs, friends add)\n\n` +
+    `🔗 3. Get Group Links — Sabhi/similar groups ke invite links lo\n\n` +
+    `🔗 4. Join Groups — Multiple links paste karo, bot sab join kar leta hai\n\n` +
+    `🚪 5. Leave Groups — Similar/All groups batch mein leave karo (member/admin/sab)\n\n` +
+    `📊 6. CTC Checker — Group links + VCF do → check karo kaun member/pending/absent/wrong-add hai\n\n` +
+    `🗑️ 7. Remove Members — Similar/All/By Link groups select karo → non-admin members remove\n\n` +
+    `👑 8. Make Admin — Numbers do → bot unhe admin promote karta hai\n\n` +
+    `✅ 9. Approval — Pending members approve karo:\n` +
+    `   ☝️ 1 by 1 (individually) ya 👥 Together (approval OFF→ON, sab ek saath)\n\n` +
+    `📋 10. Get Pending List — Har admin group mein kitne pending hain\n\n` +
+    `➕ 11. Add Members — VCF + friends numbers → multiple groups mein add (1 by 1 / Together / Custom pace)\n\n` +
+    `⚙️ 12. Edit Settings — Permissions, DP, description, disappearing msgs → Similar/All groups batch mein\n\n` +
+    `🔗 13. Reset Link — Invite links reset karo (Similar/All/By Link)\n\n` +
+    `🏷️ 14. Change Group Name — Manual (auto-numbered ya custom) ya Auto (VCF match)\n\n` +
+    `👤 15. Demote Admin — All admins ya selected numbers demote karo\n\n` +
+    (canUserSeeAutoChat(userId)
+      ? `🤖 16. Auto Chat ⭐ — 2nd WhatsApp se friends/groups ko auto messages bhejo\n\n`
+      : `🤖 16. Auto Chat ⭐ Paid — Buy karne ke liye ${OWNER_USERNAME} ko msg karo\n\n`) +
+    `🛡️ 17. Auto Accepter — Selected groups mein pending join requests auto-accept (15min–2hr)\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💬 Commands:\n` +
-    `/start — Bot start karo & main menu dekho\n` +
-    `/help  — Yeh help message dekho\n\n` +
-
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `⚠️ Important Notes:\n` +
-    `• CTC Pending ke liye aap group admin hone chahiye\n` +
-    `• Group mein "Approval required" mode ON hona chahiye\n` +
-    `• 1 by 1 Approval ke liye bhi admin hona zaroori hai\n` +
-    `• Connect WhatsApp mein number kisi bhi format mein de sakte ho\n` +
-    `  (+91 9999-999999, +919999999999 — sab chalega)\n` +
-    `• 🔌 Agar aapka WhatsApp disconnect ho jaye to aapko ek alert message milega\n` +
-    `  (English mein, aapke WhatsApp number ke saath)`;
+    `💬 /start — Main menu  |  /help — Yeh message\n\n` +
+    `⚠️ Notes:\n` +
+    `• Group features ke liye admin hona zaroori hai\n` +
+    `• Approval features ke liye "Approval required" mode ON hona chahiye\n` +
+    `• Description max 512 characters honi chahiye\n` +
+    `• Number kisi bhi format mein de sakte ho (+91 9999-999999, 919999999999)\n` +
+    `• WhatsApp disconnect hone par alert milega\n` +
+    `• Support: ${OWNER_USERNAME}`;
 
   // Telegram has a 4096-character limit per message. The full help guide
   // exceeds that when wrapped in <pre>, so we split it into chunks on
@@ -9954,41 +9806,65 @@ async function approveTogetherBackground(
     if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break; }
     const group = groups[gi];
 
+    // ── Step 1: Turn OFF approval mode (retry up to 3x) ───────────────────
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+        `✅ <b>Approve Together Result</b>\n\n` +
+        (lines.length > 0 ? lines.join("\n\n") + "\n\n" : "") +
+        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n` +
         `🔄 Step 1: Turning OFF approval mode...`,
         { parse_mode: "HTML", reply_markup: progressMarkup }
       );
     } catch {}
 
-    const offOk = await setGroupApprovalMode(userId, group.id, "off");
+    let offOk = false;
+    for (let attempt = 1; attempt <= 3 && !offOk; attempt++) {
+      offOk = await setGroupApprovalMode(userId, group.id, "off");
+      if (!offOk && attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+    }
     if (!offOk) {
-      lines.push(`📋 <b>${esc(group.subject)}</b>\n❌ Failed to turn off approval mode`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n⚠️ Failed to toggle approval mode (reason: WhatsApp rejected — may not be admin or group not found)`);
       continue;
     }
 
     await new Promise((r) => setTimeout(r, 2000));
     if (approvalCancelRequests.has(userIdNum)) { cancelled = true; break; }
 
+    // ── Step 2: Turn ON approval mode (retry up to 3x) ────────────────────
     try {
       await bot.api.editMessageText(chatId, msgId,
-        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+        `✅ <b>Approve Together Result</b>\n\n` +
+        (lines.length > 0 ? lines.join("\n\n") + "\n\n" : "") +
+        `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n` +
         `🔄 Step 2: Turning ON approval mode...\n` +
         `✅ All pending members will be approved!`,
         { parse_mode: "HTML", reply_markup: progressMarkup }
       );
     } catch {}
 
-    const onOk = await setGroupApprovalMode(userId, group.id, "on");
+    let onOk = false;
+    for (let attempt = 1; attempt <= 3 && !onOk; attempt++) {
+      onOk = await setGroupApprovalMode(userId, group.id, "on");
+      if (!onOk && attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+    }
     if (!onOk) {
-      lines.push(`📋 <b>${esc(group.subject)}</b>\n⚠️ Turned off approval but failed to turn it back on`);
+      lines.push(`📋 <b>${esc(group.subject)}</b>\n⚠️ Approval turned OFF but could not turn back ON (reason: WhatsApp rejected — check admin rights)`);
       continue;
     }
 
     await new Promise((r) => setTimeout(r, 1000));
     const total = await getGroupMemberCountSafe(userId, group.id);
     lines.push(`📋 <b>${esc(group.subject)}</b>\n✅ All pending members approved! | 👥 Total: ${total}`);
+
+    // ── Show intermediate result so user sees series-wise progress ─────────
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>Approve Together Result</b>\n\n` +
+        lines.join("\n\n") +
+        (gi < groups.length - 1 ? `\n\n⏳ Processing group ${gi + 2}/${groups.length}...` : ""),
+        { parse_mode: "HTML", reply_markup: progressMarkup }
+      );
+    } catch {}
   }
 
   approvalCancelRequests.delete(userIdNum);
