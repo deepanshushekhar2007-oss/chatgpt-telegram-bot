@@ -264,6 +264,21 @@ export async function ensureSessionLoaded(userId: string): Promise<boolean> {
     return existing.connected && existing.socket !== null;
   }
 
+  // Session exists in the map but is NOT connected and has no lock.
+  // This means it is in reconnect-backoff (waiting between retries via a
+  // trackSessionTimer). If we fall through and create a NEW session object
+  // here, it races with the pending reconnect timer: both call createSocket
+  // simultaneously, producing the rapid gen=N / gen=N+1 storm seen in logs.
+  // Instead, acquire the lock on the EXISTING session and let its own timer
+  // fire — or wait up to 5 s for it to connect on its own.
+  if (existing) {
+    existing.lastActivityAt = Date.now();
+    for (let i = 0; i < 50 && !existing.connected; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return existing.connected && existing.socket !== null;
+  }
+
   // No live session — check MongoDB for stored creds and lazy-restore.
   const stored = (await listStoredWhatsAppSessions()).find((s) => s.userId === resolved);
   if (!stored) return false;
@@ -323,14 +338,20 @@ async function clearSessionData(userId: string): Promise<void> {
 
 function closeSocketSafe(sock: ReturnType<typeof makeWASocket> | null): void {
   if (!sock) return;
-  // 1) End the underlying websocket
-  try { sock.end(undefined); } catch {}
-  // 2) Drop all event listeners so closures (creds.update, connection.update,
-  //    saveCreds reference, etc.) become unreachable and GC-able. Without this,
-  //    every reconnect leaks one full set of listeners and their captured
-  //    state — over hours this is a major source of OOM on small hosts.
+  // 1) Drop all Baileys event listeners FIRST — before calling sock.end().
+  //    Baileys buffers connection.update events and may flush 2+ of them at
+  //    once (race during session replacement). If we call sock.end() first,
+  //    the buffered events fire AFTER we started closing, causing a second
+  //    closeSocketSafe call on an already-closing WebSocket → the WebSocket
+  //    is in CONNECTING state → ws.close() throws
+  //    "WebSocket was closed before the connection was established" as an
+  //    uncaught exception. Removing listeners first eliminates that second
+  //    call entirely.
   try { (sock.ev as any)?.removeAllListeners?.(); } catch {}
   try { (sock as any).ws?.removeAllListeners?.(); } catch {}
+  // 2) Now end the underlying WebSocket. No listeners remain so no further
+  //    events can fire. Any throw here (e.g. WS already closed) is silenced.
+  try { sock.end(undefined); } catch {}
 }
 
 async function createSocket(
