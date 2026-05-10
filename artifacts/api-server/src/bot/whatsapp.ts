@@ -1328,7 +1328,12 @@ export async function applyGroupSettings(
   const sock = session.socket;
 
   try {
-    if (description) await sock.groupUpdateDescription(groupId, description);
+    if (description) {
+      // WhatsApp enforces a 512-character limit on group descriptions.
+      // Silently truncate so the call never fails due to length.
+      const trimmed = description.length > 512 ? description.slice(0, 512) : description;
+      await sock.groupUpdateDescription(groupId, trimmed);
+    }
   } catch (e: any) { console.error(`[WA][${userId}] desc error:`, e?.message); }
 
   try {
