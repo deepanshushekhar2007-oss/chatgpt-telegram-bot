@@ -4805,6 +4805,24 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
     state.groupSettings.disappearingMessages = dur;
     state.step = "group_dp";
     const maxDps = state.groupSettings.count;
+
+    // ── Checkpoint: save before DP step so group_dp_skip/done survive restart ──
+    const gs = state.groupSettings;
+    void savePendingGroupCreation(ctx.from.id, {
+      name: gs.name,
+      description: gs.description,
+      count: gs.count,
+      finalNames: gs.finalNames,
+      namingMode: gs.namingMode,
+      editGroupInfo: gs.editGroupInfo,
+      sendMessages: gs.sendMessages,
+      addMembers: gs.addMembers,
+      approveJoin: gs.approveJoin,
+      disappearingMessages: gs.disappearingMessages,
+      friendNumbers: gs.friendNumbers,
+      makeFriendAdmin: gs.makeFriendAdmin,
+    }).catch(() => {});
+
     await ctx.editMessageText(
       "🖼️ <b>Group Profile Photo(s)</b>\n\n" +
       `Ek ya zyada photos bhejo (max ${maxDps}).\n\n` +
@@ -4817,18 +4835,57 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
   });
 }
 
+// ── Shared helpers for group-creation MongoDB recovery ───────────────────────
+// Any group-creation callback that might fire after a bot restart uses this
+// helper instead of a plain `userStates.get`. It tries RAM first, then falls
+// back to the MongoDB checkpoint saved by the step-transition functions. The
+// step name passed in is only used when we have to reconstruct the state from
+// scratch so that the right text-handler branch runs if needed.
+async function recoverGroupCreationState(
+  userId: number,
+  stepIfRecovered: string = "group_confirm"
+): Promise<UserState | undefined> {
+  const ram = userStates.get(userId);
+  if (ram?.groupSettings) return ram;
+  const persisted = await loadPendingGroupCreation(userId);
+  if (persisted) {
+    const recovered: UserState = {
+      step: stepIfRecovered,
+      groupSettings: { ...persisted, dpBuffers: [] },
+    };
+    userStates.set(userId, recovered);
+    return recovered;
+  }
+  return undefined;
+}
+
+async function replyGroupSessionExpired(ctx: any): Promise<void> {
+  try {
+    await ctx.editMessageText(
+      "⚠️ <b>Session Expired</b>\n\nYour group creation session has expired (20 min limit).\nPlease start again from the menu.",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("👥 Create Groups", "create_groups")
+          .text("🏠 Main Menu", "main_menu"),
+      }
+    );
+  } catch {}
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.callbackQuery("group_dp_skip", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.groupSettings) return;
+  const state = await recoverGroupCreationState(ctx.from.id, "group_dp");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.dpBuffers = [];
   await showGroupFriendsStep(ctx);
 });
 
 bot.callbackQuery("group_dp_done", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.groupSettings) return;
+  const state = await recoverGroupCreationState(ctx.from.id, "group_dp");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   await showGroupFriendsStep(ctx);
 });
 
@@ -4879,6 +4936,24 @@ async function showGroupFriendAdminStep(ctx: any) {
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
   state.step = "group_confirm_friend_admin";
+
+  // ── Checkpoint: save with actual friendNumbers so yes/no survive restart ──
+  const gs = state.groupSettings;
+  void savePendingGroupCreation(userId, {
+    name: gs.name,
+    description: gs.description,
+    count: gs.count,
+    finalNames: gs.finalNames,
+    namingMode: gs.namingMode,
+    editGroupInfo: gs.editGroupInfo,
+    sendMessages: gs.sendMessages,
+    addMembers: gs.addMembers,
+    approveJoin: gs.approveJoin,
+    disappearingMessages: gs.disappearingMessages,
+    friendNumbers: gs.friendNumbers,
+    makeFriendAdmin: gs.makeFriendAdmin,
+  }).catch(() => {});
+
   const count = state.groupSettings.friendNumbers.length;
   const text =
     `👑 <b>Make Friend Admin?</b>\n\n` +
@@ -4898,36 +4973,8 @@ async function showGroupFriendAdminStep(ctx: any) {
 
 bot.callbackQuery("group_skip_friends", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const userId = ctx.from.id;
-  let state = userStates.get(userId);
-
-  // ── MongoDB fallback: RAM state lost after bot restart ────────────────────
-  // showGroupFriendsStep saves a checkpoint to MongoDB. If state is missing
-  // from RAM (e.g. Render restarted between the Friends message appearing and
-  // the user tapping Skip), recover from MongoDB instead of silently doing
-  // nothing — which was the "Skip button doesn't work" bug for some users.
-  if (!state?.groupSettings) {
-    const persisted = await loadPendingGroupCreation(userId);
-    if (persisted) {
-      state = {
-        step: "group_enter_friends",
-        groupSettings: { ...persisted, dpBuffers: [] },
-      };
-      userStates.set(userId, state);
-    }
-  }
-
-  if (!state?.groupSettings) {
-    // State truly gone (>20 min expiry or never saved) — tell user clearly.
-    try {
-      await ctx.editMessageText(
-        "⚠️ <b>Session Expired</b>\n\nYour group creation session has expired.\nPlease start again from the menu.",
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("👥 Create Groups", "create_groups").text("🏠 Main Menu", "main_menu") }
-      );
-    } catch {}
-    return;
-  }
-
+  const state = await recoverGroupCreationState(ctx.from.id, "group_enter_friends");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.friendNumbers = [];
   state.groupSettings.makeFriendAdmin = false;
   await showGroupSummary(ctx);
@@ -4935,16 +4982,16 @@ bot.callbackQuery("group_skip_friends", async (ctx) => {
 
 bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.groupSettings) return;
+  const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = true;
   await showGroupSummary(ctx);
 });
 
 bot.callbackQuery("group_friend_admin_no", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const state = userStates.get(ctx.from.id);
-  if (!state?.groupSettings) return;
+  const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = false;
   await showGroupSummary(ctx);
 });
