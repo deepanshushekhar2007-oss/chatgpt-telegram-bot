@@ -241,6 +241,15 @@ process.on("uncaughtException", (err: any) => {
     console.warn("[WA] Caught WhatsApp crypto error (corrupt session), ignoring:", msg);
     return;
   }
+  // Expected race: a stale Baileys socket is closed while still in CONNECTING
+  // state (e.g. a new socket replaced it before the old WS handshook). This
+  // throws synchronously inside ws.close() and escapes try/catch because it
+  // originates inside Baileys' event-buffer flush. It is harmless — the socket
+  // is discarded immediately after — so we suppress it instead of crashing.
+  if (msg.includes("WebSocket was closed before the connection was established")) {
+    console.warn("[WA] Suppressed stale-socket close race (harmless):", msg);
+    return;
+  }
   console.error("[UNCAUGHT EXCEPTION]", err);
 });
 
