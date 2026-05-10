@@ -1706,10 +1706,11 @@ async function runJoinBackground(userId: number): Promise<void> {
       const link = session.queue.shift()!;
       let res: { success: boolean; groupName?: string; error?: string };
       try {
+        const abort = new AbortController();
         const timeout = new Promise<{ success: false; error: string }>((r) =>
-          setTimeout(() => r({ success: false, error: "Timeout" }), 90000)
+          setTimeout(() => { abort.abort(); r({ success: false, error: "Timeout" }); }, 90000)
         );
-        res = await Promise.race([joinGroupWithLink(String(userId), link), timeout]);
+        res = await Promise.race([joinGroupWithLink(String(userId), link, abort.signal), timeout]);
       } catch (e: any) {
         res = { success: false, error: e?.message || "Unknown error" };
       }
@@ -16670,7 +16671,14 @@ bot.on("message:document", async (ctx) => {
       }
     } catch (err: any) {
       const msg = err?.message || err?.description || String(err) || "Unknown error";
-      try { await ctx.reply(`⚠️ Could not process <b>${esc(docFileName)}</b>. Please resend this file.`, { parse_mode: "HTML" }); } catch {}
+      try {
+        await ctx.reply(
+          `⚠️ Could not process <b>${esc(docFileName)}</b>.\n\n` +
+          `<b>Error:</b> <code>${esc(msg)}</code>\n\n` +
+          `Please resend the file. If the problem persists, try converting the VCF to UTF-8 encoding.`,
+          { parse_mode: "HTML" }
+        );
+      } catch {}
     }
   });
 });
@@ -16681,13 +16689,15 @@ function downloadText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
     client.get(url, (res) => {
-      let d = "";
-      res.on("data", (c) => (d += c));
+      // Collect raw Buffer chunks so multi-byte UTF-8 characters (e.g. Chinese)
+      // are not corrupted by naive string concatenation across chunk boundaries.
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer | string) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string)));
       res.on("end", () => {
         if (res.statusCode && res.statusCode >= 400) {
           reject(new Error(`HTTP ${res.statusCode} downloading file`));
         } else {
-          resolve(d);
+          resolve(Buffer.concat(chunks).toString("utf8"));
         }
       });
       res.on("error", reject);
@@ -17210,6 +17220,38 @@ bot.callbackQuery("ctc_links_done", async (ctx) => {
 });
 
 // ─── Leave Group — By Link ────────────────────────────────────────
+// ── By-link shared helper ────────────────────────────────────────────────────
+// Resolves each WhatsApp invite link with a per-link timeout (20 s) and edits
+// the bot message with live progress so the user knows the bot is working.
+// Without the timeout, a rate-limited link can block for 30+ minutes silently.
+async function resolveLinksWithProgress(
+  userId: number,
+  buffer: string[],
+  chatId: number,
+  msgId: number
+): Promise<Array<{ id: string; subject: string }>> {
+  const total = buffer.length;
+  const groups: Array<{ id: string; subject: string }> = [];
+  for (let i = 0; i < total; i++) {
+    try {
+      await bot.api.editMessageText(
+        chatId, msgId,
+        `🔗 <b>Resolving group links...</b>\n\n⏳ <b>${i + 1}/${total}</b> done...`,
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+    try {
+      const result = await Promise.race([
+        getGroupIdFromLink(String(userId), buffer[i]),
+        new Promise<null>(r => setTimeout(() => r(null), 20_000)),
+      ]);
+      if (result) groups.push({ id: result.id, subject: result.subject });
+    } catch {}
+  }
+  return groups;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 bot.callbackQuery("lv_by_link", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -17232,14 +17274,11 @@ bot.callbackQuery("lv_links_done", async (ctx) => {
   const buffer = state.lvLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   lvLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string; isAdmin: boolean }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject, isAdmin: true });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups: Array<{ id: string; subject: string; isAdmin: boolean }> =
+    (await resolveLinksWithProgress(userId, buffer, chatId, msgId)).map(g => ({ ...g, isAdmin: true }));
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "lv_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17287,14 +17326,10 @@ bot.callbackQuery("rm_links_done", async (ctx) => {
   const buffer = state.rmLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   rmLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "rm_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17334,14 +17369,10 @@ bot.callbackQuery("ap_links_done", async (ctx) => {
   const buffer = state.apLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   apLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "ap_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17381,14 +17412,10 @@ bot.callbackQuery("ma_links_done", async (ctx) => {
   const buffer = state.maLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   maLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "ma_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17430,14 +17457,10 @@ bot.callbackQuery("da_links_done", async (ctx) => {
   const buffer = state.daLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   daLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "da_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17477,14 +17500,10 @@ bot.callbackQuery("es_links_done", async (ctx) => {
   const buffer = state.esLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   esLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "es_by_link").text("🏠 Menu", "main_menu") }); return;
   }
@@ -17522,14 +17541,10 @@ bot.callbackQuery("cgn_links_done", async (ctx) => {
   const buffer = state.cgnLinkBuffer || [];
   if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   cgnLinkCollectMsgId.delete(userId);
-  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
-  const groups: Array<{ id: string; subject: string }> = [];
-  for (const link of buffer) {
-    try {
-      const info = await getGroupIdFromLink(String(userId), link);
-      if (info) groups.push({ id: info.id, subject: info.subject });
-    } catch {}
-  }
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  await ctx.editMessageText("🔗 <b>Resolving group links...</b>\n\n⏳ Starting...", { parse_mode: "HTML" });
+  const groups = await resolveLinksWithProgress(userId, buffer, chatId, msgId);
   if (!groups.length) {
     await ctx.editMessageText("❌ Could not resolve any links. Check links and WhatsApp connection.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔗 Try Again", "cgn_by_link").text("🏠 Menu", "main_menu") }); return;
   }
