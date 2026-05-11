@@ -1707,8 +1707,10 @@ async function runJoinBackground(userId: number): Promise<void> {
       let res: { success: boolean; groupName?: string; error?: string };
       try {
         const abort = new AbortController();
+        // 45 s outer cap (inner cap is 15 s per socket call, so this allows
+        // up to 3 socket attempts before the link is marked as timed out).
         const timeout = new Promise<{ success: false; error: string }>((r) =>
-          setTimeout(() => { abort.abort(); r({ success: false, error: "Timeout" }); }, 90000)
+          setTimeout(() => { abort.abort(); r({ success: false, error: "Timeout" }); }, 45000)
         );
         res = await Promise.race([joinGroupWithLink(String(userId), link, abort.signal), timeout]);
       } catch (e: any) {
@@ -1802,8 +1804,28 @@ const demoteAdminCancelRequests: Set<number> = new Set();
 const resetLinkDownloadCache = new Map<number, { text: string; expiresAt: number }>();
 setInterval(() => {
   const now = Date.now();
+  // Sweep ALL TTL caches in one pass — prevents unbounded memory growth
+  // from abandoned sessions that never reach their own cleanup path.
   for (const [uid, entry] of resetLinkDownloadCache) {
     if (now > entry.expiresAt) resetLinkDownloadCache.delete(uid);
+  }
+  for (const [uid, entry] of joinFailedLinksCache) {
+    if (now > entry.expiresAt) joinFailedLinksCache.delete(uid);
+  }
+  for (const [uid, entry] of rlLinkRetryCache) {
+    if (now > entry.expiresAt) rlLinkRetryCache.delete(uid);
+  }
+  // Clean up completed/abandoned by-link resolve sessions
+  for (const [uid, session] of rlResolveSessions) {
+    if (!session.running && session.queue.length === 0) {
+      rlResolveSessions.delete(uid);
+    }
+  }
+  // Clean up stale joinSessions (safety net — runJoinBackground deletes on finish)
+  for (const [uid, session] of joinSessions) {
+    if (!session.running && session.done === 0 && session.queue.length === 0) {
+      joinSessions.delete(uid);
+    }
   }
 }, 5 * 60 * 1000);
 
@@ -5967,22 +5989,33 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     if (groups.length > 1) duplicates.push({ phone: "+" + phone, groups });
   }
   if (duplicates.length > 0) {
-    result += `🔁 <b>Duplicate Pending (${duplicates.length}):</b>\n`;
-    const SHOW = 8;
-    // How many group names to print per phone before collapsing to "+N more".
-    // Most duplicates are in 2 groups; cap at 3 so the message stays under
-    // Telegram's 4096-char limit even when 8 duplicates each list groups.
-    const NAMES_PER_PHONE = 3;
-    const slice = duplicates.slice(0, SHOW);
-    for (const d of slice) {
-      result += `   • ${esc(d.phone)} — in <b>${d.groups.length}</b> groups:\n`;
-      const namesShown = d.groups.slice(0, NAMES_PER_PHONE);
-      for (const g of namesShown) result += `      ↳ ${esc(g)}\n`;
-      if (d.groups.length > NAMES_PER_PHONE) {
-        result += `      ↳ … +${d.groups.length - NAMES_PER_PHONE} more\n`;
+    // ── Group-centric view: which groups have how many duplicate pending ──
+    const groupDupCount = new Map<string, number>();
+    for (const d of duplicates) {
+      for (const g of d.groups) {
+        groupDupCount.set(g, (groupDupCount.get(g) ?? 0) + 1);
       }
     }
-    if (duplicates.length > SHOW) result += `   … +${duplicates.length - SHOW} more\n`;
+    const affectedGroups = [...groupDupCount.entries()].sort((a, b) => b[1] - a[1]);
+
+    result += `🔁 <b>Duplicate Pending — ${duplicates.length} contact(s) in multiple groups</b>\n`;
+    result += `━━━━━━━━━━━━━━━━━━\n`;
+    result += `📋 <b>Affected Groups (${affectedGroups.length}):</b>\n`;
+    for (const [gName, cnt] of affectedGroups) {
+      result += `   • ${esc(gName)} — <b>${cnt}</b> duplicate${cnt > 1 ? "s" : ""}\n`;
+    }
+    result += `\n`;
+
+    // ── Per-contact view: which groups each duplicate appears in ──
+    result += `👥 <b>Duplicate Contacts:</b>\n`;
+    const SHOW = 15; // show more contacts than before
+    const slice = duplicates.slice(0, SHOW);
+    for (const d of slice) {
+      // Show ALL group names — no artificial cap; user needs to see every group
+      result += `   • ${esc(d.phone)}\n`;
+      for (const g of d.groups) result += `      ↳ ${esc(g)}\n`;
+    }
+    if (duplicates.length > SHOW) result += `   … +${duplicates.length - SHOW} more contacts\n`;
     result += "\n";
   }
 
