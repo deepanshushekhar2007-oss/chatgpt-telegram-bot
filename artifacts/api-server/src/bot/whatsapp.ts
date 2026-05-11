@@ -1,7 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
   Browsers,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
@@ -391,7 +390,12 @@ async function createSocket(
     version,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      // Use MongoDB-backed keys directly — avoids the unbounded in-memory
+      // Signal-key cache that makeCacheableSignalKeyStore() creates. That
+      // cache has no eviction policy and grows ~20-40 MB per session over
+      // several hours on active accounts. Direct key lookups hit MongoDB
+      // instead, which is perfectly fast enough for a bot workload.
+      keys: state.keys,
     },
     printQRInTerminal: false,
     logger,
@@ -958,6 +962,15 @@ export function notifyDisconnect(userId: string, reason: string): void {
 export function clearDisconnectNotified(userId: string): void {
   disconnectNotifiedUsers.delete(userId);
 }
+
+// Periodic sweep — remove entries for users whose session no longer exists.
+// clearDisconnectNotified() handles the reconnect path, but users who never
+// come back would otherwise keep their entry in this Set forever.
+setInterval(() => {
+  for (const uid of disconnectNotifiedUsers) {
+    if (!sessions.has(uid)) disconnectNotifiedUsers.delete(uid);
+  }
+}, 30 * 60 * 1000); // every 30 min
 
 // ─── Admin Session Alias API ─────────────────────────────────────────────────
 // Allows an admin to "borrow" another user's WhatsApp session transparently.

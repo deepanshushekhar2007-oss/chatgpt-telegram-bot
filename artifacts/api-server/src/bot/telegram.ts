@@ -2025,6 +2025,35 @@ setInterval(() => {
   addMembersCancelRequests.clear();
   removeMembersCancelRequests.clear();
   removeFriendCancelRequests.clear();
+  // Sweep linkCollectMsgId maps — one integer per active flow per user.
+  // Each map is cleared when its flow completes, but if a user disconnects
+  // mid-flow the entry leaks forever. Purge entries for users with no state.
+  for (const uid of rlLinkCollectMsgId.keys())  { if (!userStates.has(uid)) rlLinkCollectMsgId.delete(uid);  }
+  for (const uid of rmLinkCollectMsgId.keys())  { if (!userStates.has(uid)) rmLinkCollectMsgId.delete(uid);  }
+  for (const uid of esLinkCollectMsgId.keys())  { if (!userStates.has(uid)) esLinkCollectMsgId.delete(uid);  }
+  for (const uid of apLinkCollectMsgId.keys())  { if (!userStates.has(uid)) apLinkCollectMsgId.delete(uid);  }
+  for (const uid of cgnLinkCollectMsgId.keys()) { if (!userStates.has(uid)) cgnLinkCollectMsgId.delete(uid); }
+  for (const uid of maLinkCollectMsgId.keys())  { if (!userStates.has(uid)) maLinkCollectMsgId.delete(uid);  }
+  for (const uid of daLinkCollectMsgId.keys())  { if (!userStates.has(uid)) daLinkCollectMsgId.delete(uid);  }
+  for (const uid of lvLinkCollectMsgId.keys())  { if (!userStates.has(uid)) lvLinkCollectMsgId.delete(uid);  }
+  for (const uid of ctcLinkCollectMsgId.keys()) { if (!userStates.has(uid)) ctcLinkCollectMsgId.delete(uid); }
+  // Sweep stale autoAccepterJobs — jobs whose endsAt has passed by > 60s
+  // but whose endTimer somehow didn't fire (e.g. timer coalescing on a
+  // busy event loop). Clears the pollTimer interval so it stops pumping WA.
+  const now15 = Date.now();
+  for (const [uid, job] of autoAccepterJobs) {
+    if (now15 > job.endsAt + 60_000) {
+      console.log(`[MEMORY] Evicting stale autoAccepterJob uid=${uid} endsAt=${job.endsAt}`);
+      clearInterval(job.pollTimer);
+      clearTimeout(job.endTimer);
+      autoAccepterJobs.delete(uid);
+    }
+  }
+  // Sweep ctcgData from userStates that are idle — free the large allGroups
+  // array even if the state itself stays (e.g. user is in a later CTC step).
+  for (const [, st] of userStates) {
+    if (st.ctcgData) st.ctcgData = undefined;
+  }
   // Double-pass GC with a small wait between passes. A single gc() leaves
   // partially-promoted objects in the old generation; doing a second pass
   // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
@@ -4438,6 +4467,7 @@ function clearUserMemoryState(telegramUserId: number): void {
   getLinkCancelRequests.delete(telegramUserId);
   addMembersCancelRequests.delete(telegramUserId);
   removeMembersCancelRequests.delete(telegramUserId);
+  removeFriendCancelRequests.delete(telegramUserId);
   approvalCancelRequests.delete(telegramUserId);
   makeAdminCancelRequests.delete(telegramUserId);
   resetLinkCancelRequests.delete(telegramUserId);
@@ -4445,6 +4475,22 @@ function clearUserMemoryState(telegramUserId: number): void {
 
   // 7. New-session flag
   newSessionFlag.delete(telegramUserId);
+
+  // 8. Link-collect message ID maps (one entry per user per active flow —
+  //    cleared on flow completion but missed on abrupt disconnect)
+  rlLinkCollectMsgId.delete(telegramUserId);
+  rmLinkCollectMsgId.delete(telegramUserId);
+  esLinkCollectMsgId.delete(telegramUserId);
+  apLinkCollectMsgId.delete(telegramUserId);
+  cgnLinkCollectMsgId.delete(telegramUserId);
+  maLinkCollectMsgId.delete(telegramUserId);
+  daLinkCollectMsgId.delete(telegramUserId);
+  lvLinkCollectMsgId.delete(telegramUserId);
+  ctcLinkCollectMsgId.delete(telegramUserId);
+
+  // 9. CTC group-select data (allGroups array can hold hundreds of objects)
+  const us = userStates.get(telegramUserId);
+  if (us?.ctcgData) us.ctcgData = undefined;
 }
 
 export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult> {
@@ -4516,7 +4562,32 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
   const newSessionCleared = newSessionFlag.size;
   newSessionFlag.clear();
 
-  // 8. Idle WhatsApp sockets (does not kick recently-active users)
+  // 8. Stale autoAccepterJobs — past their endsAt by > 60s with endTimer
+  //    not having fired. These keep a pollTimer setInterval running which
+  //    sends WA traffic and prevents proper GC of the job's closure.
+  const purgeNow = Date.now();
+  for (const [uid, job] of autoAccepterJobs) {
+    if (purgeNow > job.endsAt + 60_000) {
+      console.log(`[MEM-PURGE] Evicting stale autoAccepterJob uid=${uid}`);
+      clearInterval(job.pollTimer);
+      clearTimeout(job.endTimer);
+      autoAccepterJobs.delete(uid);
+    }
+  }
+
+  // 9. linkCollectMsgId maps — cleared by flow completion handlers, but
+  //    missed on abrupt disconnect. Purge entries for users with no state.
+  for (const uid of rlLinkCollectMsgId.keys())  { if (!userStates.has(uid)) rlLinkCollectMsgId.delete(uid);  }
+  for (const uid of rmLinkCollectMsgId.keys())  { if (!userStates.has(uid)) rmLinkCollectMsgId.delete(uid);  }
+  for (const uid of esLinkCollectMsgId.keys())  { if (!userStates.has(uid)) esLinkCollectMsgId.delete(uid);  }
+  for (const uid of apLinkCollectMsgId.keys())  { if (!userStates.has(uid)) apLinkCollectMsgId.delete(uid);  }
+  for (const uid of cgnLinkCollectMsgId.keys()) { if (!userStates.has(uid)) cgnLinkCollectMsgId.delete(uid); }
+  for (const uid of maLinkCollectMsgId.keys())  { if (!userStates.has(uid)) maLinkCollectMsgId.delete(uid);  }
+  for (const uid of daLinkCollectMsgId.keys())  { if (!userStates.has(uid)) daLinkCollectMsgId.delete(uid);  }
+  for (const uid of lvLinkCollectMsgId.keys())  { if (!userStates.has(uid)) lvLinkCollectMsgId.delete(uid);  }
+  for (const uid of ctcLinkCollectMsgId.keys()) { if (!userStates.has(uid)) ctcLinkCollectMsgId.delete(uid); }
+
+  // 10. Idle WhatsApp sockets (does not kick recently-active users)
   let waEvicted = 0;
   let waTotal = 0;
   try {
@@ -5722,6 +5793,10 @@ bot.callbackQuery("ctcg_proceed", async (ctx) => {
     groupName: g.subject,
     vcfContacts: [],
   }));
+
+  // Free the large allGroups array immediately — it can hold hundreds of
+  // group objects and is no longer needed once we've built the pairs list.
+  state.ctcgData = undefined;
 
   if (!state.ctcData) state.ctcData = { groupLinks: [], pairs: [], currentPairIndex: 0 };
   state.ctcData.pairs = pairs;
