@@ -1032,6 +1032,8 @@ interface GroupSettings {
 
 interface CtcPair {
   link: string;
+  groupId?: string;
+  groupName?: string;
   vcfContacts: Array<{ name: string; phone: string; vcfFileName: string }>;
 }
 
@@ -1161,6 +1163,12 @@ interface UserState {
   daLinkBuffer?: string[];
   lvLinkBuffer?: string[];
   ctcLinkBuffer?: string[];
+  ctcgData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+  };
   addMembersData?: {
     groupLink: string;
     groupId: string;
@@ -5468,100 +5476,268 @@ bot.callbackQuery("join_failed_download", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  console.error("[CTC-STEP-1] Handler triggered");
-
-  // Step 1: Answer callback query
-  try {
-    await ctx.answerCallbackQuery();
-    console.error("[CTC-STEP-1] answerCallbackQuery OK");
-  } catch (e: any) {
-    console.error("[CTC-STEP-1] answerCallbackQuery FAILED:", e?.message ?? e);
-  }
+  try { await ctx.answerCallbackQuery(); } catch {}
 
   const userId = ctx.from.id;
-  const chatId = ctx.callbackQuery.message?.chat.id ?? ctx.from.id;
-  const msgId = ctx.callbackQuery.message?.message_id;
-  console.error(`[CTC-STEP-2] userId=${userId} | chatId=${chatId} | msgId=${msgId}`);
-
-  // Step 2: Access check
-  console.error("[CTC-STEP-3] Running access check...");
-  let accessOk = false;
-  try {
-    accessOk = await checkAccessMiddleware(ctx);
-    console.error(`[CTC-STEP-3] accessOk=${accessOk}`);
-  } catch (err: any) {
-    console.error("[CTC-STEP-3] checkAccessMiddleware THREW:", err?.message ?? err);
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect WhatsApp", "connect_wa").row().text("🏠 Main Menu", "main_menu") }
+    ); return;
   }
-  if (!accessOk) {
-    console.error("[CTC-STEP-3] Access DENIED — returning");
-    try {
-      await ctx.api.sendMessage(chatId, "❌ Access denied. Contact bot owner.", {
-        reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-      });
-    } catch (e: any) {
-      console.error("[CTC-STEP-3] sendMessage access-denied FAILED:", e?.message ?? e);
+
+  await ctx.editMessageText(
+    "🔍 <b>CTC Checker</b>\n\nHow would you like to select groups?",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔗 By Link", "ctc_by_link").row()
+        .text("📋 Select Groups", "ctc_by_groups").row()
+        .text("🏠 Main Menu", "main_menu"),
     }
-    return;
+  );
+});
+
+// ── By Link (existing flow) ───────────────────────────────────────────────────
+bot.callbackQuery("ctc_by_link", async (ctx) => {
+  try { await ctx.answerCallbackQuery(); } catch {}
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
   }
 
-  // Step 3: WhatsApp connection check
-  const waConnected = isConnected(String(userId));
-  console.error(`[CTC-STEP-4] WhatsApp connected=${waConnected}`);
-  if (!waConnected) {
-    console.error("[CTC-STEP-4] WA not connected — deleting menu and sending error msg");
-    try { await ctx.deleteMessage(); console.error("[CTC-STEP-4] deleteMessage OK"); } catch (e: any) { console.error("[CTC-STEP-4] deleteMessage FAILED:", e?.message ?? e); }
-    try {
-      await ctx.api.sendMessage(
-        chatId,
-        "❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first to use CTC Checker.",
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("📱 Connect WhatsApp", "connect_wa").row()
-            .text("🏠 Main Menu", "main_menu"),
-        }
-      );
-      console.error("[CTC-STEP-4] sendMessage WA-not-connected OK");
-    } catch (err: any) {
-      console.error("[CTC-STEP-4] sendMessage WA-not-connected FAILED:", err?.message ?? err);
-      try { await ctx.api.sendMessage(userId, "❌ WhatsApp not connected! Use /start."); } catch {}
-    }
-    return;
-  }
-
-  // Step 4: Set user state + persist to MongoDB (cross-instance share)
-  console.error("[CTC-STEP-5] Setting userState: ctc_enter_links");
   const ctcInitState: UserState = {
     step: "ctc_enter_links",
     ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 },
   };
   userStates.set(userId, ctcInitState);
-  saveUserState(userId, ctcInitState).catch((e: any) => console.error("[CTC-STEP-5] saveUserState FAILED:", e?.message));
-  console.error("[CTC-STEP-5] userState set OK + MongoDB save triggered");
+  saveUserState(userId, ctcInitState).catch(() => {});
 
   const ctcPrompt = notr(
-    "🔍 <b>CTC Checker</b>\n\n" +
-    "Step 1: Send all WhatsApp group links, one per line:\n\n" +
+    "🔍 <b>CTC Checker — By Link</b>\n\n" +
+    "Send all WhatsApp group links, one per line:\n\n" +
     "<code>https://chat.whatsapp.com/ABC123\nhttps://chat.whatsapp.com/XYZ456</code>"
   );
-
-  const cancelKb = new InlineKeyboard().text("❌ Cancel", "main_menu");
-
-  // Step 5: Edit menu message in-place with the CTC prompt (same pattern as join_groups, reset-by-link etc.)
-  console.error(`[CTC-STEP-6] Editing menu message in-place — chatId=${chatId} msgId=${msgId}`);
   try {
-    await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-    console.error("[CTC-STEP-6] editMessageText OK ✅");
-  } catch (err: any) {
-    console.error("[CTC-STEP-6] editMessageText FAILED:", err?.message ?? err, "| Falling back to reply");
-    try {
-      await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: cancelKb });
-      console.error("[CTC-STEP-6] reply fallback OK ✅");
-    } catch (err2: any) {
-      console.error("[CTC-STEP-6] reply fallback ALSO FAILED:", err2?.message ?? err2);
-    }
+    await ctx.editMessageText(ctcPrompt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
+  } catch {
+    try { await ctx.reply(ctcPrompt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }); } catch {}
   }
-  console.error("[CTC-STEP-8] Handler complete");
+});
+
+// ── By Groups (new flow) ──────────────────────────────────────────────────────
+bot.callbackQuery("ctc_by_groups", async (ctx) => {
+  try { await ctx.answerCallbackQuery(); } catch {}
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
+  }
+
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+
+  const groups = await getAllGroups(String(userId));
+  if (!groups.length) {
+    await ctx.editMessageText("📭 No groups found on your WhatsApp.", { reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }); return;
+  }
+
+  const allGroupsSimple = groups
+    .map((g) => ({ id: g.id, subject: g.subject }))
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+  const patterns = detectSimilarGroups(allGroupsSimple);
+
+  userStates.set(userId, {
+    step: "ctcg_select",
+    ctcData: { groupLinks: [], pairs: [], currentPairIndex: 0 },
+    ctcgData: { allGroups: allGroupsSimple, patterns, selectedIndices: new Set(), page: 0 },
+  });
+
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "ctcg_similar").text("📋 All Groups", "ctcg_show_all").row();
+  else kb.text("📋 All Groups", "ctcg_show_all").row();
+  kb.text("🏠 Main Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n` +
+    `📱 <b>Groups Found: ${allGroupsSimple.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 <b>Similar Patterns: ${patterns.length}</b>\n` : "") +
+    `\nSelect which groups to check:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+function buildCtcgKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const allGroups = state.ctcgData!.allGroups;
+  const selected = state.ctcgData!.selectedIndices;
+  const page = state.ctcgData!.page || 0;
+  const totalPages = Math.max(1, Math.ceil(allGroups.length / MA_PAGE_SIZE));
+  const start = page * MA_PAGE_SIZE;
+  const end = Math.min(start + MA_PAGE_SIZE, allGroups.length);
+
+  for (let i = start; i < end; i++) {
+    const g = allGroups[i];
+    const label = selected.has(i) ? `✅ ${g.subject}` : `☐ ${g.subject}`;
+    kb.text(label, `ctcg_tog_${i}`).row();
+  }
+
+  const prev = page > 0 ? "⬅️ Prev" : " ";
+  const next = page < totalPages - 1 ? "Next ➡️" : " ";
+  kb.text(prev, "ctcg_prev_page").text(`📄 ${page + 1}/${totalPages}`, "ctcg_page_info").text(next, "ctcg_next_page").row();
+
+  if (allGroups.length > 1) {
+    kb.text("☑️ Select All", "ctcg_select_all").text("🧹 Clear All", "ctcg_clear_all").row();
+  }
+  if (selected.size > 0) {
+    kb.text(`▶️ Continue (${selected.size} selected)`, "ctcg_proceed").row();
+  }
+  kb.text("🔙 Back", "ctc_checker").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
+bot.callbackQuery("ctcg_similar", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.ctcgData) return;
+  const { patterns } = state.ctcgData;
+  if (!patterns.length) { await ctx.answerCallbackQuery({ text: "No similar patterns found.", show_alert: true }); return; }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < patterns.length; i++) {
+    kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length})`, `ctcg_sim_${i}`).row();
+  }
+  kb.text("🔙 Back", "ctc_by_groups").text("🏠 Menu", "main_menu");
+  await ctx.editMessageText("🔍 <b>Similar Group Patterns</b>\n\nTap a pattern to select those groups:", { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery(/^ctcg_sim_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.ctcgData) return;
+  const idx = parseInt(ctx.match![1]);
+  const pattern = state.ctcgData.patterns[idx];
+  if (!pattern) return;
+  const patternIds = new Set(pattern.groups.map((g) => g.id));
+  state.ctcgData.selectedIndices = new Set();
+  for (let i = 0; i < state.ctcgData.allGroups.length; i++) {
+    if (patternIds.has(state.ctcgData.allGroups[i].id)) state.ctcgData.selectedIndices.add(i);
+  }
+  state.ctcgData.page = 0;
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>${state.ctcgData.selectedIndices.size} selected</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_show_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  state.ctcgData.page = 0;
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>Tap to select/deselect</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery(/^ctcg_tog_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  const idx = parseInt(ctx.match![1]);
+  if (idx < 0 || idx >= state.ctcgData.allGroups.length) return;
+  if (state.ctcgData.selectedIndices.has(idx)) state.ctcgData.selectedIndices.delete(idx);
+  else state.ctcgData.selectedIndices.add(idx);
+  const cnt = state.ctcgData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_prev_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  if ((state.ctcgData.page || 0) > 0) state.ctcgData.page--;
+  const cnt = state.ctcgData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_next_page", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  const totalPages = Math.ceil(state.ctcgData.allGroups.length / MA_PAGE_SIZE);
+  if ((state.ctcgData.page || 0) < totalPages - 1) state.ctcgData.page++;
+  const cnt = state.ctcgData.selectedIndices.size;
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>${cnt > 0 ? `${cnt} selected` : "None selected yet"}</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+
+bot.callbackQuery("ctcg_select_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  for (let i = 0; i < state.ctcgData.allGroups.length; i++) state.ctcgData.selectedIndices.add(i);
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\nAll <b>${state.ctcgData.allGroups.length} groups selected</b>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_clear_all", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.ctcgData) return;
+  state.ctcgData.selectedIndices.clear();
+  await ctx.editMessageText(
+    `🔍 <b>CTC Checker — Select Groups</b>\n\n<i>None selected yet</i>`,
+    { parse_mode: "HTML", reply_markup: buildCtcgKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ctcg_proceed", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.ctcgData || !state.ctcgData.selectedIndices.size) return;
+
+  const selectedGroups = Array.from(state.ctcgData.selectedIndices).map(i => state.ctcgData!.allGroups[i]);
+
+  // Build pairs from selected groups — use groupId directly (no link resolution needed)
+  const pairs: CtcPair[] = selectedGroups.map(g => ({
+    link: g.subject,
+    groupId: g.id,
+    groupName: g.subject,
+    vcfContacts: [],
+  }));
+
+  if (!state.ctcData) state.ctcData = { groupLinks: [], pairs: [], currentPairIndex: 0 };
+  state.ctcData.pairs = pairs;
+  state.ctcData.currentPairIndex = 0;
+  state.step = "ctc_enter_vcf";
+  saveUserState(userId, state).catch(() => {});
+
+  const firstGroup = selectedGroups[0];
+  await ctx.editMessageText(
+    `✅ <b>${selectedGroups.length} group(s) selected!</b>\n\n` +
+    `📁 <b>Send VCF or TXT file(s)</b>\n\n` +
+    `You can send:\n• One file for all groups\n• Multiple files, one per group (in order)\n\n` +
+    `Send file for <b>Group 1/${selectedGroups.length}</b>:\n<b>${esc(firstGroup.subject)}</b>\n\n` +
+    `When ready, tap <b>Start Check</b>:`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
+  );
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
@@ -5582,6 +5758,19 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
     try {
       await ctx.reply("⚠️ Session expired. Please start CTC Checker again.", {
         reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+
+  // Block if VCF files are still being processed in the queue
+  if (vcfProcessingQueue.has(userId)) {
+    const totalPairs = state.ctcData.pairs.length;
+    const filledSoFar = state.ctcData.pairs.filter(p => p.vcfContacts.length > 0).length;
+    try {
+      await ctx.answerCallbackQuery({
+        text: `⏳ VCF files are still being processed (${filledSoFar}/${totalPairs} done). Please wait for all files to finish, then press Start Check.`,
+        show_alert: true,
       });
     } catch {}
     return;
@@ -5749,58 +5938,64 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     const pair = activePairs[i];
     const cleanLink = buildCleanLink(pair.link);
     const vcfCount = pair.vcfContacts.length;
-    const groupLabel = `Group ${i + 1}`;
+    const groupLabel = pair.groupName || `Group ${i + 1}`;
 
-    // ── Phase 1: resolving the group link ──────────────────────────────
+    // ── Phase 1: resolving the group link (or use pre-resolved groupId) ──
     try {
       await bot.api.editMessageText(chatId, msgId,
-        buildProgressMsg(i, "Resolving group link…", groupLabel, vcfCount),
+        buildProgressMsg(i, pair.groupId ? "Loading group info…" : "Resolving group link…", groupLabel, vcfCount),
         { parse_mode: "HTML" }
       );
     } catch {}
 
-    let groupInfo;
-    try {
-      // 30 s hard cap — getGroupIdFromLink retries up to 15× with long backoffs
-      // and can block for 30+ minutes on a rate-limited link without this guard.
-      groupInfo = await Promise.race([
-        getGroupIdFromLink(userId, cleanLink),
-        new Promise<null>(r => setTimeout(() => r(null), 30_000)),
-      ]);
-    } catch (err: any) {
-      runningFailed++;
-      groupResults.push({
-        groupId: "",
-        groupName: groupLabel,
-        link: cleanLink,
-        vcfContacts: pair.vcfContacts,
-        inMembers: [],
-        inPending: [],
-        notFoundPhones: pair.vcfContacts.map(c => c.phone),
-        allMemberPhones: new Set(),
-        allPendingPhones: new Set(),
-        pendingAvailable: false,
-        couldNotAccess: true,
-      });
-      console.error("[CTC] getGroupIdFromLink failed:", err?.message ?? err);
-      continue;
-    }
-    if (!groupInfo) {
-      runningFailed++;
-      groupResults.push({
-        groupId: "",
-        groupName: groupLabel,
-        link: cleanLink,
-        vcfContacts: pair.vcfContacts,
-        inMembers: [],
-        inPending: [],
-        notFoundPhones: pair.vcfContacts.map(c => c.phone),
-        allMemberPhones: new Set(),
-        allPendingPhones: new Set(),
-        pendingAvailable: false,
-        couldNotAccess: true,
-      });
-      continue;
+    let groupInfo: { id: string; subject: string } | null = null;
+
+    // If pair already has a groupId (group-select mode), skip link resolution
+    if (pair.groupId) {
+      groupInfo = { id: pair.groupId, subject: pair.groupName || groupLabel };
+    } else {
+      try {
+        // 30 s hard cap — getGroupIdFromLink retries up to 15× with long backoffs
+        // and can block for 30+ minutes on a rate-limited link without this guard.
+        groupInfo = await Promise.race([
+          getGroupIdFromLink(userId, cleanLink),
+          new Promise<null>(r => setTimeout(() => r(null), 30_000)),
+        ]);
+      } catch (err: any) {
+        runningFailed++;
+        groupResults.push({
+          groupId: "",
+          groupName: groupLabel,
+          link: cleanLink,
+          vcfContacts: pair.vcfContacts,
+          inMembers: [],
+          inPending: [],
+          notFoundPhones: pair.vcfContacts.map(c => c.phone),
+          allMemberPhones: new Set(),
+          allPendingPhones: new Set(),
+          pendingAvailable: false,
+          couldNotAccess: true,
+        });
+        console.error("[CTC] getGroupIdFromLink failed:", err?.message ?? err);
+        continue;
+      }
+      if (!groupInfo) {
+        runningFailed++;
+        groupResults.push({
+          groupId: "",
+          groupName: groupLabel,
+          link: cleanLink,
+          vcfContacts: pair.vcfContacts,
+          inMembers: [],
+          inPending: [],
+          notFoundPhones: pair.vcfContacts.map(c => c.phone),
+          allMemberPhones: new Set(),
+          allPendingPhones: new Set(),
+          pendingAvailable: false,
+          couldNotAccess: true,
+        });
+        continue;
+      }
     }
 
     // ── Phase 2: fetching members + pending ────────────────────────────
@@ -5913,6 +6108,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
         gr,
         correctPendingCount: 0,
         correctMembersCount: 0,
+        notInVcfCount: 0,
         wrongPending: [],
         wrongPendingFull: 0,
         vcfLast10Set: new Set(),
@@ -5940,10 +6136,14 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
     totalCorrect += correctPendingCount;
     totalWrong += wrongPendingFull;
 
+    const notInVcfCount = gr.allMemberPhones.size > 0
+      ? Array.from(gr.allMemberPhones).filter(p => !new Set(gr.vcfContacts.map(c => c.phone.replace(/[^0-9]/g, "").slice(-10))).has(p.slice(-10))).length
+      : 0;
     summaries.push({
       gr,
       correctPendingCount,
       correctMembersCount,
+      notInVcfCount,
       wrongPending,
       wrongPendingFull,
       vcfLast10Set,
@@ -7007,12 +7207,20 @@ async function runAutoAccepterPoll(job: AutoAccepterJob): Promise<void> {
         // the same JID — we must approve them again. WhatsApp itself only
         // surfaces JIDs that are currently pending, so re-approval will
         // never happen for a user who is still a member.
-        const ok = await approveGroupParticipant(userIdStr, groupId, jid);
+        let ok = await approveGroupParticipant(userIdStr, groupId, jid);
+        // Retry once on failure — transient WhatsApp errors can cause a
+        // single approval to fail even though the session is still alive.
+        if (!ok) {
+          await new Promise(r => setTimeout(r, 1000));
+          ok = await approveGroupParticipant(userIdStr, groupId, jid);
+        }
         if (ok) {
           job.seenJids.add(jid); // kept for stats / debugging only
           job.totalAccepted++;
           newCount++;
         }
+        // Small delay between each approval to avoid rate-limiting from WhatsApp.
+        await new Promise(r => setTimeout(r, 300));
       }
     } catch (err: any) {
       console.error(`[AutoAccepter][${userId}] Poll error for group ${groupNames[i]}:`, err?.message);
@@ -16648,76 +16856,148 @@ bot.callbackQuery("rm_confirm_with_exclude", async (ctx) => {
 
 // ─── Photo Handler ───────────────────────────────────────────────────────────
 
+// Per-user serial queue for DP photo uploads — prevents concurrent getFile /
+// downloadBuffer / sendMessage calls when user sends multiple photos at once.
+const dpProcessingQueue: Map<number, Promise<void>> = new Map();
+function enqueueDpProcessing(userId: number, task: () => Promise<void>): Promise<void> {
+  const prev = dpProcessingQueue.get(userId) ?? Promise.resolve();
+  const next = prev.then(() => task()).catch(() => {});
+  dpProcessingQueue.set(userId, next);
+  next.finally(() => {
+    if (dpProcessingQueue.get(userId) === next) dpProcessingQueue.delete(userId);
+  });
+  return next;
+}
+
+// Retry wrapper for Telegram API calls that can transiently fail when
+// multiple photos arrive at the same time (getFile, sendMessage, etc.).
+async function retryTgApi<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      // Don't retry on errors that won't resolve with a retry
+      const msg: string = err?.message || "";
+      if (msg.includes("403") || msg.includes("blocked") || msg.includes("chat not found")) throw err;
+      await new Promise((r) => setTimeout(r, 600 * Math.pow(2, attempt)));
+    }
+  }
+  throw lastErr;
+}
+
 bot.on("message:photo", async (ctx) => {
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state) return;
 
   if (state.step === "group_dp" && state.groupSettings) {
-    try {
-      const maxDps = state.groupSettings.count;
-      if (state.groupSettings.dpBuffers.length >= maxDps) {
-        await ctx.reply(`⚠️ <b>Max ${maxDps} DP${maxDps === 1 ? "" : "s"} reached.</b> Tum ${maxDps} group bana rahe ho, isliye max ${maxDps} DP. Done dabake aage badho.`, {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
-        });
+    // Snapshot the file_id and api reference immediately (ctx is ephemeral)
+    const photos = ctx.message.photo;
+    const fileId = photos[photos.length - 1].file_id;
+    const tgApi = ctx.api;
+    const chatId = ctx.message.chat.id;
+
+    void enqueueDpProcessing(userId, async () => {
+      // Re-read state inside queue — may have changed since we entered
+      const s = userStates.get(userId);
+      if (!s || s.step !== "group_dp" || !s.groupSettings) return;
+
+      const maxDps = s.groupSettings.count;
+      if (s.groupSettings.dpBuffers.length >= maxDps) {
+        try {
+          await retryTgApi(() => tgApi.sendMessage(chatId,
+            `⚠️ <b>Max ${maxDps} DP${maxDps === 1 ? "" : "s"} reached.</b> Tum ${maxDps} group bana rahe ho, isliye max ${maxDps} DP. Done dabake aage badho.`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu") }
+          ));
+        } catch {}
         return;
       }
-      const photos = ctx.message.photo;
-      const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
-      if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
-      const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-      state.groupSettings.dpBuffers.push(buf);
-      const count = state.groupSettings.dpBuffers.length;
-      await ctx.reply(
-        `✅ <b>DP ${count} saved!</b>\n\n` +
-        `Aur photos bhej sakte ho (max ${maxDps}), ya <b>✅ Done</b> dabake aage badho.\n` +
-        `Total ab tak: <b>${count}/${maxDps}</b>`,
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu"),
+
+      try {
+        const file = await retryTgApi(() => retryGetFile(tgApi, fileId));
+        if (!file.file_path) {
+          await retryTgApi(() => tgApi.sendMessage(chatId, "❌ Could not download photo. Please resend it."));
+          return;
         }
-      );
-    } catch (err: any) {
-      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
-    }
+        const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+        s.groupSettings.dpBuffers.push(buf);
+        const count = s.groupSettings.dpBuffers.length;
+        await retryTgApi(() => tgApi.sendMessage(chatId,
+          `✅ <b>DP ${count} saved!</b>\n\nAur photos bhej sakte ho (max ${maxDps}), ya <b>✅ Done</b> dabake aage badho.\nTotal ab tak: <b>${count}/${maxDps}</b>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done", "group_dp_done").text("❌ Cancel", "main_menu") }
+        ));
+      } catch (err: any) {
+        const msg = err?.message || "Unknown error";
+        try { await retryTgApi(() => tgApi.sendMessage(chatId, `❌ Error saving photo: ${esc(msg)}`, { parse_mode: "HTML" })); } catch {}
+      }
+    });
     return;
   }
 
   if (state.step === "edit_settings_dp" && state.editSettingsData) {
-    try {
-      const photos = ctx.message.photo;
-      const file = await ctx.api.getFile(photos[photos.length - 1].file_id);
-      if (!file.file_path) { await ctx.reply("❌ Could not download photo. Try again."); return; }
-      const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-      state.editSettingsData.settings.dpBuffers = [buf];
-      state.editSettingsData.settings.removeDp = false;
-      state.step = "edit_settings_desc";
-      await ctx.reply(
-        "✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("⏭️ Skip", "es_desc_skip")
-            .text("🗑️ Remove Description", "es_desc_remove").row()
-            .text("❌ Cancel", "main_menu"),
+    const photos = ctx.message.photo;
+    const fileId = photos[photos.length - 1].file_id;
+    const tgApi = ctx.api;
+    const chatId = ctx.message.chat.id;
+
+    void enqueueDpProcessing(userId, async () => {
+      const s = userStates.get(userId);
+      if (!s || s.step !== "edit_settings_dp" || !s.editSettingsData) return;
+      try {
+        const file = await retryTgApi(() => retryGetFile(tgApi, fileId));
+        if (!file.file_path) {
+          await retryTgApi(() => tgApi.sendMessage(chatId, "❌ Could not download photo. Please resend it."));
+          return;
         }
-      );
-    } catch (err: any) {
-      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown error")}`, { parse_mode: "HTML" });
-    }
+        const buf = await downloadBuffer(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+        s.editSettingsData.settings.dpBuffers = [buf];
+        s.editSettingsData.settings.removeDp = false;
+        s.step = "edit_settings_desc";
+        await retryTgApi(() => tgApi.sendMessage(chatId,
+          "✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("⏭️ Skip", "es_desc_skip")
+              .text("🗑️ Remove Description", "es_desc_remove").row()
+              .text("❌ Cancel", "main_menu"),
+          }
+        ));
+      } catch (err: any) {
+        const msg = err?.message || "Unknown error";
+        try { await retryTgApi(() => tgApi.sendMessage(chatId, `❌ Error saving photo: ${esc(msg)}`, { parse_mode: "HTML" })); } catch {}
+      }
+    });
     return;
   }
 });
 
 // ─── Document Handler (VCF) ──────────────────────────────────────────────────
 
+// Parse phone numbers from a plain-text file where each line is a phone number.
+function parseTXT(content: string): Array<{ name: string; phone: string }> {
+  const contacts: Array<{ name: string; phone: string }> = [];
+  for (const line of content.split(/\r?\n/)) {
+    const cleaned = line.replace(/[^0-9+]/g, "").trim();
+    if (cleaned.length >= 7) {
+      const phone = cleaned.startsWith("+") ? cleaned : "+" + cleaned;
+      contacts.push({ name: "Contact", phone });
+    }
+  }
+  return contacts;
+}
+
 bot.on("message:document", async (ctx) => {
   const userId = ctx.from.id;
   let state = userStates.get(userId);
   if (!state) return;
   const doc = ctx.message.document;
-  if (!(doc.file_name || "").toLowerCase().endsWith(".vcf")) { await ctx.reply("❌ Please send a .vcf file only."); return; }
+  const fileName = (doc.file_name || "").toLowerCase();
+  const isVcf = fileName.endsWith(".vcf");
+  const isTxt = fileName.endsWith(".txt");
+  if (!isVcf && !isTxt) { await ctx.reply("❌ Please send a .vcf or .txt file only."); return; }
 
   if (state.step === "approval_admin_input" && state.approvalData) {
     try {
@@ -16845,7 +17125,7 @@ bot.on("message:document", async (ctx) => {
   // Capture doc/ctx values before queuing — the ctx reference is safe to
   // close over but we extract the primitives for clarity.
   const docFileId = doc.file_id;
-  const docFileName = doc.file_name || "unknown.vcf";
+  const docFileName = doc.file_name || (isVcf ? "unknown.vcf" : "unknown.txt");
   const ctcApi = ctx.api;
 
   void enqueueVcfProcessing(userId, async () => {
@@ -16858,13 +17138,26 @@ bot.on("message:document", async (ctx) => {
       const file = await retryGetFile(ctcApi, docFileId);
       if (!file.file_path) { await ctx.reply("❌ Could not download file. Please resend it."); return; }
       const content = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
-      const rawContacts = parseVCF(content);
+
+      // Parse contacts from VCF or TXT
+      let rawContacts: Array<{ name: string; phone: string }>;
+      if (docFileName.toLowerCase().endsWith(".txt")) {
+        rawContacts = parseTXT(content);
+      } else {
+        rawContacts = parseVCF(content);
+      }
+
       if (!rawContacts.length) { await ctx.reply(`❌ No contacts found in <b>${esc(docFileName)}</b>.`, { parse_mode: "HTML" }); return; }
 
       const vcfFileName = docFileName;
       const contacts = rawContacts.map(c => ({ ...c, vcfFileName }));
 
       const idx = s.ctcData.currentPairIndex;
+      // Helper to show the group label for the next prompt
+      const getGroupLabel = (pairIdx: number) => {
+        const p = s.ctcData!.pairs[pairIdx];
+        return p.groupName ? `<b>${esc(p.groupName)}</b>` : `<code>${esc(p.link)}</code>`;
+      };
 
       if (idx >= s.ctcData.pairs.length) {
         // All pairs filled, just append to last group
@@ -16886,12 +17179,12 @@ bot.on("message:document", async (ctx) => {
 
       if (nextIdx < s.ctcData.pairs.length) {
         await ctx.reply(
-          notr(`✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n<code>${esc(s.ctcData.pairs[nextIdx].link)}</code>\n\n<i>Or tap Start Check if you want to use the same VCF for remaining groups</i>`),
+          notr(`✅ <b>${contacts.length} contacts added to Group ${idx + 1}</b> (total: ${total})\n\n📁 Send VCF/TXT for <b>Group ${nextIdx + 1}/${s.ctcData.pairs.length}</b>:\n${getGroupLabel(nextIdx)}\n\n<i>Or tap Start Check if you want to use the same file for remaining groups</i>`),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       } else {
         await ctx.reply(
-          notr(`✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} VCF file(s) received!\n\n🚀 Ready to check!`),
+          notr(`✅ <b>${contacts.length} contacts for Group ${idx + 1}</b> (total: ${total})\n\n🎉 All ${s.ctcData.pairs.length} file(s) received!\n\n🚀 Ready to check!`),
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("▶️ Start Check", "ctc_start_check").text("❌ Cancel", "main_menu") }
         );
       }
@@ -16911,27 +17204,9 @@ bot.on("message:document", async (ctx) => {
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
-function downloadText(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http;
-    client.get(url, (res) => {
-      // Collect raw Buffer chunks so multi-byte UTF-8 characters (e.g. Chinese)
-      // are not corrupted by naive string concatenation across chunk boundaries.
-      const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer | string) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c as string)));
-      res.on("end", () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode} downloading file`));
-        } else {
-          resolve(Buffer.concat(chunks).toString("utf8"));
-        }
-      });
-      res.on("error", reject);
-    }).on("error", reject);
-  });
-}
-
-function downloadBuffer(url: string): Promise<Buffer> {
+function downloadBuffer(url: string): Promise<Buffer>;
+function downloadBuffer(url: string, asBuffer: true): Promise<Buffer>;
+function downloadBuffer(url: string, _asBuffer?: boolean): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
     client.get(url, (res) => {
@@ -16945,6 +17220,20 @@ function downloadBuffer(url: string): Promise<Buffer> {
       res.on("end", () => resolve(Buffer.concat(chunks)));
       res.on("error", reject);
     }).on("error", reject);
+  });
+}
+
+function downloadText(url: string): Promise<string> {
+  return downloadBuffer(url).then((buf) => {
+    // Try UTF-8 first. If it contains replacement characters, fall back to
+    // latin1 (ISO-8859-1) which is lossless for any byte sequence. This fixes
+    // the AggregateError / garbled text that occurs with VCF files saved by
+    // phones that use Windows-1252 or Latin-1 encoding.
+    const utf8 = buf.toString("utf8");
+    if (utf8.includes("\uFFFD")) {
+      return buf.toString("latin1");
+    }
+    return utf8;
   });
 }
 
@@ -17266,22 +17555,48 @@ export async function startBot() {
     const phoneText = phoneNumber ? phoneNumber : "(unknown)";
     const accountLabel = isAuto ? "Auto Chat WhatsApp" : "WhatsApp";
     const reasonLower = (reason || "").toLowerCase();
+
     const isQrExpiry =
       reasonLower.includes("qr session") ||
       reasonLower.includes("qr code") ||
       reasonLower.includes("reconnect via qr");
+    const is403 =
+      reasonLower.includes("403") ||
+      reasonLower.includes("whatsapp rejected");
+    const isLogout =
+      reasonLower.includes("logged out") ||
+      reasonLower.includes("logout");
 
-    let reconnectHint = `Please reconnect to continue using the bot.`;
+    let reconnectHint: string;
     if (isQrExpiry) {
-      reconnectHint = `Your QR session is no longer valid.\n\n` +
+      // QR session expired — user must scan a new QR
+      reconnectHint =
+        `Your QR session is no longer valid.\n\n` +
         `Tap <b>Reconnect WhatsApp</b> → <b>📷 Pair QR</b> to scan a new QR code and reconnect.`;
+    } else if (isLogout) {
+      // Explicit logout — must pair fresh
+      reconnectHint =
+        `Your WhatsApp account was logged out.\n\n` +
+        `Tap <b>Reconnect WhatsApp</b> to pair your number again.`;
+    } else if (is403) {
+      // 403 — transient rate-limit / server rejection. Credentials still valid.
+      reconnectHint =
+        `This is usually a temporary WhatsApp server issue.\n\n` +
+        `✅ <b>Your credentials are still saved.</b>\n` +
+        `Tap <b>Reconnect WhatsApp</b> to reconnect — <b>no re-pairing needed.</b>`;
+    } else {
+      // Generic disconnect — credentials still intact
+      reconnectHint =
+        `✅ <b>Your session is still saved.</b>\n` +
+        `Tap <b>Reconnect WhatsApp</b> to reconnect — <b>no re-pairing needed.</b>`;
     }
 
     const message =
       `⚠️ <b>${accountLabel} Disconnected</b>\n\n` +
-      `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected from the bot.\n\n` +
+      `Your ${accountLabel} number <code>${esc(phoneText)}</code> has been disconnected.\n\n` +
       `Reason: ${esc(reason || "Unknown")}\n\n` +
       reconnectHint;
+
     void bot.api.sendMessage(telegramId, message, {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()

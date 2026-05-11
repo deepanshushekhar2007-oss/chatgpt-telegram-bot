@@ -715,27 +715,36 @@ async function createSocket(
         return;
       }
 
-      // 403 = WhatsApp permanently rejected this session (banned, session invalidated, or device unlinked remotely)
-      // Retrying endlessly on 403 causes memory leaks (500+ sockets accumulate). Cap retries tightly.
-      // QR sessions get only 2 retries since they can't silently reconnect anyway.
+      // 403 = WhatsApp rate-limited or temporarily rejected this session.
+      // This is often transient (server-side hiccup, brief rate limit) and NOT a permanent ban.
+      // Strategy:
+      //   • Never delete session credentials on 403 — the session can self-heal.
+      //   • Retry with exponential backoff, capped at 5 minutes between attempts.
+      //   • Only give up (and notify user) after a large number of consecutive 403s.
+      //   • QR sessions without a phone get fewer retries since they can't silently reconnect.
       if (statusCode === 403) {
         session.retryCount++;
-        const MAX_403_RETRIES = session.wasConnected ? (hasPhone ? 10 : 2) : 3;
+        // Phone/code sessions that were previously connected get the most retries —
+        // a 30-minute outage (e.g. server maintenance) can produce many 403s in a row.
+        const MAX_403_RETRIES = session.wasConnected ? (hasPhone ? 30 : 5) : 5;
         if (session.retryCount > MAX_403_RETRIES) {
-          console.log(`[WA][${userId}] 403 repeated ${session.retryCount}x — WhatsApp permanently rejected. Stopping reconnect.`);
+          console.log(`[WA][${userId}] 403 repeated ${session.retryCount}x — giving up. Credentials preserved for manual reconnect.`);
           closeSocketSafe(sock);
           session.socket = null;
           clearAllSessionTimers(userId);
           sessions.delete(userId);
-          void clearSessionData(userId);
+          // DO NOT call clearSessionData here — the user's credentials are still valid.
+          // They can reconnect from the menu without re-pairing their number.
           onDisconnected("WhatsApp rejected this connection (403). Please reconnect from the menu.");
           void forceMemoryReclaim();
           return;
         }
-        // Exponential backoff for 403: 10s, 20s, 40s... up to 2 min
-        const delay = Math.min(10000 * Math.pow(2, session.retryCount - 1), 120000);
-        console.log(`[WA][${userId}] 403 retry ${session.retryCount}/${MAX_403_RETRIES} in ${delay / 1000}s gen=${myGenId} mode=${reconnectMode}...`);
+        // Exponential backoff for 403: 15s → 30s → 60s → … up to 5 min
+        const delay = Math.min(15000 * Math.pow(1.8, session.retryCount - 1), 300000);
+        console.log(`[WA][${userId}] 403 retry ${session.retryCount}/${MAX_403_RETRIES} in ${Math.round(delay / 1000)}s gen=${myGenId} mode=${reconnectMode}...`);
         session.codeRequested = false;
+        closeSocketSafe(sock);
+        session.socket = null;
         trackSessionTimer(userId, async () => {
           if (session.socketGenId !== myGenId) return;
           const currentSession = sessions.get(userId);
@@ -762,12 +771,13 @@ async function createSocket(
       session.codeRequested = false;
       session.retryCount++;
       if (session.retryCount > MAX_RETRIES) {
-        console.log(`[WA][${userId}] Too many retries (${session.retryCount}) — stopping reconnect to prevent memory leak.`);
+        console.log(`[WA][${userId}] Too many retries (${session.retryCount}) — stopping reconnect. Credentials preserved for manual reconnect.`);
         closeSocketSafe(sock);
         session.socket = null;
         clearAllSessionTimers(userId);
         sessions.delete(userId);
-        void clearSessionData(userId);
+        // DO NOT call clearSessionData — credentials are still valid; the user can
+        // reconnect from the menu without re-pairing their phone number.
         onDisconnected("Connection keeps failing. Please reconnect from the menu.");
         void forceMemoryReclaim();
         return;
