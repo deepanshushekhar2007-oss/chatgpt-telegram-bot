@@ -1083,7 +1083,9 @@ interface UserState {
   };
   removeFriendData?: {
     selectedGroups: Array<{ id: string; subject: string }>;
-    phoneNumbers?: string[];
+    phoneNumbers?: string[];   // full numbers (7+ digits) — remove only that number
+    countryCodes?: string[];   // 1-4 digit country codes — remove ALL matching non-admins
+    exceptions?: string[];     // numbers to exclude from country-code removal
   };
   similarData?: {
     patterns: SimilarGroup[];
@@ -1700,6 +1702,7 @@ async function runJoinBackground(userId: number): Promise<void> {
   const session = joinSessions.get(userId);
   if (!session || session.running) return;
   session.running = true;
+  activeBackgroundUsers.add(userId);
   try {
     while (session.queue.length > 0 && !session.cancelled) {
       if (joinCancelRequests.has(userId)) { session.cancelled = true; break; }
@@ -1782,6 +1785,7 @@ async function runJoinBackground(userId: number): Promise<void> {
     joinSessions.delete(userId);
   } finally {
     session.running = false;
+    activeBackgroundUsers.delete(userId);
   }
 }
 
@@ -1792,6 +1796,8 @@ const removeMembersCancelRequests: Set<number> = new Set();
 const removeFriendCancelRequests: Set<number> = new Set();
 const approvalCancelRequests: Set<number> = new Set();
 const makeAdminCancelRequests: Set<number> = new Set();
+// Tracks every user with a running background task — exempt from idle-disconnect sweep.
+const activeBackgroundUsers = new Set<number>();
 const resetLinkCancelRequests: Set<number> = new Set();
 // Tracks users currently running a Reset-by-Link pipeline — exempted from idle-disconnect sweep.
 const resetLinkActiveSessions: Set<number> = new Set();
@@ -2048,6 +2054,8 @@ setInterval(async () => {
       ...cigSessions.keys(),
       ...acfSessions.keys(),
       ...resetLinkActiveSessions,
+      ...activeBackgroundUsers,
+      ...joinSessions.keys(),
     ]);
     for (const uidStr of liveSessions) {
       const uid = Number(uidStr);
@@ -8578,9 +8586,12 @@ bot.callbackQuery("rm_mode_friend", async (ctx) => {
   await ctx.editMessageText(
     `👥 <b>Remove Friend</b>\n\n` +
     `<b>${selectedGroups.length} group(s) selected:</b>\n${groupList}${more}\n\n` +
-    `⚠️ <b>Note:</b> If a number is an admin in a group, it will still be removed.\n\n` +
-    `Send the phone numbers you want to remove (one per line):\n\n` +
-    `Example:\n<code>+919912345678\n+919998887777</code>`,
+    `Send the phone numbers or country codes to remove (one per line):\n\n` +
+    `📱 <b>Full number</b> — removes only that person from all selected groups:\n` +
+    `   <code>+919912345678\n   +919998887777</code>\n\n` +
+    `🌍 <b>Country code only</b> (1–4 digits, + optional) — removes ALL members from that country:\n` +
+    `   <code>+91\n   +92</code>\n\n` +
+    `🛡️ Admins are <b>NEVER</b> removed regardless of input.`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu"),
@@ -8623,13 +8634,40 @@ bot.callbackQuery("rf_cancel_confirm", async (ctx) => {
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
+bot.callbackQuery("rf_skip_exceptions", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.removeFriendData) return;
+  state.removeFriendData.exceptions = [];
+  const { selectedGroups, countryCodes = [], phoneNumbers = [] } = state.removeFriendData;
+  const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const moreGroups = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+  const ccList = countryCodes.map(c => `+${c}`).join(", ");
+  await ctx.editMessageText(
+    `👥 <b>Remove Friend — Confirm</b>\n\n` +
+    `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+    (phoneNumbers.length > 0 ? `<b>Full numbers to remove:</b> ${phoneNumbers.length}\n\n` : "") +
+    `<b>Country code(s):</b> ${ccList} — removes all non-admins with these codes\n` +
+    `<i>No exceptions — all matching members will be removed</i>\n\n` +
+    `🛡️ Admins will NOT be removed.\n\nConfirm?`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Confirm & Remove", "rf_confirm")
+        .text("❌ Cancel", "main_menu"),
+    }
+  );
+});
+
 bot.callbackQuery("rf_confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
-  if (!state?.removeFriendData?.phoneNumbers?.length) return;
+  if (!state?.removeFriendData) return;
+  const { selectedGroups, phoneNumbers = [], countryCodes = [], exceptions = [] } = state.removeFriendData;
+  if (!phoneNumbers.length && !countryCodes.length) return;
 
-  const { selectedGroups, phoneNumbers } = state.removeFriendData;
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
 
@@ -8640,25 +8678,32 @@ bot.callbackQuery("rf_confirm", async (ctx) => {
   const more = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
   try {
     await ctx.editMessageText(
-      `⏳ <b>Removing friend(s) from ${selectedGroups.length} group(s)...</b>\n\n${groupList}${more}\n\n⌛ Please wait...`,
+      `⏳ <b>Removing from ${selectedGroups.length} group(s)...</b>\n\n${groupList}${more}\n\n⌛ Please wait...`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
     );
   } catch {}
 
-  void removeFriendBackground(String(userId), selectedGroups, phoneNumbers, chatId, msgId);
+  void removeFriendBackground(String(userId), selectedGroups, phoneNumbers, countryCodes, exceptions, chatId, msgId);
 });
 
 async function removeFriendBackground(
   userId: string,
   groups: Array<{ id: string; subject: string }>,
-  rawPhones: string[],
+  fullNumbers: string[],   // digits-only, 7+ digits — remove only that number
+  countryCodes: string[],  // digits-only, 1-4 digits — remove ALL non-admins with this prefix
+  exceptions: string[],    // digits-only full numbers to exclude from country-code removal
   chatId: number,
   msgId: number
 ): Promise<void> {
-  // Normalise input phones to digits-only for reliable comparison
-  // (same approach used by demoteSelectedBackground)
-  const targetPhones = rawPhones.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 7);
   const userIdNum = Number(userId);
+  activeBackgroundUsers.add(userIdNum);
+
+  // Normalize inputs
+  const targetPhones = fullNumbers.map(p => p.replace(/[^0-9]/g, "")).filter(p => p.length >= 7);
+  const ccList = countryCodes.map(c => c.replace(/[^0-9]/g, "")).filter(c => c.length >= 1 && c.length <= 4);
+  const exceptSet = new Set(exceptions.map(e => e.replace(/[^0-9]/g, "")));
+  const hasCountryCodeMode = ccList.length > 0;
+
   let wasCancelled = false;
   let fullResult = "👥 <b>Remove Friend Result</b>\n\n";
 
@@ -8666,7 +8711,7 @@ async function removeFriendBackground(
     if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
     const group = groups[gi];
     const groupLines: string[] = [];
-    let removed = 0, failed = 0, notFound = 0;
+    let removed = 0, skipped = 0, failed = 0, notFound = 0;
 
     try {
       if (!cancelDialogActiveFor.has(userIdNum)) {
@@ -8677,66 +8722,120 @@ async function removeFriendBackground(
       }
     } catch {}
 
-    // p.phone is populated by getGroupParticipants even in LID mode.
-    // p.jid is already the correct operation JID (phone-based JID in LID groups).
     const participants = await getGroupParticipants(userId, group.id);
 
-    for (let pi = 0; pi < targetPhones.length; pi++) {
-      if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+    if (hasCountryCodeMode) {
+      // Country code mode: walk all participants, match prefix
+      for (const participant of participants) {
+        if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
+        // NEVER remove admins
+        if (participant.isAdmin) continue;
 
-      const phone = targetPhones[pi];
-      const phoneLast10 = phone.slice(-10);
+        const pPhone = participant.phone.replace(/[^0-9]/g, "");
+        const pLast10 = pPhone.slice(-10);
+        let shouldRemove = false;
 
-      // Match by full digits or last-10-digits — same as demoteSelectedBackground
-      const participant = participants.find(p => {
-        const pPhone = p.phone.replace(/[^0-9]/g, "");
-        return pPhone === phone || (phoneLast10.length >= 7 && pPhone.slice(-10) === phoneLast10);
-      });
-
-      if (!participant) {
-        groupLines.push(`  ❌ +${phone} — Not found in group`);
-        notFound++;
-      } else {
-        // If admin: demote first so the remove call succeeds
-        if (participant.isAdmin) {
-          await demoteGroupAdmin(userId, group.id, participant.jid);
-          await new Promise(r => setTimeout(r, 800));
+        // Check full-number match first
+        for (const tp of targetPhones) {
+          if (pPhone === tp || (pLast10.length >= 7 && pLast10 === tp.slice(-10))) {
+            shouldRemove = true;
+            break;
+          }
         }
+        // Check country-code match
+        if (!shouldRemove) {
+          for (const cc of ccList) {
+            if (pPhone.startsWith(cc)) {
+              if (exceptSet.has(pPhone) || exceptSet.has(pLast10)) {
+                skipped++;
+              } else {
+                shouldRemove = true;
+              }
+              break;
+            }
+          }
+        }
+        if (!shouldRemove) continue;
 
         const ok = await removeGroupParticipant(userId, group.id, participant.jid);
-        if (ok) {
-          groupLines.push(`  ✅ +${phone} — Removed`);
-          removed++;
-        } else {
-          groupLines.push(`  ❌ +${phone} — Failed to remove`);
-          failed++;
-        }
-      }
+        if (ok) removed++;
+        else failed++;
+        await new Promise(r => setTimeout(r, 600));
 
-      // Live progress update every 3 numbers
-      if (pi % 3 === 0 || pi === targetPhones.length - 1) {
-        if (!cancelDialogActiveFor.has(userIdNum)) {
+        // Live progress update every 5 removals
+        if ((removed + failed) % 5 === 0 && !cancelDialogActiveFor.has(userIdNum)) {
           try {
             await bot.api.editMessageText(chatId, msgId,
               `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
-              `Processing: ${pi + 1}/${targetPhones.length}\n` +
-              `✅ Removed: ${removed} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
+              `✅ Removed: ${removed} | ❌ Failed: ${failed} | ⏭️ Excluded: ${skipped}`,
               { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
             );
           } catch {}
         }
       }
+    } else {
+      // Full-number mode: iterate target phones, match participants
+      for (let pi = 0; pi < targetPhones.length; pi++) {
+        if (removeFriendCancelRequests.has(userIdNum)) { wasCancelled = true; break; }
 
-      await new Promise(r => setTimeout(r, 600));
+        const phone = targetPhones[pi];
+        const phoneLast10 = phone.slice(-10);
+
+        const participant = participants.find(p => {
+          const pPhone = p.phone.replace(/[^0-9]/g, "");
+          return pPhone === phone || (phoneLast10.length >= 7 && pPhone.slice(-10) === phoneLast10);
+        });
+
+        if (!participant) {
+          groupLines.push(`  ❌ +${phone} — Not found in group`);
+          notFound++;
+        } else if (participant.isAdmin) {
+          // NEVER remove admins
+          groupLines.push(`  ⚠️ +${phone} — Skipped (admin)`);
+          skipped++;
+        } else {
+          const ok = await removeGroupParticipant(userId, group.id, participant.jid);
+          if (ok) {
+            groupLines.push(`  ✅ +${phone} — Removed`);
+            removed++;
+          } else {
+            groupLines.push(`  ❌ +${phone} — Failed to remove`);
+            failed++;
+          }
+        }
+
+        // Live progress update every 3 numbers
+        if ((pi % 3 === 0 || pi === targetPhones.length - 1) && !cancelDialogActiveFor.has(userIdNum)) {
+          try {
+            await bot.api.editMessageText(chatId, msgId,
+              `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n\n` +
+              `Processing: ${pi + 1}/${targetPhones.length}\n` +
+              `✅ Removed: ${removed} | ⚠️ Skipped: ${skipped} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request") }
+            );
+          } catch {}
+        }
+
+        await new Promise(r => setTimeout(r, 600));
+      }
     }
 
-    fullResult += `📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n✅ Removed: ${removed} | ❌ Not found: ${notFound} | ❌ Failed: ${failed}\n\n`;
+    const summary = `✅ Removed: ${removed} | ❌ Failed: ${failed}` +
+      (notFound > 0 ? ` | ❌ Not found: ${notFound}` : "") +
+      (skipped > 0 ? ` | ⏭️ Skipped: ${skipped}` : "");
+
+    if (hasCountryCodeMode) {
+      fullResult += `📋 <b>${esc(group.subject)}</b>\n${summary}\n\n`;
+    } else {
+      fullResult += `📋 <b>${esc(group.subject)}</b>\n${groupLines.join("\n")}\n${summary}\n\n`;
+    }
     if (wasCancelled) break;
   }
 
   wasCancelled = removeFriendCancelRequests.has(userIdNum);
   removeFriendCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
+  activeBackgroundUsers.delete(userIdNum);
 
   if (wasCancelled) fullResult += `⛔ <b>Stopped by user.</b>\n\n`;
   fullResult += `━━━━━━━━━━━━━━━━━━\n✅ <b>Done!</b>`;
@@ -8834,6 +8933,7 @@ async function removeAllGroupMembersBackground(
   chatId: number,
   msgId: number | undefined
 ) {
+  activeBackgroundUsers.add(Number(userId));
   let fullResult = "🗑️ <b>Remove Members Result</b>\n\n";
   const excludeSet = new Set(excludeNumbers);
   // Pre-compute the digit-only prefix list once (already stripped, but be safe).
@@ -9816,6 +9916,7 @@ async function approveOneByOneBackground(
   chatId: number,
   msgId: number
 ) {
+  activeBackgroundUsers.add(userIdNum);
   const progressMarkup = new InlineKeyboard().text("❌ Cancel", "ap_cancel_request");
   let fullResult = "✅ <b>Approve 1 by 1 Result</b>\n\n";
   const lines: string[] = [];
@@ -9883,6 +9984,7 @@ async function approveOneByOneBackground(
   // confirmation after this point is a no-op).
   approvalCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
+  activeBackgroundUsers.delete(userIdNum);
 
   if (cancelled) {
     fullResult = `🛑 <b>Approve 1 by 1 — Cancelled</b>\n\n`;
@@ -9939,6 +10041,7 @@ async function approveTogetherBackground(
   chatId: number,
   msgId: number
 ) {
+  activeBackgroundUsers.add(userIdNum);
   const progressMarkup = new InlineKeyboard().text("❌ Cancel", "ap_cancel_request");
   let fullResult = "✅ <b>Approve Together Result</b>\n\n";
   const lines: string[] = [];
@@ -9950,9 +10053,12 @@ async function approveTogetherBackground(
 
     // ── Step 1: Turn OFF approval mode (retry up to 3x) ───────────────────
     try {
+      const _vis1 = lines.length > 8 ? lines.slice(-8) : lines;
+      const _hid1 = lines.length - _vis1.length;
       await bot.api.editMessageText(chatId, msgId,
         `✅ <b>Approve Together Result</b>\n\n` +
-        (lines.length > 0 ? lines.join("\n\n") + "\n\n" : "") +
+        (_hid1 > 0 ? `<i>... +${_hid1} groups done above (see final result)</i>\n\n` : "") +
+        (_vis1.length > 0 ? _vis1.join("\n\n") + "\n\n" : "") +
         `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n` +
         `🔄 Step 1: Turning OFF approval mode...`,
         { parse_mode: "HTML", reply_markup: progressMarkup }
@@ -9974,9 +10080,12 @@ async function approveTogetherBackground(
 
     // ── Step 2: Turn ON approval mode (retry up to 3x) ────────────────────
     try {
+      const _vis2 = lines.length > 8 ? lines.slice(-8) : lines;
+      const _hid2 = lines.length - _vis2.length;
       await bot.api.editMessageText(chatId, msgId,
         `✅ <b>Approve Together Result</b>\n\n` +
-        (lines.length > 0 ? lines.join("\n\n") + "\n\n" : "") +
+        (_hid2 > 0 ? `<i>... +${_hid2} groups done above (see final result)</i>\n\n` : "") +
+        (_vis2.length > 0 ? _vis2.join("\n\n") + "\n\n" : "") +
         `⏳ <b>Group ${gi + 1}/${groups.length}: ${esc(group.subject)}</b>\n` +
         `🔄 Step 2: Turning ON approval mode...\n` +
         `✅ All pending members will be approved!`,
@@ -10000,9 +10109,12 @@ async function approveTogetherBackground(
 
     // ── Show intermediate result so user sees series-wise progress ─────────
     try {
+      const _vis3 = lines.length > 8 ? lines.slice(-8) : lines;
+      const _hid3 = lines.length - _vis3.length;
       await bot.api.editMessageText(chatId, msgId,
         `✅ <b>Approve Together Result</b>\n\n` +
-        lines.join("\n\n") +
+        (_hid3 > 0 ? `<i>... +${_hid3} groups done above (see final result)</i>\n\n` : "") +
+        _vis3.join("\n\n") +
         (gi < groups.length - 1 ? `\n\n⏳ Processing group ${gi + 2}/${groups.length}...` : ""),
         { parse_mode: "HTML", reply_markup: progressMarkup }
       );
@@ -10011,6 +10123,7 @@ async function approveTogetherBackground(
 
   approvalCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
+  activeBackgroundUsers.delete(userIdNum);
 
   if (cancelled) {
     fullResult = `🛑 <b>Approve Together — Cancelled</b>\n\n`;
@@ -10044,6 +10157,7 @@ async function makeAdminBackground(
   chatId: number,
   msgId: number
 ) {
+  activeBackgroundUsers.add(userIdNum);
   const userId = String(userIdNum);
   let fullResult = "👑 <b>Make Admin Result</b>\n\n";
   const lines: string[] = [];
@@ -11511,6 +11625,7 @@ async function demoteAllBackground(
   chatId: number,
   msgId: number
 ) {
+  activeBackgroundUsers.add(userIdNum);
   const userId = String(userIdNum);
   const lines: string[] = [];
   let totalDemoted = 0;
@@ -11655,6 +11770,7 @@ async function demoteSelectedBackground(
   chatId: number,
   msgId: number
 ) {
+  activeBackgroundUsers.add(userIdNum);
   const userId = String(userIdNum);
   const lines: string[] = [];
   let totalDemoted = 0;
@@ -16173,31 +16289,96 @@ bot.on("message:text", async (ctx) => {
   // Handle phone numbers input for Remove Friend
   if (state.step === "remove_friend_enter_numbers") {
     if (!state.removeFriendData) return;
-    const phoneLines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    const phoneNumbers: string[] = [];
-    for (const line of phoneLines) {
-      const cleaned = line.replace(/[^0-9+]/g, "");
-      if (cleaned.replace(/[^0-9]/g, "").length >= 7) phoneNumbers.push(cleaned);
+    const inputLines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const fullNums: string[] = [];
+    const ccNums: string[] = [];
+    for (const line of inputLines) {
+      const digits = line.replace(/[^0-9]/g, "");
+      if (digits.length >= 1 && digits.length <= 4) {
+        if (!ccNums.includes(digits)) ccNums.push(digits);
+      } else if (digits.length >= 7) {
+        fullNums.push(digits);
+      }
     }
-    if (phoneNumbers.length === 0) {
+    if (fullNums.length === 0 && ccNums.length === 0) {
       await ctx.reply(
-        "❌ No valid phone numbers found.\n\nSend numbers with country code, one per line:\n<code>+919912345678\n+919998887777</code>",
+        "❌ No valid input found.\n\n" +
+        "Send numbers or country codes (one per line):\n" +
+        "<code>+919912345678</code>  ← removes only this number\n" +
+        "<code>+91</code>  ← removes ALL non-admin members from India",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
       );
       return;
     }
-    state.removeFriendData.phoneNumbers = phoneNumbers;
+    state.removeFriendData.phoneNumbers = fullNums;
+    state.removeFriendData.countryCodes = ccNums;
     const { selectedGroups } = state.removeFriendData;
     const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
     const moreGroups = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
-    const numList = phoneNumbers.slice(0, 15).map(p => `• ${esc(p)}`).join("\n");
-    const moreNums = phoneNumbers.length > 15 ? `\n<i>...+${phoneNumbers.length - 15} more</i>` : "";
+
+    if (ccNums.length > 0) {
+      state.step = "remove_friend_enter_exceptions";
+      const ccList = ccNums.map(c => `+${c}`).join(", ");
+      await ctx.reply(
+        `🌍 <b>Country Code Removal</b>\n\n` +
+        `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+        `Country code(s) detected: <b>${ccList}</b>\n` +
+        (fullNums.length > 0 ? `Full numbers to also remove: <b>${fullNums.length}</b>\n` : "") +
+        `\nAll non-admin members with these country codes will be removed.\n\n` +
+        `Are there any numbers you want to <b>KEEP</b> (NOT remove)?\n` +
+        `Send them one per line, or tap <b>Skip</b>:`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("⏭️ Skip", "rf_skip_exceptions")
+            .text("❌ Cancel", "main_menu"),
+        }
+      );
+      return;
+    }
+
+    // Full-number-only mode — show confirm directly
+    const numList = fullNums.slice(0, 15).map(p => `• +${esc(p)}`).join("\n");
+    const moreNums = fullNums.length > 15 ? `\n<i>...+${fullNums.length - 15} more</i>` : "";
     await ctx.reply(
       `👥 <b>Remove Friend — Confirm</b>\n\n` +
       `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
-      `<b>${phoneNumbers.length} number(s) to remove:</b>\n${numList}${moreNums}\n\n` +
-      `⚠️ <b>Note:</b> If any of these numbers are admins in a group, they will be demoted first and then removed.\n\n` +
-      `Confirm?`,
+      `<b>${fullNums.length} number(s) to remove:</b>\n${numList}${moreNums}\n\n` +
+      `🛡️ Admins will NOT be removed.\n\nConfirm?`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ Confirm & Remove", "rf_confirm")
+          .text("❌ Cancel", "main_menu"),
+      }
+    );
+    return;
+  }
+
+  if (state.step === "remove_friend_enter_exceptions") {
+    if (!state.removeFriendData) return;
+    const excLines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const exceptions: string[] = [];
+    for (const line of excLines) {
+      const digits = line.replace(/[^0-9]/g, "");
+      if (digits.length >= 7) exceptions.push(digits);
+    }
+    state.removeFriendData.exceptions = exceptions;
+    const { selectedGroups, countryCodes = [], phoneNumbers = [] } = state.removeFriendData;
+    const groupList = selectedGroups.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+    const moreGroups = selectedGroups.length > 10 ? `\n<i>...+${selectedGroups.length - 10} more</i>` : "";
+    const ccList = countryCodes.map(c => `+${c}`).join(", ");
+    const excList = exceptions.slice(0, 10).map(e => `• +${esc(e)}`).join("\n");
+    const moreExc = exceptions.length > 10 ? `\n<i>...+${exceptions.length - 10} more</i>` : "";
+    await ctx.reply(
+      `👥 <b>Remove Friend — Confirm</b>\n\n` +
+      `<b>${selectedGroups.length} group(s):</b>\n${groupList}${moreGroups}\n\n` +
+      (phoneNumbers.length > 0 ? `<b>Full numbers to remove:</b> ${phoneNumbers.length}\n\n` : "") +
+      `<b>Country code(s):</b> ${ccList} — removes all non-admins with these codes\n` +
+      (exceptions.length > 0
+        ? `<b>Exceptions (will NOT be removed):</b>\n${excList}${moreExc}\n\n`
+        : `<i>No exceptions — all matching members will be removed</i>\n\n`) +
+      `🛡️ Admins will NOT be removed.\n\nConfirm?`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
