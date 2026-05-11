@@ -1443,11 +1443,24 @@ export async function joinGroupWithLink(
     if (signal?.aborted) return { success: false, error: "Cancelled" };
     try {
       const code = extractInviteCode(link);
-      const result = await session.socket.groupAcceptInvite(code);
+      // 15 s hard cap: without this, a stalled WA connection causes
+      // groupAcceptInvite to hang indefinitely and accumulate zombie
+      // socket requests that block ALL subsequent joins (0% stuck).
+      const result = await Promise.race([
+        session.socket.groupAcceptInvite(code),
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error("timeout")), 15_000)
+        ),
+      ]);
       let groupName = "Group";
       if (typeof result === "string" && result) {
         try {
-          const metadata = await session.socket.groupMetadata(result);
+          const metadata = await Promise.race([
+            session.socket.groupMetadata(result),
+            new Promise<never>((_, rej) =>
+              setTimeout(() => rej(new Error("timeout")), 10_000)
+            ),
+          ]);
           groupName = metadata?.subject || result;
         } catch {
           groupName = result;
