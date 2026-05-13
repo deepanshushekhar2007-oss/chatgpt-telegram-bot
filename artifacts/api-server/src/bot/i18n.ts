@@ -71,7 +71,7 @@ export async function setUserLanguage(userId: number, lang: Language): Promise<v
 
 // ── Translation cache ──────────────────────────────────────────────────────
 // Bounded in-memory cache. Each entry ~200 bytes; cap at 5000 entries → ~1 MB.
-const MEM_CACHE_MAX = 5000;
+const MEM_CACHE_MAX = 2000;
 const memCache = new Map<string, string>();
 
 function cacheKey(text: string, lang: Language): string {
@@ -325,7 +325,7 @@ const inflight = new Map<string, Promise<string>>();
 // entries on a 10-min cadence and hard-cap the map at 5000 keys (drop
 // oldest) so the worst case stays bounded.
 const negCacheUntil = new Map<string, number>();
-const NEG_CACHE_MAX = 5000;
+const NEG_CACHE_MAX = 1000;
 const NEG_CACHE_SWEEP_MS = 10 * 60 * 1000;
 setInterval(() => {
   const now = Date.now();
