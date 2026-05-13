@@ -17760,6 +17760,7 @@ export async function startBot() {
 
     try {
       await bot.start({
+        allowed_updates: ["message", "callback_query", "inline_query", "chosen_inline_result"],
         onStart: () => {
           console.log("Telegram bot started successfully!");
           retryCount = 0;
