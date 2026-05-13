@@ -999,22 +999,23 @@ async function checkForceSub(ctx: any): Promise<boolean> {
 
   const channelName = FORCE_SUB_CHANNEL.replace(/^@/, "");
   const kb = new InlineKeyboard()
-    .url("📢 Join Channel", `https://t.me/${channelName}`).text("✅ I Joined", "check_joined");
+    .url("🔗 Join Now", `https://t.me/${channelName}`).row()
+    .text("🔓 I Joined", "check_joined");
+  const msg =
+    "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n" +
+    "🔒  <b>SYSTEM  LOCKED</b>  🔒\n" +
+    "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n" +
+    "⛔ <b>Access Denied!</b>\n\n" +
+    "You must join our official channel\n" +
+    "before using this bot.\n\n" +
+    `📡 <b>Channel:</b>  @${esc(channelName)}\n\n` +
+    "✅ Join → Tap the button → <b>Unlocked!</b>\n\n" +
+    "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰";
   try {
-    await ctx.reply(
-      "⛔ <b>Channel Subscription Required!</b>\n\n" +
-      `📢 Join our channel to use this bot!\n\nChannel: @${esc(channelName)}\n\n` +
-      "After joining click <b>✅ I Joined</b>",
-      { parse_mode: "HTML", reply_markup: kb }
-    );
+    await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
   } catch {
     try {
-      await ctx.editMessageText(
-        "⛔ <b>Channel Subscription Required!</b>\n\n" +
-        `📢 Join our channel to use this bot!\n\nChannel: @${esc(channelName)}\n\n` +
-        "After joining click <b>✅ I Joined</b>",
-        { parse_mode: "HTML", reply_markup: kb }
-      );
+      await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
     } catch {}
   }
   return false;
