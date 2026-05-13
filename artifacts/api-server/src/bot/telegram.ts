@@ -190,12 +190,12 @@ class TTLCache<K, V> {
   }
 }
 
-/** Ban status per userId — 45 s TTL. */
-const bannedCache = new TTLCache<number, boolean>(45_000);
-/** Access status per userId — 45 s TTL. */
-const accessCache = new TTLCache<number, boolean>(45_000);
-/** Whether user has a stored WA session — 60 s TTL. Invalidated on disconnect/logout. */
-const hasSessionCache = new TTLCache<string, boolean>(60_000);
+/** Ban status per userId — 300 s TTL. Admin /ban and /unban immediately call bannedCache.del(). */
+const bannedCache = new TTLCache<number, boolean>(300_000);
+/** Access status per userId — 300 s TTL. All access-change commands call accessCache.del(). */
+const accessCache = new TTLCache<number, boolean>(300_000);
+/** Whether user has a stored WA session — 120 s TTL. Invalidated on disconnect/logout. */
+const hasSessionCache = new TTLCache<string, boolean>(120_000);
 
 // Periodic sweep: remove expired entries from all caches every 5 minutes.
 setInterval(() => {
@@ -905,7 +905,15 @@ setInterval(async () => {
   }
 }, TRIAL_WARNING_INTERVAL_MS);
 
+// In-memory set of userIds already tracked this process lifetime.
+// Skips the MongoDB $addToSet write for users we've already recorded —
+// the write is a no-op in MongoDB anyway (set semantics), so this saves
+// one round-trip per /start for every returning user.
+const _trackedUsersThisSession = new Set<number>();
+
 async function trackUser(userId: number): Promise<void> {
+  if (_trackedUsersThisSession.has(userId)) return;
+  _trackedUsersThisSession.add(userId);
   return trackUserMongo(userId);
 }
 
