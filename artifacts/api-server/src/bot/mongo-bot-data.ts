@@ -62,12 +62,27 @@ const DEFAULT_DATA: BotData = {
   redeemCodes: {},
 };
 
+// ── In-memory cache for bot_data ────────────────────────────────────────────
+// loadBotData() is called on EVERY button press (middleware + handlers).
+// Without a cache that is a MongoDB round-trip (~50-150 ms) per click.
+// Cache TTL of 8 s means: stale window is tiny, admin changes propagate
+// within 8 s, but the vast majority of reads are served from RAM in < 1 ms.
+// saveBotData() always writes to MongoDB AND immediately replaces the cache
+// with the freshly-saved object — so writes are always consistent.
+let _botDataCache: BotData | null = null;
+let _botDataCacheAt = 0;
+const BOT_DATA_CACHE_TTL_MS = 8_000; // 8 seconds
+
 export async function loadBotData(): Promise<BotData> {
+  const now = Date.now();
+  if (_botDataCache && now - _botDataCacheAt < BOT_DATA_CACHE_TTL_MS) {
+    return _botDataCache;
+  }
   try {
     const col = await getCollection("bot_data");
     const doc = await col.findOne({ _id: "main" as any });
     if (doc) {
-      return {
+      const fresh: BotData = {
         subscriptionMode: doc.subscriptionMode ?? false,
         accessList: doc.accessList ?? {},
         bannedUsers: doc.bannedUsers ?? [],
@@ -81,14 +96,25 @@ export async function loadBotData(): Promise<BotData> {
         referralAccess: doc.referralAccess ?? {},
         redeemCodes: doc.redeemCodes ?? {},
       };
+      _botDataCache = fresh;
+      _botDataCacheAt = now;
+      return fresh;
     }
   } catch (err: any) {
     console.error("[MongoDB] loadBotData error:", err?.message);
+    if (_botDataCache) return _botDataCache; // serve stale on error
   }
-  return { ...DEFAULT_DATA };
+  const fallback = { ...DEFAULT_DATA };
+  _botDataCache = fallback;
+  _botDataCacheAt = now;
+  return fallback;
 }
 
 export async function saveBotData(data: BotData): Promise<void> {
+  // Update cache immediately so subsequent reads in the same request see
+  // the new data without waiting for MongoDB or for the TTL to expire.
+  _botDataCache = data;
+  _botDataCacheAt = Date.now();
   try {
     const col = await getCollection("bot_data");
     await col.updateOne(
