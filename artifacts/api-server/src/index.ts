@@ -194,7 +194,7 @@ async function main() {
     // header in telegram.ts. The worst case is: an idle WhatsApp socket
     // gets evicted, and the user lazily-reconnects on next /start with no
     // re-pairing required (creds are in MongoDB).
-    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "360");
+    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "280"); // reduced from 360
     const MEM_WATCHDOG_COOLDOWN_MS = Number(process.env["MEM_WATCHDOG_COOLDOWN_MS"] || String(2 * 60 * 1000));
     const MEM_WATCHDOG_INTERVAL_MS = Number(process.env["MEM_WATCHDOG_INTERVAL_MS"] || String(30 * 1000));
     let lastWatchdogPurgeAt = 0;
