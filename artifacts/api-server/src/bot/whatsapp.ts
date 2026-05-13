@@ -113,7 +113,7 @@ async function forceMemoryReclaim(): Promise<void> {
 // your real RAM budget.
 const IDLE_EVICTION_MS = Number(process.env["WA_IDLE_EVICT_MS"] || 30 * 60 * 1000); // 30 min
 const MAX_LIVE_SESSIONS = Number(process.env["WA_MAX_LIVE_SESSIONS"] || 500);
-const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 380);
+const MEMORY_PRESSURE_RSS_MB = Number(process.env["WA_MEMORY_PRESSURE_MB"] || 280); // reduced from 380
 
 export function markSessionActive(userId: string): void {
   const s = sessions.get(userId);
