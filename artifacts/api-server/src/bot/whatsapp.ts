@@ -44,6 +44,46 @@ interface WhatsAppSession {
 
 const sessions: Map<string, WhatsAppSession> = new Map();
 
+// ── Group fetch caches ────────────────────────────────────────────────────
+// groupFetchAllParticipating() hits the WA socket and takes 1–5 s.
+// Cache the result per user for 45 s — covers multiple back-to-back
+// button taps (select groups, paginate, etc.) without re-fetching.
+// groupMetadata() is a per-group socket call (~200–500 ms each).
+// Cache per user+groupId for 60 s.
+// Both caches are cleared when the session is evicted so stale data
+// from a disconnected socket never bleeds into a fresh reconnect.
+interface GroupFetchEntry { groups: Record<string, any>; fetchedAt: number }
+const groupFetchCache = new Map<string, GroupFetchEntry>();
+const GROUP_FETCH_TTL = 45_000;
+
+interface GroupMetaEntry { meta: any; fetchedAt: number }
+const groupMetaCache = new Map<string, GroupMetaEntry>();
+const GROUP_META_TTL = 60_000;
+
+async function fetchAllGroupsCached(userId: string, socket: ReturnType<typeof makeWASocket>): Promise<Record<string, any>> {
+  const cached = groupFetchCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < GROUP_FETCH_TTL) return cached.groups;
+  const groups = await socket.groupFetchAllParticipating();
+  groupFetchCache.set(userId, { groups, fetchedAt: Date.now() });
+  return groups;
+}
+
+async function getGroupMetaCached(userId: string, groupId: string, socket: ReturnType<typeof makeWASocket>): Promise<any> {
+  const key = `${userId}:${groupId}`;
+  const cached = groupMetaCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < GROUP_META_TTL) return cached.meta;
+  const meta = await socket.groupMetadata(groupId);
+  groupMetaCache.set(key, { meta, fetchedAt: Date.now() });
+  return meta;
+}
+
+function clearGroupCaches(userId: string): void {
+  groupFetchCache.delete(userId);
+  for (const key of groupMetaCache.keys()) {
+    if (key.startsWith(`${userId}:`)) groupMetaCache.delete(key);
+  }
+}
+
 // Admin session sharing: maps alias userId (e.g. admin's Telegram ID string)
 // to the real session userId. When an alias is set, all WhatsApp lookups for
 // the alias transparently resolve to the real session — so the admin can use
@@ -186,6 +226,7 @@ function evictSessionSocket(userId: string, session: WhatsAppSession): void {
   // Remove the session entry entirely so the next interaction triggers a
   // full lazy restore (which loads creds from MongoDB and reopens the socket).
   sessions.delete(userId);
+  clearGroupCaches(userId);
   console.log(`[WA][EVICT][${userId}] Idle socket closed to free memory (cleared ${cleared} timers)`);
   // Best-effort: ask V8 to reclaim now so RSS actually drops on disconnect.
   void forceMemoryReclaim();
@@ -1479,7 +1520,7 @@ export async function joinGroupWithLink(
       if (typeof result === "string" && result) {
         try {
           const metadata = await Promise.race([
-            session.socket.groupMetadata(result),
+            getGroupMetaCached(userId, result, session.socket),
             new Promise<never>((_, rej) =>
               setTimeout(() => rej(new Error("timeout")), 10_000)
             ),
@@ -1781,7 +1822,7 @@ export async function checkContactsInGroup(
 
   try {
     const [metaResult, pendingResult] = await Promise.allSettled([
-      session.socket.groupMetadata(groupId),
+      getGroupMetaCached(userId, groupId, session.socket),
       session.socket.groupRequestParticipantsList(groupId),
     ]);
 
@@ -1928,7 +1969,7 @@ export async function getAllGroups(userId: string): Promise<GroupInfo[]> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
-    const groups = await session.socket.groupFetchAllParticipating();
+    const groups = await fetchAllGroupsCached(userId, session.socket);
     const sock = session.socket;
 
     const rawMyJid = sock.user?.id || "";
@@ -2013,7 +2054,7 @@ export async function getGroupInviteLink(userId: string, groupId: string, maxRet
     // possible recovery path active.
     if (attempt >= 3) {
       try {
-        const meta = await session.socket!.groupMetadata(groupId);
+        const meta = await getGroupMetaCached(userId, groupId, session.socket!);
         if (meta && (meta as any).inviteCode) {
           return `https://chat.whatsapp.com/${(meta as any).inviteCode}`;
         }
@@ -2069,7 +2110,7 @@ export async function getGroupParticipants(userId: string, groupId: string): Pro
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
-    const meta = await session.socket.groupMetadata(groupId);
+    const meta = await getGroupMetaCached(userId, groupId, session.socket);
     return meta.participants.map((p: any) => {
       const jidRaw: string = p.id || "";
       let phone: string;
@@ -2105,7 +2146,7 @@ export async function getGroupPendingList(
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return [];
   try {
-    const groups = await session.socket.groupFetchAllParticipating();
+    const groups = await fetchAllGroupsCached(userId, session.socket);
     const rawMyJid = session.socket.user?.id || "";
     const myLid = (session.socket.user as any)?.lid || "";
     const myJidNormalized = rawMyJid ? rawMyJid.replace(/:\d+@/, "@") : "";
@@ -2472,7 +2513,7 @@ export async function isUserInGroup(
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
-    const groups = await session.socket.groupFetchAllParticipating();
+    const groups = await fetchAllGroupsCached(userId, session.socket);
     return groupId in groups;
   } catch {
     return false;
