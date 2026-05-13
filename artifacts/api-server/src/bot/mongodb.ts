@@ -10,7 +10,7 @@ export async function getMongoDb(): Promise<Db> {
     throw new Error("MONGODB_URI environment variable is required");
   }
   client = new MongoClient(uri, {
-    maxPoolSize: 3,       // Limit pool (default is 5+, each connection ~10MB)
+    maxPoolSize: 2,       // Limit pool (default is 5+, each connection ~10MB)
     minPoolSize: 1,       // Keep min 1 connection alive
     serverSelectionTimeoutMS: 10000,
     socketTimeoutMS: 30000,
