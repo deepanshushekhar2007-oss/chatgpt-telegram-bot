@@ -2522,16 +2522,11 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
     return;
   }
 
-  // No saved session at all — nothing to wait for, the menu's "Connect
-  // WhatsApp" button will handle pairing.
-  let hasStored = hasSessionCache.get(uid);
-  if (hasStored === undefined) {
-    try { hasStored = await hasStoredWhatsAppSession(uid); hasSessionCache.set(uid, hasStored); } catch { hasStored = false; }
-  }
-  if (!hasStored) return;
-
-  // Send the initial progress message; if it fails, abort silently — the
-  // menu will still be shown by the caller.
+  // ── Instant message first, MongoDB check in parallel ─────────────────
+  // Send the progress toast IMMEDIATELY so the user sees feedback right
+  // away (before any MongoDB round-trip). We then verify the stored
+  // session exists in the background; if it turns out there is no stored
+  // session we silently delete the optimistic message.
   let msg: any;
   try {
     msg = await ctx.reply(
@@ -2539,6 +2534,18 @@ async function showWhatsAppConnectingProgress(ctx: any, userId: number): Promise
       { parse_mode: "HTML" }
     );
   } catch {
+    return;
+  }
+
+  // Check stored session AFTER the message is already on screen.
+  let hasStored = hasSessionCache.get(uid);
+  if (hasStored === undefined) {
+    try { hasStored = await hasStoredWhatsAppSession(uid); hasSessionCache.set(uid, hasStored); } catch { hasStored = false; }
+  }
+  if (!hasStored) {
+    // No saved session — delete the optimistic message silently and let
+    // the menu's "Connect WhatsApp" button handle pairing.
+    ctx.api.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
     return;
   }
 
