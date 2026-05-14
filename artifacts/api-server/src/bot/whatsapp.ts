@@ -2601,3 +2601,48 @@ export async function waitForWhatsAppConnected(
   await restorePromise;
   return isConnected(userId);
 }
+
+// ── Multi-slot auto WA helpers ────────────────────────────────────────────────
+// Slot 1 = userId_auto (backward compat), slot 2 = userId_auto_2, etc.
+export function getAutoSlotUserId(primaryUserId: string, slot: number): string {
+  return slot === 1 ? `${primaryUserId}_auto` : `${primaryUserId}_auto_${slot}`;
+}
+
+// Returns info for every extra auto WA slot that is currently connected.
+export function getAllConnectedAutoSlots(primaryUserId: string): Array<{ slot: number; userId: string; number: string | null }> {
+  const result: Array<{ slot: number; userId: string; number: string | null }> = [];
+  for (let slot = 1; slot <= 10; slot++) {
+    const uid = getAutoSlotUserId(primaryUserId, slot);
+    if (isConnected(uid)) {
+      result.push({ slot, userId: uid, number: getConnectedWhatsAppNumber(uid) });
+    }
+  }
+  return result;
+}
+
+export function getConnectedAutoCount(primaryUserId: string): number {
+  return getAllConnectedAutoSlots(primaryUserId).length;
+}
+
+// Sends a VCard contact card from senderUserId to recipientJid.
+// Used for auto-save contacts before starting multi-WA chat.
+export async function sendContactCard(
+  senderUserId: string,
+  recipientJid: string,
+  contactName: string,
+  contactPhone: string
+): Promise<boolean> {
+  const session = useSession(senderUserId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    const phone = contactPhone.replace(/[^0-9]/g, "");
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${contactName}\nTEL;type=CELL:+${phone}\nEND:VCARD`;
+    await session.socket.sendMessage(recipientJid, {
+      contacts: { displayName: contactName, contacts: [{ vcard }] },
+    });
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${senderUserId}] sendContactCard error:`, err?.message);
+    return false;
+  }
+}
