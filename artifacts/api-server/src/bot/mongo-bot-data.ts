@@ -45,6 +45,11 @@ interface BotData {
   // Admin creates codes with /redeem CODE DAYS MAXUSERS.
   // Users redeem with /redeem CODE to get instant access.
   redeemCodes: Record<string, RedeemCode>;
+  // ── Auto WS (Multi-WhatsApp) limits ──────────────────────────────────────
+  // Admin sets per-user max extra WA count via /autows <userId> <limit>.
+  // Value = number of EXTRA auto WA slots (beyond the primary).
+  // Default = 1 (only userId_auto). 0 = allow primary only (no auto).
+  autoWsLimits: Record<string, number>;
 }
 
 const DEFAULT_DATA: BotData = {
@@ -60,6 +65,7 @@ const DEFAULT_DATA: BotData = {
   referredBy: {},
   referralAccess: {},
   redeemCodes: {},
+  autoWsLimits: {},
 };
 
 // ── In-memory cache for bot_data ────────────────────────────────────────────
@@ -95,6 +101,7 @@ export async function loadBotData(): Promise<BotData> {
         referredBy: doc.referredBy ?? {},
         referralAccess: doc.referralAccess ?? {},
         redeemCodes: doc.redeemCodes ?? {},
+        autoWsLimits: doc.autoWsLimits ?? {},
       };
       _botDataCache = fresh;
       _botDataCacheAt = now;
@@ -133,6 +140,7 @@ export async function saveBotData(data: BotData): Promise<void> {
           referredBy: data.referredBy,
           referralAccess: data.referralAccess,
           redeemCodes: data.redeemCodes,
+          autoWsLimits: data.autoWsLimits,
           updatedAt: new Date(),
         },
       },
@@ -733,4 +741,17 @@ export async function deleteUserState(userId: number): Promise<void> {
     const col = await getCollection('user_states');
     await col.deleteOne({ userId });
   } catch {}
+}
+
+// ── Auto WS limit helpers ─────────────────────────────────────────────────────
+// Returns number of extra auto WA slots this user may connect for autochat.
+// Default = 1 (just userId_auto). Admin can set higher via /autows command.
+export function getAutoWsLimit(userId: number | string, data: BotData): number {
+  const val = data.autoWsLimits?.[String(userId)];
+  return (val !== undefined && val !== null) ? val : 1;
+}
+
+export function setAutoWsLimit(userId: number | string, limit: number, data: BotData): void {
+  if (!data.autoWsLimits) data.autoWsLimits = {};
+  data.autoWsLimits[String(userId)] = limit;
 }
