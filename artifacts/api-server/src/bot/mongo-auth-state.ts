@@ -338,6 +338,31 @@ export async function cleanupStaleSessions(
   return { deletedSessions, deletedKeys, deletedUnpaired };
 }
 
+export interface WaContactRecord {
+  jid: string;
+  name: string;
+  notify?: string;
+}
+
+export async function saveWaContact(
+  userId: string,
+  jid: string,
+  name: string
+): Promise<void> {
+  const col = await getCollection("wa_contacts");
+  await col.updateOne(
+    { userId, jid },
+    { $set: { userId, jid, name, notify: name, updatedAt: new Date() } },
+    { upsert: true }
+  );
+}
+
+export async function loadWaContacts(userId: string): Promise<WaContactRecord[]> {
+  const col = await getCollection("wa_contacts");
+  const docs = await col.find({ userId }).toArray();
+  return docs.map((d: any) => ({ jid: d.jid, name: d.name, notify: d.notify || d.name }));
+}
+
 /**
  * Get session info for all stored sessions — used by admin Telegram command.
  */
