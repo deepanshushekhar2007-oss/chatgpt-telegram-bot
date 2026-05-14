@@ -1352,6 +1352,9 @@ interface AcfSession {
   nextDelayMs: number;
   rotationIndex: number;
   autoChatExpiresAt?: number;
+  // all-to-all tracking
+  currentSenderIdx?: number;
+  currentReceiverIdx?: number;
 }
 
 const CHAT_FRIEND_PAIRS: [string, string][] = [
@@ -1430,6 +1433,7 @@ const CHAT_FRIEND_PAIRS: [string, string][] = [
 ];
 
 // Sequential delay rotation: 1min → 2min → 3min → 4min → 5min → repeat
+// Used by Chat In Group and other single-WA flows.
 const CHAT_DELAY_ROTATION_MS = [
   1 * 60 * 1000,
   2 * 60 * 1000,
@@ -1450,15 +1454,28 @@ function getSequentialDelayMs(rotationIndex: number): number {
   return CHAT_DELAY_ROTATION_MS[rotationIndex % CHAT_DELAY_ROTATION_MS.length];
 }
 
-// Speed scales with number of connected WA accounts.
-// 2 WA = full speed (1.0×), each extra WA adds 7% speed, min 0.30×
+// Speed factor — kept for UI display only (percentage shown in menu).
+// 2 WA = 100%, 3 WA = 130%, 4 WA = 160%, etc.
 function getAcfSpeedFactor(waCount: number): number {
-  return Math.max(0.30, 1.0 - (waCount - 2) * 0.07);
+  return Math.min(2.0, 1.0 + (waCount - 2) * 0.30);
 }
 
-function getAcfDelayMs(rotationIndex: number, waCount: number): number {
-  const base = CHAT_DELAY_ROTATION_MS[rotationIndex % CHAT_DELAY_ROTATION_MS.length];
-  return Math.round(base * getAcfSpeedFactor(waCount));
+// Chat Friend delay: random 30–60 seconds per message when 2+ WA connected.
+// This matches WhatsApp's natural human-like chat rhythm.
+function getAcfDelayMs(_rotationIndex: number, _waCount: number): number {
+  return 30000 + Math.floor(Math.random() * 30001); // 30s–60s
+}
+
+// Build all directed pairs from N WA accounts: every sender → every other receiver.
+// e.g. N=3: [(0,1),(0,2),(1,0),(1,2),(2,0),(2,1)]
+function buildAllToAllPairs(n: number): [number, number][] {
+  const pairs: [number, number][] = [];
+  for (let s = 0; s < n; s++) {
+    for (let r = 0; r < n; r++) {
+      if (r !== s) pairs.push([s, r]);
+    }
+  }
+  return pairs;
 }
 
 // Auto chat duration options (in ms). 0 = unlimited (admin only).
@@ -13314,12 +13331,18 @@ function acfProgressText(session: AcfSession): string {
   const expiryText = session.autoChatExpiresAt
     ? `\n⏳ Time Remaining: <b>${formatRemaining(session.autoChatExpiresAt)}</b>`
     : "";
-  const waCountText = session.waCount && session.waCount > 2
-    ? `📱 WA Accounts: <b>${session.waCount}</b> · ⚡ Speed boost active\n`
+  const N = session.waCount ?? 2;
+  const waCountText = N >= 2
+    ? `📱 WA Accounts: <b>${N}</b>${N > 2 ? " · ⚡ All-to-All Mode" : ""}\n`
     : "";
+  // Show current direction: WA X → WA Y
+  const senderNum = (session.currentSenderIdx ?? 0) + 1;
+  const receiverNum = (session.currentReceiverIdx ?? 1) + 1;
+  const directionText = `📨 Now: <b>WA ${senderNum} → WA ${receiverNum}</b>\n`;
   return (
     "👫 <b>Chat Friend Running...</b>\n\n" +
     waCountText +
+    directionText +
     `🔁 Cycle: <b>${session.cycle}</b>\n` +
     `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
     `📤 Sent: <b>${session.sent}</b>\n` +
@@ -13463,9 +13486,14 @@ async function runChatFriendBackground(
   let accessCheckCounter = 0;
   const ACCESS_CHECK_EVERY = 10;
 
+  // Build all-to-all directed pairs once: every sender → every other receiver.
+  // e.g. N=2: [(0,1),(1,0)]  N=3: [(0,1),(0,2),(1,0),(1,2),(2,0),(2,1)]
+  const allToAllPairs = buildAllToAllPairs(N);
+  const totalDirectedPairs = allToAllPairs.length;
+
   try {
     let stepCount = 0;   // total send steps taken
-    let pairMsgIdx = 0;  // current CHAT_FRIEND_PAIRS index
+    let pairMsgIdx = 0;  // current CHAT_FRIEND_PAIRS message index
 
     while (!session.cancelled && session.running) {
       if (session.cancelled) break;
@@ -13512,22 +13540,23 @@ async function runChatFriendBackground(
         } catch {}
       }
 
-      // ── N-way round-robin: WA[senderIdx] → WA[receiverIdx] ───────────────
-      // Pattern per cycle: (0→1), (1→2), ..., (N-1→0)
-      const senderIdx = stepCount % N;
-      const receiverIdx = (senderIdx + 1) % N;
+      // ── All-to-All: every WA sends to every other WA in round-robin ───────
+      // Pair order: (0→1),(0→2),(1→0),(1→2),(2→0),(2→1),… then repeats.
+      const [senderIdx, receiverIdx] = allToAllPairs[stepCount % totalDirectedPairs];
       const senderUserId = resolvedUserIds[senderIdx];
       const receiverJid = resolvedJids[receiverIdx];
 
-      // Pick message text: alternate msg1/msg2 from current pair
+      // Pick message text: alternate msg1/msg2 from current CHAT_FRIEND_PAIRS entry
       const [msg1, msg2] = CHAT_FRIEND_PAIRS[pairMsgIdx % CHAT_FRIEND_PAIRS.length];
       const msg = senderIdx % 2 === 0 ? msg1 : msg2;
 
       session.currentPair = (pairMsgIdx % CHAT_FRIEND_PAIRS.length) + 1;
-      session.cycle = Math.floor(stepCount / (N * CHAT_FRIEND_PAIRS.length)) + 1;
+      session.cycle = Math.floor(stepCount / (totalDirectedPairs * CHAT_FRIEND_PAIRS.length)) + 1;
+      session.currentSenderIdx = senderIdx;
+      session.currentReceiverIdx = receiverIdx;
 
-      // Advance pair index after every full N-step round
-      if (stepCount > 0 && stepCount % N === 0) {
+      // Advance message pair after a full round of all directed pairs
+      if (stepCount > 0 && stepCount % totalDirectedPairs === 0) {
         pairMsgIdx++;
       }
 
