@@ -29,6 +29,10 @@ async function buildAll() {
     // - use path traversal to read files (e.g. @google-cloud/secret-manager loads sibling .proto files)
     external: [
       "*.node",
+      "grammy",
+      "@whiskeysockets/baileys",
+      "mongodb",
+      "qrcode",
       "sharp",
       "better-sqlite3",
       "sqlite3",
@@ -54,11 +58,6 @@ async function buildAll() {
       "knex",
       "typeorm",
       "protobufjs",
-      "grammy",
-      "mongodb",
-      "qrcode",
-      "@whiskeysockets/baileys",
-      "@hapi/boom",
       "onnxruntime-node",
       "@tensorflow/*",
       "@prisma/client",
