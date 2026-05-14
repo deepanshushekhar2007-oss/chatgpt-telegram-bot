@@ -1297,6 +1297,19 @@ interface UserState {
     // Cancel signal for the background rename loop
     cancel?: boolean;
   };
+  // ── File Editor (VCF Editor, Splitter, Merge, Number to VCF) ─────────────
+  fileEditorData?: {
+    mode: "vcf_editor" | "splitter" | "merger" | "number_to_vcf";
+    uploadedFiles?: Array<{ fileName: string; contacts: Array<{ name: string; phone: string }> }>;
+    baseName?: string;
+    contactName?: string;
+    startFileNum?: number;
+    contactStartNum?: number;
+    contactsPerFile?: number;
+    splitCount?: number;
+    mergerTargetFormat?: "vcf" | "txt" | "csv";
+    numberLines?: string[];
+  };
 }
 
 interface AutoChatSession {
@@ -3058,8 +3071,10 @@ bot.command("help", async (ctx) => {
       ? `🤖 16. Auto Chat ⭐ — 2nd WhatsApp se friends/groups ko auto messages bhejo\n\n`
       : `🤖 16. Auto Chat ⭐ Paid — Buy karne ke liye ${OWNER_USERNAME} ko msg karo\n\n`) +
     `🛡️ 17. Auto Accepter — Selected groups mein pending join requests auto-accept (15min–2hr)\n\n` +
+    `📁 /file — VCF File Editor (FREE for all users):\n` +
+    `   📝 VCF Editor  ✂️ Splitter  🔗 Merge  🔢 Number to VCF\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💬 /start — Main menu  |  /help — Yeh message\n\n` +
+    `💬 /start — Main menu  |  /help — Yeh message  |  /file — File Editor\n\n` +
     `⚠️ Notes:\n` +
     `• Group features ke liye admin hona zaroori hai\n` +
     `• Approval features ke liye "Approval required" mode ON hona chahiye\n` +
@@ -17471,6 +17486,54 @@ bot.on("message:document", async (ctx) => {
   const fileName = (doc.file_name || "").toLowerCase();
   const isVcf = fileName.endsWith(".vcf");
   const isTxt = fileName.endsWith(".txt");
+  const isCsv = fileName.endsWith(".csv");
+  const origFileName = doc.file_name || "file";
+
+  // ── File Editor upload steps ─────────────────────────────────────────────
+  const feUploadSteps = ["fe_upload_files", "fe_split_upload", "fe_merge_upload"];
+  if (feUploadSteps.includes(state.step || "") && state.fileEditorData) {
+    if (!isVcf && !isTxt && !isCsv) {
+      await ctx.reply("❌ Please send a <b>.vcf</b>, <b>.txt</b>, or <b>.csv</b> file.", { parse_mode: "HTML" });
+      return;
+    }
+    try {
+      const file = await retryGetFile(ctx.api, doc.file_id);
+      if (!file.file_path) { await ctx.reply("❌ Could not download file. Please resend it."); return; }
+      const rawContent = await downloadText(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+      const ext = isVcf ? ".vcf" : isCsv ? ".csv" : ".txt";
+      const contacts = parseFileToContacts(rawContent, ext);
+      if (!contacts.length) {
+        await ctx.reply(`❌ No contacts found in <b>${esc(origFileName)}</b>. Please send a file with valid phone numbers.`, { parse_mode: "HTML" });
+        return;
+      }
+      if (!state.fileEditorData.uploadedFiles) state.fileEditorData.uploadedFiles = [];
+      if (state.step === "fe_split_upload") {
+        state.fileEditorData.uploadedFiles = [{ fileName: origFileName, contacts }];
+        state.step = "fe_split_count";
+        await ctx.reply(
+          `✅ <b>File received: ${esc(origFileName)}</b>\n` +
+          `👤 Total contacts: <b>${contacts.length}</b>\n\n` +
+          `✂️ <b>Enter how many contacts per split file:</b>\n\nExample: <code>500</code>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+        );
+      } else {
+        state.fileEditorData.uploadedFiles.push({ fileName: origFileName, contacts });
+        const total = state.fileEditorData.uploadedFiles.length;
+        const totalContacts = state.fileEditorData.uploadedFiles.reduce((s, f) => s + f.contacts.length, 0);
+        const doneBtn = state.step === "fe_upload_files" ? "fe_upload_done" : "fe_merge_done";
+        await ctx.reply(
+          `✅ <b>${esc(origFileName)}</b> added (${contacts.length} contacts)\n` +
+          `📁 Files so far: <b>${total}</b> | Total contacts: <b>${totalContacts}</b>\n\n` +
+          `Send more files or tap <b>✅ Done</b>.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done Uploading", doneBtn).row().text("❌ Cancel", "file_menu") }
+        );
+      }
+    } catch (err: any) {
+      await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+    }
+    return;
+  }
+
   if (!isVcf && !isTxt) { await ctx.reply("❌ Please send a .vcf or .txt file only."); return; }
 
   if (state.step === "approval_admin_input" && state.approvalData) {
@@ -18638,6 +18701,367 @@ bot.callbackQuery("cgn_links_done", async (ctx) => {
 // to ensure they intercept first. The main text handler is already registered
 // above, so we use a separate middleware to handle these states.
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /file — VCF File Editor  (FREE for all users)
+// Tools: VCF Editor | Splitter | Merge | Number to VCF
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseFileToContacts(rawContent: string, ext: string): Array<{ name: string; phone: string }> {
+  if (ext === ".vcf") return parseVCF(rawContent);
+  if (ext === ".csv") return parseCsvFileContent(rawContent);
+  return parseTXT(rawContent);
+}
+
+function parseCsvFileContent(raw: string): Array<{ name: string; phone: string }> {
+  const contacts: Array<{ name: string; phone: string }> = [];
+  for (const line of raw.split(/\r?\n/)) {
+    for (const cell of line.split(/,|\t/)) {
+      const cleaned = cell.replace(/[^0-9+]/g, "").trim();
+      if (cleaned.length >= 7) {
+        contacts.push({ name: "Contact", phone: cleaned.startsWith("+") ? cleaned : "+" + cleaned });
+        break;
+      }
+    }
+  }
+  return contacts;
+}
+
+function generateVcfContent(contacts: Array<{ name: string; phone: string }>): string {
+  return contacts.map(c =>
+    `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${c.name}\r\nTEL;TYPE=CELL:${c.phone}\r\nEND:VCARD\r\n`
+  ).join("");
+}
+function generateTxtContent(contacts: Array<{ name: string; phone: string }>): string {
+  return contacts.map(c => c.phone).join("\n");
+}
+function generateCsvContent(contacts: Array<{ name: string; phone: string }>): string {
+  return "Name,Phone\n" + contacts.map(c => `"${c.name}","${c.phone}"`).join("\n");
+}
+function padNum(n: number, max: number): string {
+  if (max >= 1000) return String(n).padStart(4, "0");
+  if (max >= 100) return String(n).padStart(3, "0");
+  if (max >= 10) return String(n).padStart(2, "0");
+  return String(n);
+}
+function fileEditorMenu(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("📝 VCF Editor", "fe_vcf_editor").row()
+    .text("✂️ Splitter", "fe_splitter").row()
+    .text("🔗 Merge", "fe_merger").row()
+    .text("🔢 Number to VCF", "fe_n2v").row()
+    .text("🏠 Main Menu", "main_menu");
+}
+
+bot.command("file", async (ctx) => {
+  const userId = ctx.from!.id;
+  await trackUser(userId);
+  if (await isBanned(userId)) return;
+  userStates.set(userId, { step: "file_menu" });
+  await ctx.reply(
+    `📁 <b>File Editor</b>\n\n` +
+    `Convert, split, merge, and manage your contact files.\n` +
+    `✅ <b>FREE for everyone</b> — no subscription required.\n\n` +
+    `Choose a tool:`,
+    { parse_mode: "HTML", reply_markup: fileEditorMenu() }
+  );
+});
+
+bot.callbackQuery("file_menu", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  userStates.set(userId, { step: "file_menu" });
+  const txt = `📁 <b>File Editor</b>\n\nConvert, split, merge, and manage your contact files.\n✅ <b>FREE for everyone</b> — no subscription required.\n\nChoose a tool:`;
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: fileEditorMenu() }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: fileEditorMenu() }); }
+});
+
+// ── VCF Editor ────────────────────────────────────────────────────────────────
+bot.callbackQuery("fe_vcf_editor", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  userStates.set(userId, { step: "fe_upload_files", fileEditorData: { mode: "vcf_editor", uploadedFiles: [] } });
+  const txt = `📝 <b>VCF Editor</b>\n\nSend your file(s): <b>.vcf, .txt, .csv</b>\nYou can send multiple files one by one.\nTap <b>✅ Done</b> when all files are uploaded.`;
+  const kb = new InlineKeyboard().text("✅ Done Uploading", "fe_upload_done").row().text("🔙 Back", "file_menu");
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: kb }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: kb }); }
+});
+
+bot.callbackQuery("fe_upload_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "fe_upload_files" || !state.fileEditorData) {
+    try { await ctx.editMessageText("⚠️ Session expired. Send /file to start again."); } catch {}
+    return;
+  }
+  const files = state.fileEditorData.uploadedFiles || [];
+  if (!files.length) {
+    await ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
+    return;
+  }
+  const totalContacts = files.reduce((sum, f) => sum + f.contacts.length, 0);
+  state.step = "fe_vcf_step1_basename";
+  const txt =
+    `✅ <b>${files.length} file(s) received — ${totalContacts} contacts total</b>\n\n` +
+    `📝 <b>Step 1/5: Enter the file name (base name)</b>\n\nExample: <code>SPIDY</code>\n\nFiles will be named: <b>SPIDY 1.vcf, SPIDY 2.vcf, ...</b>`;
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }); }
+});
+
+bot.callbackQuery("fe_confirm_vcf", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || !state.fileEditorData) {
+    try { await ctx.editMessageText("⚠️ Session expired. Send /file to start again."); } catch {}
+    return;
+  }
+  const d = state.fileEditorData;
+  const allContacts = (d.uploadedFiles || []).flatMap(f => f.contacts);
+  const baseName = d.baseName!;
+  const contactName = d.contactName!;
+  const startFileNum = d.startFileNum!;
+  const contactStartNum = d.contactStartNum!;
+  const perFile = d.contactsPerFile!;
+  try { await ctx.editMessageText("⚡ <b>Converting...</b>", { parse_mode: "HTML" }); } catch {}
+
+  const totalFiles = Math.ceil(allContacts.length / perFile);
+  const maxFileNum = startFileNum + totalFiles - 1;
+  const vcfFiles: Array<{ name: string; contacts: number }> = [];
+  let contactCounter = contactStartNum;
+
+  for (let fi = 0; fi < totalFiles; fi++) {
+    const fileNum = startFileNum + fi;
+    const fileNumStr = padNum(fileNum, maxFileNum);
+    const fileName = `${baseName} ${fileNumStr}.vcf`;
+    const slice = allContacts.slice(fi * perFile, (fi + 1) * perFile);
+    const vcfContacts = slice.map((c, i) => ({
+      name: `${contactName} ${padNum(contactCounter + i, contactStartNum + allContacts.length)}`,
+      phone: c.phone,
+    }));
+    contactCounter += slice.length;
+    const vcfContent = generateVcfContent(vcfContacts);
+    try {
+      await ctx.api.sendDocument(ctx.chat!.id, new InputFile(Buffer.from(vcfContent, "utf8"), fileName), {
+        caption: `📁 <b>${esc(fileName)}</b> — ${vcfContacts.length} contacts`,
+        parse_mode: "HTML",
+      });
+      vcfFiles.push({ name: fileName, contacts: vcfContacts.length });
+    } catch {}
+  }
+  userStates.delete(userId);
+  await ctx.api.sendMessage(ctx.chat!.id,
+    `✅ <b>Conversion Complete!</b>\n\n` +
+    `• Total contacts processed: <b>${allContacts.length}</b>\n` +
+    `• VCF files created: <b>${vcfFiles.length}</b>\n` +
+    `• Contacts per file: <b>${perFile}</b>\n` +
+    `• File range: <b>${startFileNum}</b> → <b>${maxFileNum}</b>\n\n` +
+    `📁 Files:\n` + vcfFiles.map(f => `${esc(f.name)} (${f.contacts} contacts)`).join("\n") +
+    `\n\n🏁 Done! Use /file to start again.`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Menu", "file_menu").text("🏠 Main Menu", "main_menu") }
+  );
+});
+
+// ── Splitter ──────────────────────────────────────────────────────────────────
+bot.callbackQuery("fe_splitter", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  userStates.set(userId, { step: "fe_split_upload", fileEditorData: { mode: "splitter", uploadedFiles: [] } });
+  const txt = `✂️ <b>Splitter</b>\n\nSend <b>1 file</b> (.vcf, .txt, .csv) to split.\nThe bot will show total contacts, then ask how many per split.`;
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "file_menu") }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "file_menu") }); }
+});
+
+bot.callbackQuery("fe_do_split", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || !state.fileEditorData || state.fileEditorData.mode !== "splitter") {
+    try { await ctx.editMessageText("⚠️ Session expired."); } catch {}
+    return;
+  }
+  const d = state.fileEditorData;
+  const files = d.uploadedFiles || [];
+  if (!files.length) { try { await ctx.editMessageText("⚠️ No file found."); } catch {} return; }
+  const splitCount = d.splitCount!;
+  const sourceFile = files[0];
+  const allContacts = sourceFile.contacts;
+  const totalContacts = allContacts.length;
+  const totalParts = Math.ceil(totalContacts / splitCount);
+  const origExt = sourceFile.fileName.includes(".") ? "." + sourceFile.fileName.split(".").pop()!.toLowerCase() : ".txt";
+  const origBase = sourceFile.fileName.replace(/\.[^/.]+$/, "");
+  try { await ctx.editMessageText("⚡ <b>Splitting file...</b>", { parse_mode: "HTML" }); } catch {}
+  userStates.delete(userId);
+  const sentFiles: Array<{ name: string; contacts: number }> = [];
+
+  for (let i = 0; i < totalParts; i++) {
+    const slice = allContacts.slice(i * splitCount, (i + 1) * splitCount);
+    const partName = `${origBase} ${i + 1}${origExt}`;
+    let partContent: string;
+    if (origExt === ".vcf") partContent = generateVcfContent(slice);
+    else if (origExt === ".csv") partContent = generateCsvContent(slice);
+    else partContent = generateTxtContent(slice);
+    try {
+      await ctx.api.sendDocument(ctx.chat!.id, new InputFile(Buffer.from(partContent, "utf8"), partName), {
+        caption: `📁 <b>${esc(partName)}</b> — ${slice.length} contacts`,
+        parse_mode: "HTML",
+      });
+      sentFiles.push({ name: partName, contacts: slice.length });
+    } catch {}
+  }
+  await ctx.api.sendMessage(ctx.chat!.id,
+    `✅ <b>Split Complete!</b>\n\n` +
+    `• Source: <b>${esc(sourceFile.fileName)}</b>\n` +
+    `• Total contacts: <b>${totalContacts}</b>\n` +
+    `• Parts created: <b>${sentFiles.length}</b>\n` +
+    `• Per part: <b>${splitCount}</b>\n\n` +
+    `📁 Files:\n` + sentFiles.map(f => `${esc(f.name)} (${f.contacts} contacts)`).join("\n") +
+    `\n\n🏁 All tasks complete!`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Menu", "file_menu").text("🏠 Main Menu", "main_menu") }
+  );
+});
+
+// ── Merge ─────────────────────────────────────────────────────────────────────
+bot.callbackQuery("fe_merger", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  userStates.set(userId, { step: "fe_merge_upload", fileEditorData: { mode: "merger", uploadedFiles: [] } });
+  const txt = `🔗 <b>Merge</b>\n\nSend all files you want to merge (.vcf, .txt, .csv).\nYou can send multiple files one by one.\nTap <b>✅ Done</b> when all files are uploaded.`;
+  const kb = new InlineKeyboard().text("✅ Done Uploading", "fe_merge_done").row().text("🔙 Back", "file_menu");
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: kb }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: kb }); }
+});
+
+bot.callbackQuery("fe_merge_done", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || state.step !== "fe_merge_upload" || !state.fileEditorData) {
+    try { await ctx.editMessageText("⚠️ Session expired. Send /file to start again."); } catch {}
+    return;
+  }
+  const files = state.fileEditorData.uploadedFiles || [];
+  if (files.length < 2) {
+    await ctx.answerCallbackQuery({ text: "⚠️ Please send at least 2 files to merge!", show_alert: true });
+    return;
+  }
+  const exts = new Set(files.map(f => (f.fileName.toLowerCase().split(".").pop() || "txt")));
+  const totalContacts = files.reduce((sum, f) => sum + f.contacts.length, 0);
+  if (exts.size === 1) {
+    const ext = Array.from(exts)[0];
+    state.fileEditorData.mergerTargetFormat = (ext === "vcf" ? "vcf" : ext === "csv" ? "csv" : "txt") as "vcf" | "txt" | "csv";
+    state.step = "fe_merge_confirm";
+    const txt = `📋 <b>Merge Summary</b>\n\n📁 Files: <b>${files.length}</b>\n👤 Total contacts: <b>${totalContacts}</b>\n📄 Output: <b>.${ext}</b>\n\n⚡ Ready to merge!`;
+    try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm Merge", "fe_do_merge").row().text("❌ Cancel", "file_menu") }); }
+    catch {}
+  } else {
+    state.step = "fe_merge_format";
+    const txt = `📋 <b>${files.length} files — ${totalContacts} contacts</b>\n\nFiles have different formats. Choose output:`;
+    try {
+      await ctx.editMessageText(txt, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("📞 .vcf", "fe_merge_fmt_vcf").text("📄 .txt", "fe_merge_fmt_txt").text("📊 .csv", "fe_merge_fmt_csv").row()
+          .text("❌ Cancel", "file_menu"),
+      });
+    } catch {}
+  }
+});
+
+bot.callbackQuery(/^fe_merge_fmt_(vcf|txt|csv)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const fmt = ctx.match![1] as "vcf" | "txt" | "csv";
+  const state = userStates.get(userId);
+  if (!state || !state.fileEditorData) { try { await ctx.editMessageText("⚠️ Session expired."); } catch {} return; }
+  state.fileEditorData.mergerTargetFormat = fmt;
+  state.step = "fe_merge_confirm";
+  const files = state.fileEditorData.uploadedFiles || [];
+  const totalContacts = files.reduce((sum, f) => sum + f.contacts.length, 0);
+  const txt = `📋 <b>Merge Summary</b>\n\n📁 Files: <b>${files.length}</b>\n👤 Total: <b>${totalContacts}</b>\n📄 Output: <b>.${fmt}</b>\n\n⚡ Ready!`;
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm Merge", "fe_do_merge").row().text("❌ Cancel", "file_menu") }); }
+  catch {}
+});
+
+bot.callbackQuery("fe_do_merge", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || !state.fileEditorData) { try { await ctx.editMessageText("⚠️ Session expired."); } catch {} return; }
+  const files = state.fileEditorData.uploadedFiles || [];
+  const fmt = state.fileEditorData.mergerTargetFormat || "vcf";
+  const allContacts = files.flatMap(f => f.contacts);
+  try { await ctx.editMessageText("⏳ <b>Merging files...</b>", { parse_mode: "HTML" }); } catch {}
+  const outName = `merged.${fmt}`;
+  let mergedContent: string;
+  if (fmt === "vcf") mergedContent = generateVcfContent(allContacts);
+  else if (fmt === "csv") mergedContent = generateCsvContent(allContacts);
+  else mergedContent = generateTxtContent(allContacts);
+  userStates.delete(userId);
+  try {
+    await ctx.api.sendDocument(ctx.chat!.id, new InputFile(Buffer.from(mergedContent, "utf8"), outName), {
+      caption:
+        `✅ <b>Merge Complete!</b>\n\n` +
+        `📁 Files merged: <b>${files.length}</b>\n` +
+        `👤 Total contacts: <b>${allContacts.length}</b>\n` +
+        `📄 Output: <b>${outName}</b>\n\n🏁 Done!`,
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📁 File Menu", "file_menu").text("🏠 Main Menu", "main_menu"),
+    });
+  } catch (err: any) {
+    await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+  }
+});
+
+// ── Number to VCF ─────────────────────────────────────────────────────────────
+bot.callbackQuery("fe_n2v", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  userStates.set(userId, { step: "fe_n2v_numbers", fileEditorData: { mode: "number_to_vcf" } });
+  const txt =
+    `🔢 <b>Number to VCF</b>\n\n` +
+    `Send all phone numbers, one per line.\n` +
+    `You can include or omit the country code.\n\n` +
+    `Example:\n<code>+91 9876543210\n9876543211\n+1 2025551234</code>`;
+  try { await ctx.editMessageText(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "file_menu") }); }
+  catch { await ctx.reply(txt, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "file_menu") }); }
+});
+
+bot.callbackQuery("fe_confirm_n2v", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from!.id;
+  const state = userStates.get(userId);
+  if (!state || !state.fileEditorData || state.fileEditorData.mode !== "number_to_vcf") {
+    try { await ctx.editMessageText("⚠️ Session expired."); } catch {}
+    return;
+  }
+  const d = state.fileEditorData;
+  const phones = d.numberLines || [];
+  const baseName = d.baseName!;
+  const contactName = d.contactName!;
+  try { await ctx.editMessageText("⚡ <b>Creating VCF...</b>", { parse_mode: "HTML" }); } catch {}
+  const contacts = phones.map((phone, i) => ({
+    name: `${contactName} ${padNum(i + 1, phones.length)}`,
+    phone,
+  }));
+  const n2vFileName = `${baseName}.vcf`;
+  const n2vContent = generateVcfContent(contacts);
+  userStates.delete(userId);
+  try {
+    await ctx.api.sendDocument(ctx.chat!.id, new InputFile(Buffer.from(n2vContent, "utf8"), n2vFileName), {
+      caption:
+        `✅ <b>VCF Created!</b>\n\n` +
+        `📁 File: <b>${esc(n2vFileName)}</b>\n` +
+        `👤 Contacts: <b>${contacts.length}</b>\n\n🏁 Done!`,
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📁 File Menu", "file_menu").text("🏠 Main Menu", "main_menu"),
+    });
+  } catch (err: any) {
+    await ctx.reply(`❌ Error: ${esc(err?.message || "Unknown")}`, { parse_mode: "HTML" });
+  }
+});
+
 bot.on("message:text", async (ctx, next) => {
   const userId = ctx.from?.id;
   if (!userId) return next();
@@ -18769,6 +19193,138 @@ bot.on("message:text", async (ctx, next) => {
     const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
     cgnLinkCollectMsgId.set(userId, m.message_id);
     return;
+  }
+
+
+  // ── File Editor text input steps ─────────────────────────────────────────
+  if (state.fileEditorData) {
+    // Number to VCF: receive numbers
+    if (state.step === "fe_n2v_numbers") {
+      const lines = text.split(/\r?\n/).map((l: string) => l.replace(/[^0-9+]/g, "").trim()).filter((l: string) => l.length >= 7);
+      if (!lines.length) { await ctx.reply("❌ No valid phone numbers found. Please send numbers, one per line."); return; }
+      const phones = lines.map((l: string) => l.startsWith("+") ? l : "+" + l);
+      state.fileEditorData.numberLines = phones;
+      state.step = "fe_n2v_basename";
+      await ctx.reply(
+        `✅ <b>${phones.length} numbers received!</b>\n\n` +
+        `📝 <b>Enter the file name (base name):</b>\n\nExample: <code>CONTACTS</code>\n\nFile will be named: <b>CONTACTS.vcf</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    if (state.step === "fe_n2v_basename") {
+      if (!text || text.length > 100) { await ctx.reply("❌ Name too long. Keep it under 100 characters."); return; }
+      state.fileEditorData.baseName = text;
+      state.step = "fe_n2v_contactname";
+      await ctx.reply(
+        `✅ <b>File name: ${esc(text)}.vcf</b>\n\n` +
+        `📝 <b>Enter the contact name (base name):</b>\n\nExample: <code>Friend</code>\n\nContacts will be: <b>Friend 01, Friend 02, ...</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    if (state.step === "fe_n2v_contactname") {
+      if (!text || text.length > 100) { await ctx.reply("❌ Name too long. Keep it under 100 characters."); return; }
+      state.fileEditorData.contactName = text;
+      const phones = state.fileEditorData.numberLines || [];
+      await ctx.reply(
+        `📋 <b>Summary:</b>\n\n` +
+        `📁 File: <b>${esc(state.fileEditorData.baseName!)}.vcf</b>\n` +
+        `👤 Contact name: <b>${esc(text)}</b>\n` +
+        `📞 Numbers: <b>${phones.length}</b>\n\n⚡ Ready!`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Create VCF", "fe_confirm_n2v").row().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // VCF Editor: step 1 baseName
+    if (state.step === "fe_vcf_step1_basename") {
+      if (!text || text.length > 100) { await ctx.reply("❌ Name too long. Keep it under 100 characters."); return; }
+      state.fileEditorData.baseName = text;
+      state.step = "fe_vcf_step2_contactname";
+      await ctx.reply(
+        `✅ <b>File name: ${esc(text)}</b>\n\n` +
+        `📝 <b>Step 2/5: Enter the contact name (base name)</b>\n\nExample: <code>nice</code>\n\nContacts will be: <b>nice 01, nice 02, ...</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // VCF Editor: step 2 contactName
+    if (state.step === "fe_vcf_step2_contactname") {
+      if (!text || text.length > 100) { await ctx.reply("❌ Name too long. Keep it under 100 characters."); return; }
+      state.fileEditorData.contactName = text;
+      state.step = "fe_vcf_step3_startfile";
+      await ctx.reply(
+        `✅ <b>Contact name: ${esc(text)}</b>\n\n` +
+        `📝 <b>Step 3/5: Enter the start file number</b>\n\nExample: <code>1</code>\n\nFiles will be: <b>${esc(state.fileEditorData.baseName!)} 1.vcf, ${esc(state.fileEditorData.baseName!)} 2.vcf ...</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // VCF Editor: step 3 startFileNum
+    if (state.step === "fe_vcf_step3_startfile") {
+      const n = parseInt(text);
+      if (isNaN(n) || n < 0 || n > 99999) { await ctx.reply("❌ Please enter a valid number (0–99999)."); return; }
+      state.fileEditorData.startFileNum = n;
+      state.step = "fe_vcf_step4_startcontact";
+      await ctx.reply(
+        `✅ <b>Start file number: ${n}</b>\n\n` +
+        `📝 <b>Step 4/5: Enter the contact start number</b>\n\nExample: <code>1</code>\n\nFirst contact: <b>${esc(state.fileEditorData.contactName!)} 01</b>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // VCF Editor: step 4 contactStartNum
+    if (state.step === "fe_vcf_step4_startcontact") {
+      const n = parseInt(text);
+      if (isNaN(n) || n < 0 || n > 99999) { await ctx.reply("❌ Please enter a valid number (0–99999)."); return; }
+      state.fileEditorData.contactStartNum = n;
+      state.step = "fe_vcf_step5_perfile";
+      await ctx.reply(
+        `✅ <b>Contact start number: ${n}</b>\n\n` +
+        `📝 <b>Step 5/5: How many contacts per file?</b>\n\nExample: <code>50</code>`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // VCF Editor: step 5 contactsPerFile → show confirmation
+    if (state.step === "fe_vcf_step5_perfile") {
+      const n = parseInt(text);
+      if (isNaN(n) || n < 1 || n > 10000) { await ctx.reply("❌ Please enter a valid number (1–10000)."); return; }
+      state.fileEditorData.contactsPerFile = n;
+      const d = state.fileEditorData;
+      const allContacts = (d.uploadedFiles || []).flatMap(f => f.contacts);
+      const totalFiles = Math.ceil(allContacts.length / n);
+      const endFile = (d.startFileNum!) + totalFiles - 1;
+      await ctx.reply(
+        `📋 <b>Configuration Summary:</b>\n\n` +
+        `📁 File name: <b>${esc(d.baseName!)}</b>\n` +
+        `🔢 File range: <b>${d.startFileNum!}</b> → <b>${endFile}</b> (${totalFiles} files)\n` +
+        `👤 Contact name: <b>${esc(d.contactName!)}</b>\n` +
+        `🎯 Contact start: <b>${d.contactStartNum!}</b>\n` +
+        `📞 Per file: <b>${n}</b>\n` +
+        `📊 Total contacts: <b>${allContacts.length}</b>\n\n⚡ Ready!`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm", "fe_confirm_vcf").row().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
+    // Splitter: count per file
+    if (state.step === "fe_split_count") {
+      const n = parseInt(text);
+      if (isNaN(n) || n < 1 || n > 100000) { await ctx.reply("❌ Please enter a valid number (1–100000)."); return; }
+      state.fileEditorData.splitCount = n;
+      const files = state.fileEditorData.uploadedFiles || [];
+      const totalContacts = files.reduce((s: number, f: { contacts: Array<{name:string;phone:string}> }) => s + f.contacts.length, 0);
+      const parts = Math.ceil(totalContacts / n);
+      await ctx.reply(
+        `📋 <b>Split Summary:</b>\n\n` +
+        `📁 File: <b>${esc((files[0]?.fileName) || "unknown")}</b>\n` +
+        `👤 Total contacts: <b>${totalContacts}</b>\n` +
+        `✂️ Per part: <b>${n}</b>\n` +
+        `📄 Parts: <b>${parts}</b>\n\n⚡ Ready!`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Confirm Split", "fe_do_split").row().text("❌ Cancel", "file_menu") }
+      );
+      return;
+    }
   }
 
   return next();
