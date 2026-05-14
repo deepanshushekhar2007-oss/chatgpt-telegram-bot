@@ -13345,21 +13345,64 @@ async function runChatFriendBackground(
     .text("🏠 Main Menu", "main_menu");
 
   // ── Pre-save contacts: each WA saves every other WA's number in its contact list ──
-  // This registers the other numbers as known contacts so chats don't appear as unknown.
-  // We save contacts locally (contacts.upsert) — no message is sent.
-  try {
+  // Show real-time progress to the user. Chat only starts after ALL contacts are saved.
+  {
+    // Build initial status lines: one entry per (sender, receiver) pair
+    interface ContactSaveStatus { sLabel: string; rLabel: string; phone: string; done: boolean; failed: boolean; }
+    const contactSaveStatuses: ContactSaveStatus[] = [];
     for (let sIdx = 0; sIdx < N; sIdx++) {
-      if (!session.running || session.cancelled) break;
-      const sessionUserId = resolvedUserIds[sIdx];
       for (let rIdx = 0; rIdx < N; rIdx++) {
-        if (rIdx === sIdx || !session.running) continue;
-        const otherPhone = resolvedJids[rIdx].replace("@s.whatsapp.net", "");
-        const otherName = rIdx === 0 ? "SPIDY" : `SPIDY ${rIdx}`;
-        await saveContactToWhatsApp(sessionUserId, otherPhone, otherName);
-        await sleep(300);
+        if (rIdx === sIdx) continue;
+        contactSaveStatuses.push({
+          sLabel: `WA ${sIdx + 1}`,
+          rLabel: `WA ${rIdx + 1}`,
+          phone: resolvedJids[rIdx].replace("@s.whatsapp.net", ""),
+          done: false,
+          failed: false,
+        });
       }
     }
-  } catch {}
+
+    const buildContactSaveMsg = (done: boolean) => {
+      let lines = "📋 <b>Contacts Save Ho Rahe Hain...</b>\n\n";
+      for (const s of contactSaveStatuses) {
+        const icon = s.done ? "✅" : s.failed ? "❌" : "⏳";
+        lines += `${icon} ${s.sLabel} → ${s.rLabel} (<code>${esc(s.phone)}</code>)\n`;
+      }
+      if (done) lines += "\n✅ <b>Sab contacts save ho gaye! Chat shuru ho raha hai...</b>";
+      else lines += "\n⌛ Please wait...";
+      return lines;
+    };
+
+    // Show initial status
+    try {
+      await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(false), { parse_mode: "HTML" });
+    } catch {}
+
+    // Save each contact and update status
+    for (const entry of contactSaveStatuses) {
+      if (!session.running || session.cancelled) break;
+      const senderIdx = Number(entry.sLabel.replace("WA ", "")) - 1;
+      const senderUserId = resolvedUserIds[senderIdx] ?? resolvedUserIds[0];
+
+      const saved = await saveContactToWhatsApp(senderUserId, entry.phone, `SPIDY ${entry.rLabel.replace("WA ", "")}`);
+      entry.done = saved;
+      entry.failed = !saved;
+
+      try {
+        await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(false), { parse_mode: "HTML" });
+      } catch {}
+      await sleep(400);
+    }
+
+    // Show completion message
+    if (session.running && !session.cancelled) {
+      try {
+        await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(true), { parse_mode: "HTML" });
+      } catch {}
+      await sleep(1500);
+    }
+  }
 
   if (!session.running || session.cancelled) {
     for (const uid of resolvedUserIds) unprotectSession(uid);
