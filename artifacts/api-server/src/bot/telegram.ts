@@ -457,79 +457,112 @@ bot.use(async (ctx, next) => {
         // does not fire and cause a silent "nothing happens" drop.
         try { await ctx.answerCallbackQuery(); } catch {}
 
-        const rcChatId = ctx.callbackQuery?.message?.chat.id;
-        const rcMsgId  = ctx.callbackQuery?.message?.message_id;
-        const rcStart  = Date.now();
-        let rcLastText = "";
-        let rcDone     = false;
+        // ── Silent fast-path ───────────────────────────────────────────────
+        // If Baileys is already mid-auto-reconnect (brief network blip,
+        // keepalive cycle, or WA server nudge) wait up to 5 s silently
+        // before showing any UI. This prevents the "Your session was idle"
+        // bar from flashing on button presses that happen to land during a
+        // routine 1-3 s socket handshake that Baileys will resolve on its own.
+        if (isWhatsAppConnecting(String(userId))) {
+          const quickConnected = await waitForWhatsAppConnected(String(userId), { timeoutMs: 5_000, pollMs: 150 }).catch(() => false);
+          if (quickConnected) {
+            (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
+            // Fall through to handler — no UI needed.
+          } else {
+            // Still not up after 5 s → show full reconnect bar below (same
+            // code path as a cold session).
+            /* falls through to the rcChatId / progress bar block */
+          }
+        }
 
-        // Edit the existing message to a live progress bar so the user sees
-        // real-time feedback instead of a static "reconnecting..." text.
-        const renderReconnectBar = async (pct: number) => {
-          const elapsed = Math.floor((Date.now() - rcStart) / 1000);
-          const text =
-            `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
-            `${renderProgressBar(pct)}\n\n` +
-            `<i>Your session was idle and got disconnected.\n` +
-            `Reconnecting automatically... (${elapsed}s)</i>`;
-          if (text === rcLastText) return;
-          rcLastText = text;
+        // Re-check: if we just connected via the fast-path above, skip the bar.
+        if (!isConnected(String(userId))) {
+          const rcChatId = ctx.callbackQuery?.message?.chat.id;
+          const rcMsgId  = ctx.callbackQuery?.message?.message_id;
+          const rcStart  = Date.now();
+          let rcLastText = "";
+          let rcDone     = false;
+
+          // Edit the existing message to a live progress bar so the user sees
+          // real-time feedback instead of a static "reconnecting..." text.
+          const renderReconnectBar = async (pct: number) => {
+            const elapsed = Math.floor((Date.now() - rcStart) / 1000);
+            const text =
+              `🔄 <b>WhatsApp reconnecting...</b>\n\n` +
+              `${renderProgressBar(pct)}\n\n` +
+              `<i>Reconnecting to WhatsApp automatically... (${elapsed}s)</i>`;
+            if (text === rcLastText) return;
+            rcLastText = text;
+            try {
+              if (rcChatId && rcMsgId) {
+                await ctx.api.editMessageText(rcChatId, rcMsgId, text, { parse_mode: "HTML" });
+              } else {
+                await ctx.editMessageText(text, { parse_mode: "HTML" });
+              }
+            } catch {}
+          };
+
+          await renderReconnectBar(0);
+
+          // Tick the progress bar every 1.5s while waiting for the socket to reconnect.
+          // Maps elapsed time (0→20s) to progress (0→90%); jumps to result state at end.
+          const rcTicker = setInterval(async () => {
+            if (rcDone) return;
+            const elapsed = (Date.now() - rcStart) / 1000;
+            const pct = Math.min(90, Math.floor((elapsed / 20) * 90));
+            await renderReconnectBar(pct);
+          }, 1500);
+
+          let connected = false;
           try {
+            connected = await waitForWhatsAppConnected(String(userId), {
+              timeoutMs: 20_000,
+              pollMs: 200,
+            });
+          } catch {}
+
+          rcDone = true;
+          clearInterval(rcTicker);
+
+          if (!connected) {
+            const failText =
+              `❌ <b>WhatsApp disconnected</b>\n\n` +
+              `${renderProgressBar(0)}\n\n` +
+              `Your WhatsApp session has been disconnected.\n\n` +
+              `Please connect a fresh session from the menu:\n` +
+              `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`;
+            const failKb = new InlineKeyboard()
+              .text("📱 Connect WhatsApp", "connect_wa").row()
+              .text("🏠 Main Menu", "main_menu");
+            try {
+              if (rcChatId && rcMsgId) {
+                await ctx.api.editMessageText(rcChatId, rcMsgId, failText, { parse_mode: "HTML", reply_markup: failKb });
+              } else {
+                await ctx.editMessageText(failText, { parse_mode: "HTML", reply_markup: failKb });
+              }
+            } catch {
+              try { await ctx.reply(failText, { parse_mode: "HTML", reply_markup: failKb }); } catch {}
+            }
+            return;
+          }
+
+          // Connected — show a brief "✅ Reconnected" confirmation so the
+          // progress bar is never left frozen mid-way if the handler takes
+          // a moment to render the actual menu.
+          try {
+            const okText = `✅ <b>WhatsApp reconnected!</b>\n\n${renderProgressBar(100)}\n\n<i>Loading your request...</i>`;
             if (rcChatId && rcMsgId) {
-              await ctx.api.editMessageText(rcChatId, rcMsgId, text, { parse_mode: "HTML" });
+              await ctx.api.editMessageText(rcChatId, rcMsgId, okText, { parse_mode: "HTML" });
             } else {
-              await ctx.editMessageText(text, { parse_mode: "HTML" });
+              await ctx.editMessageText(okText, { parse_mode: "HTML" });
             }
           } catch {}
-        };
 
-        await renderReconnectBar(0);
-
-        // Tick the progress bar every 1.5s while waiting for the socket to reconnect.
-        // Maps elapsed time (0→20s) to progress (0→90%); jumps to result state at end.
-        const rcTicker = setInterval(async () => {
-          if (rcDone) return;
-          const elapsed = (Date.now() - rcStart) / 1000;
-          const pct = Math.min(90, Math.floor((elapsed / 20) * 90));
-          await renderReconnectBar(pct);
-        }, 1500);
-
-        let connected = false;
-        try {
-          connected = await waitForWhatsAppConnected(String(userId), {
-            timeoutMs: 20_000,
-            pollMs: 200,
-          });
-        } catch {}
-
-        rcDone = true;
-        clearInterval(rcTicker);
-
-        if (!connected) {
-          const failText =
-            `❌ <b>WhatsApp disconnected</b>\n\n` +
-            `${renderProgressBar(0)}\n\n` +
-            `Your WhatsApp session has been disconnected.\n\n` +
-            `Please connect a fresh session from the menu:\n` +
-            `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`;
-          const failKb = new InlineKeyboard()
-            .text("📱 Connect WhatsApp", "connect_wa").row()
-            .text("🏠 Main Menu", "main_menu");
-          try {
-            if (rcChatId && rcMsgId) {
-              await ctx.api.editMessageText(rcChatId, rcMsgId, failText, { parse_mode: "HTML", reply_markup: failKb });
-            } else {
-              await ctx.editMessageText(failText, { parse_mode: "HTML", reply_markup: failKb });
-            }
-          } catch {
-            try { await ctx.reply(failText, { parse_mode: "HTML", reply_markup: failKb }); } catch {}
-          }
-          return;
+          // Connected — fall through. Since we already answered the callback
+          // query above, patch answerCallbackQuery to a silent no-op so the
+          // downstream handler does not double-answer and throw an error.
+          (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
         }
-        // Connected — fall through. Since we already answered the callback
-        // query above, patch answerCallbackQuery to a silent no-op so the
-        // downstream handler does not double-answer and throw an error.
-        (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
       }
     }
 
@@ -2648,31 +2681,31 @@ bot.command("start", async (ctx) => {
   // MongoDB reads and together take the same time as the slower of the two
   // instead of the sum of both.
   userStates.delete(userId);
-  const [trialResult, userHasAccess] = await Promise.all([
-    isAdmin(userId)
-      ? Promise.resolve({ created: false as boolean, expiresAt: 0 })
-      : ensureFreeTrial(userId, FREE_TRIAL_MS),
-    isAdmin(userId) ? Promise.resolve(true) : hasAccess(userId),
-  ]);
+
+  // ── Speed: overlap WA progress with ensureFreeTrial ─────────────────────
+  // hasAccess uses a 300 s in-memory cache → essentially instant for
+  // returning users. Fire showWhatsAppConnectingProgress right after
+  // that single cached read so the "⏳ Connecting..." message appears
+  // while ensureFreeTrial (the slower MongoDB write) runs in parallel.
+  const userHasAccess = isAdmin(userId) ? true : await hasAccess(userId);
+
+  // Kick off WA progress immediately (sends first message right away)
+  // and run ensureFreeTrial in parallel with the WA socket wait.
+  const waProgressPromise = userHasAccess
+    ? showWhatsAppConnectingProgress(ctx, userId)
+    : Promise.resolve();
+
+  const trialResult = isAdmin(userId)
+    ? { created: false as boolean, expiresAt: 0 }
+    : await ensureFreeTrial(userId, FREE_TRIAL_MS);
+
+  // Ensure WA progress completes before rendering the menu so message
+  // ordering is correct (progress toast appears above the menu).
+  await waProgressPromise;
+
   // Start their one-and-only 24h free trial if they don't have one yet.
-  // The trial entry is permanent in MongoDB (`freeTrials` map keyed by
-  // userId) so the same user can never receive a second free trial.
-  // Admin is skipped — admin already has unlimited access, the trial UI
-  // would be misleading for them.
   const trialJustStarted = (!isAdmin(userId) && trialResult.created)
     ? { expiresAt: trialResult.expiresAt } : null;
-
-  // Show live "connecting WhatsApp" progress bar before the menu, so
-  // users immediately see the status of their saved WhatsApp session.
-  // Skip this for users who have no access — for them WhatsApp is
-  // unusable until they renew, so spending time/RAM on a connection
-  // attempt is wasteful and could trigger needless reconnects.
-  // The WA progress function sends its first message instantly (the
-  // "⏳ Connecting…" toast) and then waits in the background; awaiting
-  // it here keeps message ordering correct (progress above menu).
-  if (userHasAccess) {
-    await showWhatsAppConnectingProgress(ctx, userId);
-  }
   if (trialJustStarted) {
     await ctx.reply(trialStartedMessage(trialJustStarted.expiresAt), { parse_mode: "HTML" });
   }
