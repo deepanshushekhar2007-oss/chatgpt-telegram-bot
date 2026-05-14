@@ -5,7 +5,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
-import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions, savePairingMode } from "./mongo-auth-state";
+import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions, savePairingMode, saveWaContact, loadWaContacts } from "./mongo-auth-state";
 
 const logger = pino({ level: "silent" });
 
@@ -605,6 +605,15 @@ async function createSocket(
       session.retryCount = 0;
       clearDisconnectNotified(userId); // reset so next real disconnect can notify again
       savePairingMode(userId, pairingMode).catch(() => {});
+      // Reload persisted contacts from MongoDB and feed them into Baileys
+      loadWaContacts(userId).then((contacts) => {
+        if (contacts.length > 0 && session.socket && session.connected) {
+          try {
+            session.socket.ev.emit("contacts.upsert", contacts as any);
+            console.log(`[WA][${userId}] Loaded ${contacts.length} persisted contacts into Baileys`);
+          } catch {}
+        }
+      }).catch(() => {});
       onConnected();
     }
 
@@ -2624,20 +2633,31 @@ export function getConnectedAutoCount(primaryUserId: string): number {
   return getAllConnectedAutoSlots(primaryUserId).length;
 }
 
-// Saves a contact into a WhatsApp session's local contact store.
-// This registers the contact by emitting a contacts.upsert event so
-// the other number appears as a known contact — without sending any message.
+// Saves a contact into a WhatsApp session's local contact store AND persists
+// it to MongoDB so it survives socket reconnections and bot restarts.
+// The contact is fed into Baileys via contacts.upsert and also written to
+// the wa_contacts collection so it is reloaded on every socket open.
 export async function saveContactToWhatsApp(
   sessionUserId: string,
   contactPhone: string,
   contactName: string
 ): Promise<boolean> {
-  const session = useSession(sessionUserId);
-  if (!session?.socket || !session.connected) return false;
   try {
     const phone = contactPhone.replace(/[^0-9]/g, "");
+    if (!phone) return false;
     const jid = `${phone}@s.whatsapp.net`;
-    session.socket.ev.emit("contacts.upsert", [{ id: jid, name: contactName, notify: contactName }]);
+
+    // Persist to MongoDB first so the contact survives reconnects/restarts.
+    await saveWaContact(sessionUserId, jid, contactName);
+
+    // Also emit into the live Baileys socket if connected right now.
+    const session = useSession(sessionUserId);
+    if (session?.socket && session.connected) {
+      try {
+        session.socket.ev.emit("contacts.upsert", [{ id: jid, name: contactName, notify: contactName }] as any);
+      } catch {}
+    }
+
     console.log(`[WA][${sessionUserId}] saveContactToWhatsApp: saved ${contactName} (${phone})`);
     return true;
   } catch (err: any) {
