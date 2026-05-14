@@ -2624,8 +2624,30 @@ export function getConnectedAutoCount(primaryUserId: string): number {
   return getAllConnectedAutoSlots(primaryUserId).length;
 }
 
+// Saves a contact into a WhatsApp session's local contact store.
+// This registers the contact by emitting a contacts.upsert event so
+// the other number appears as a known contact — without sending any message.
+export async function saveContactToWhatsApp(
+  sessionUserId: string,
+  contactPhone: string,
+  contactName: string
+): Promise<boolean> {
+  const session = useSession(sessionUserId);
+  if (!session?.socket || !session.connected) return false;
+  try {
+    const phone = contactPhone.replace(/[^0-9]/g, "");
+    const jid = `${phone}@s.whatsapp.net`;
+    session.socket.ev.emit("contacts.upsert", [{ id: jid, name: contactName, notify: contactName }]);
+    console.log(`[WA][${sessionUserId}] saveContactToWhatsApp: saved ${contactName} (${phone})`);
+    return true;
+  } catch (err: any) {
+    console.error(`[WA][${sessionUserId}] saveContactToWhatsApp error:`, err?.message);
+    return false;
+  }
+}
+
 // Sends a VCard contact card from senderUserId to recipientJid.
-// Used for auto-save contacts before starting multi-WA chat.
+// Kept for backwards compatibility — prefer saveContactToWhatsApp.
 export async function sendContactCard(
   senderUserId: string,
   recipientJid: string,
