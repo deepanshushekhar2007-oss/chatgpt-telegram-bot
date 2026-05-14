@@ -13218,10 +13218,59 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
   const allNumbers = numbersPart.split("|").filter(Boolean);
   const allUserIds = userIdsPart.split("|").filter(Boolean);
 
-  // Fallback to 2-WA legacy format
   const primaryNumber = allNumbers[0] || "";
   const autoNumber = allNumbers[1] || "";
   if (!primaryNumber || !autoNumber) return;
+
+  // ── Step 1: Show contact-save instruction screen BEFORE starting chat ──
+  // User must save all these numbers in their phone contacts, then tap confirm.
+  let saveInstructions = "📱 <b>Pehle Yeh Numbers Apne Phone Mein Save Karo!</b>\n\n";
+  saveInstructions += "⚠️ <i>Chat shuru hone se pehle neeche diye sab numbers apne har ek WhatsApp ke phone mein contacts mein save karo, tab hi messages deliver honge.</i>\n\n";
+  saveInstructions += "<b>📋 In numbers ko save karo:</b>\n";
+  for (let i = 0; i < allNumbers.length; i++) {
+    const icon = i === 0 ? "📞" : "📱";
+    const clean = allNumbers[i].replace(/[^0-9]/g, "");
+    saveInstructions += `${icon} <b>WA ${i + 1}:</b> <code>+${clean}</code>\n`;
+  }
+  saveInstructions += "\n<b>Steps:</b>\n";
+  saveInstructions += "1️⃣ Apne phone ka <b>Contacts</b> app kholo\n";
+  saveInstructions += "2️⃣ Upar diye <b>sab numbers</b> ek ek karke save karo\n";
+  saveInstructions += "3️⃣ WhatsApp open karo — contacts refresh honge\n";
+  saveInstructions += "4️⃣ Neeche <b>\"✅ Save kar liya, Chat Shuru Karo\"</b> button dabao\n";
+
+  // Store all needed data in state so confirm callback can use it
+  userStates.set(userId, {
+    step: "acf_contacts_confirm",
+    chatInGroupData: {
+      ...state.chatInGroupData,
+      message: rawMsg,
+      delaySeconds: durationMs,
+    },
+  });
+
+  await ctx.editMessageText(saveInstructions, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard()
+      .text("✅ Save kar liya, Chat Shuru Karo", `acf_contacts_ok:${durationMs}`).row()
+      .text("❌ Cancel", "auto_chat_menu"),
+  });
+});
+
+bot.callbackQuery(/^acf_contacts_ok:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.chatInGroupData) return;
+  const durationMs = parseInt(ctx.match[1]);
+
+  const rawMsg = state.chatInGroupData.message || "";
+  const sepIdx = rawMsg.indexOf("||");
+  const numbersPart = sepIdx >= 0 ? rawMsg.slice(0, sepIdx) : rawMsg;
+  const userIdsPart = sepIdx >= 0 ? rawMsg.slice(sepIdx + 2) : "";
+  const allNumbers = numbersPart.split("|").filter(Boolean);
+  const allUserIds = userIdsPart.split("|").filter(Boolean);
+
+  if (!allNumbers[0] || !allNumbers[1]) return;
 
   const allJids = allNumbers.map(n => n.replace(/[^0-9]/g, "") + "@s.whatsapp.net");
   const primaryJid = allJids[0];
