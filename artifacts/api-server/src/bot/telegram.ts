@@ -42,6 +42,7 @@ import {
   getAllConnectedAutoSlots,
   getConnectedAutoCount,
   sendContactCard,
+  saveContactToWhatsApp,
   getActiveSessionUserIds,
   setDisconnectNotifier,
   setGroupDisappearingMessages,
@@ -13120,29 +13121,59 @@ bot.callbackQuery("acf_start", async (ctx) => {
   if (existingSession) acfSessions.delete(userId);
 
   const connectedSlots = getAllConnectedAutoSlots(String(userId));
-  if (connectedSlots.length === 0) {
-    await ctx.editMessageText(
-      "❌ Auto Chat WA connected nahi hai.\n\nPehle extra WhatsApp connect karo Auto Chat menu se.",
-      {
-        reply_markup: new InlineKeyboard()
-          .text("🔙 Back", "auto_chat_menu")
-          .text("🏠 Main Menu", "main_menu"),
-      }
-    );
-    return;
-  }
-
   const primaryNumber = getConnectedWhatsAppNumber(String(userId));
-  if (!primaryNumber) {
-    await ctx.editMessageText("❌ Primary WhatsApp number detect nahi hua. Reconnect karo.", {
-      reply_markup: new InlineKeyboard().text("🔙 Back", "auto_chat_menu"),
-    });
+  const primaryConnected = !!primaryNumber;
+
+  // Need at least 2 connected WA accounts total (primary + auto, or 2+ auto slots)
+  const totalConnectedCount = (primaryConnected ? 1 : 0) + connectedSlots.length;
+  if (totalConnectedCount < 2) {
+    if (connectedSlots.length === 0) {
+      await ctx.editMessageText(
+        "❌ Auto Chat WA connected nahi hai.\n\nPehle extra WhatsApp connect karo Auto Chat menu se.",
+        {
+          reply_markup: new InlineKeyboard()
+            .text("🔙 Back", "auto_chat_menu")
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    } else {
+      await ctx.editMessageText(
+        "❌ Chat Friend ke liye kam se kam 2 WhatsApp connected hone chahiye.\n\n" +
+        (primaryConnected
+          ? "Primary WhatsApp connected hai — ek aur Auto WA bhi connect karo."
+          : "Primary WhatsApp connected nahi hai aur sirf 1 Auto WA connected hai.\n\nDono WA connect karo ya 2 Auto WA connect karo."),
+        {
+          reply_markup: new InlineKeyboard()
+            .text("🔙 Back", "auto_chat_menu")
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    }
     return;
   }
 
-  // All WA numbers (primary + all connected auto slots)
-  const allNumbers = [primaryNumber, ...connectedSlots.map(s => s.number || "")].filter(Boolean);
-  const allUserIds = [String(userId), ...connectedSlots.map(s => s.userId)];
+  // Build WA list — if primary is disconnected, use first 2 auto slots as the pair
+  let allNumbers: string[];
+  let allUserIds: string[];
+  let waList = "";
+
+  if (primaryConnected) {
+    allNumbers = [primaryNumber, ...connectedSlots.map(s => s.number || "")].filter(Boolean);
+    allUserIds = [String(userId), ...connectedSlots.map(s => s.userId)];
+    waList = `📞 WA 1: <code>${esc(primaryNumber)}</code> (Primary)\n`;
+    for (let i = 0; i < connectedSlots.length; i++) {
+      waList += `📱 WA ${i + 2}: <code>${esc(connectedSlots[i].number || "")}</code>\n`;
+    }
+  } else {
+    // Primary is disconnected — use connected auto slots only
+    allNumbers = connectedSlots.map(s => s.number || "").filter(Boolean);
+    allUserIds = connectedSlots.map(s => s.userId);
+    waList = `⚠️ <i>Primary WA offline — running on Auto WA slots</i>\n`;
+    for (let i = 0; i < connectedSlots.length; i++) {
+      waList += `📱 WA ${i + 1}: <code>${esc(connectedSlots[i].number || "")}</code>\n`;
+    }
+  }
+
   const totalWa = allNumbers.length;
 
   userStates.set(userId, {
@@ -13157,10 +13188,6 @@ bot.callbackQuery("acf_start", async (ctx) => {
     },
   });
 
-  let waList = `📞 WA 1: <code>${esc(primaryNumber)}</code> (Primary)\n`;
-  for (let i = 0; i < connectedSlots.length; i++) {
-    waList += `📱 WA ${i + 2}: <code>${esc(connectedSlots[i].number || "")}</code>\n`;
-  }
   const speedPct = Math.round(getAcfSpeedFactor(totalWa) * 100);
 
   await ctx.editMessageText(
@@ -13317,19 +13344,19 @@ async function runChatFriendBackground(
     .text("⏹️ Stop", "acf_stop_btn").row()
     .text("🏠 Main Menu", "main_menu");
 
-  // ── Pre-save contacts: each WA sends its vCard to every other WA ──────────
-  // This establishes chat threads so messages don't get flagged as unknown.
+  // ── Pre-save contacts: each WA saves every other WA's number in its contact list ──
+  // This registers the other numbers as known contacts so chats don't appear as unknown.
+  // We save contacts locally (contacts.upsert) — no message is sent.
   try {
     for (let sIdx = 0; sIdx < N; sIdx++) {
       if (!session.running || session.cancelled) break;
-      const senderUserId = resolvedUserIds[sIdx];
-      const senderPhone = resolvedJids[sIdx].replace("@s.whatsapp.net", "");
-      const senderName = sIdx === 0 ? "SPIDY" : `SPIDY ${sIdx}`;
+      const sessionUserId = resolvedUserIds[sIdx];
       for (let rIdx = 0; rIdx < N; rIdx++) {
         if (rIdx === sIdx || !session.running) continue;
-        const receiverJid = resolvedJids[rIdx];
-        await sendContactCard(senderUserId, receiverJid, senderName, senderPhone);
-        await sleep(1000);
+        const otherPhone = resolvedJids[rIdx].replace("@s.whatsapp.net", "");
+        const otherName = rIdx === 0 ? "SPIDY" : `SPIDY ${rIdx}`;
+        await saveContactToWhatsApp(sessionUserId, otherPhone, otherName);
+        await sleep(300);
       }
     }
   } catch {}
@@ -17759,11 +17786,16 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
           continue;
         }
 
-        // ── Step 2: Reconnect both WhatsApp sessions ─────────────────────────
+        // ── Step 2: Reconnect WhatsApp sessions ─────────────────────────────
         // Try to load the primary session (the user's main WA account).
         try { await ensureSessionLoaded(primaryUserId); } catch {}
         // Try to load the auto session (the secondary WA account).
         try { await ensureSessionLoaded(autoUserId); } catch {}
+        // Also try to restore any extra auto slots (slot 2, 3, ...) if present
+        for (let slot = 2; slot <= 10; slot++) {
+          const slotUid = getAutoSlotUserId(telegramIdStr, slot);
+          try { await ensureSessionLoaded(slotUid); } catch {}
+        }
 
         // Wait up to 30s for the primary WA to connect.
         let primaryOk = isConnected(primaryUserId);
@@ -17777,9 +17809,37 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
           autoOk = await waitForWhatsAppConnected(autoUserId, { timeoutMs: 30_000, pollMs: 1_000 }).catch(() => false);
         }
 
-        // Both primary and auto WA must be connected for any session type.
-        // If either is disconnected, do NOT send the "running" status message —
-        // the user's WhatsApp was already offline before restart.
+        // ── Multi-WA fallback: if primary is down but 2+ auto slots are up,
+        // autochat can still run using the connected auto slots as the WA pair.
+        let effectivePrimaryUserId = primaryUserId;
+        let effectiveAutoUserId = autoUserId;
+        const connectedAutoSlots = getAllConnectedAutoSlots(telegramIdStr);
+        const totalConnectedWa = (primaryOk ? 1 : 0) + connectedAutoSlots.length;
+
+        if (!primaryOk && connectedAutoSlots.length >= 2) {
+          // Primary is down but 2+ auto slots are available — use first two.
+          effectivePrimaryUserId = connectedAutoSlots[0].userId;
+          effectiveAutoUserId = connectedAutoSlots[1].userId;
+          primaryOk = true;
+          autoOk = true;
+          console.log(`[AUTO_CHAT] Primary WA down for userId=${s.userId} — using auto slots ${connectedAutoSlots[0].slot} & ${connectedAutoSlots[1].slot} as fallback pair`);
+        } else if (!primaryOk && connectedAutoSlots.length === 1) {
+          // Primary is down, only one auto slot — check if we can use saved autoUserId
+          // but only if that slot is connected
+          const savedAutoConnected = isConnected(autoUserId);
+          if (!savedAutoConnected) {
+            console.log(`[AUTO_CHAT] Skipping restore for userId=${s.userId}: only 1 auto slot connected and primary is down`);
+            await deleteAutoChatSession(s.userId).catch(() => {});
+            continue;
+          }
+        }
+
+        // Need at least 2 WA accounts connected to run any autochat session type.
+        if (totalConnectedWa < 2 && !(effectivePrimaryUserId !== primaryUserId)) {
+          console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: not enough WA connected (primary=${primaryOk}, auto=${autoOk}, autoSlots=${connectedAutoSlots.length})`);
+          await deleteAutoChatSession(s.userId).catch(() => {});
+          continue;
+        }
         if (!primaryOk || !autoOk) {
           console.log(`[AUTO_CHAT] Skipping ${sessionType} restore for userId=${s.userId}: WA not connected (primary=${primaryOk}, auto=${autoOk})`);
           await deleteAutoChatSession(s.userId).catch(() => {});
@@ -17814,8 +17874,8 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "cig_refresh").text("⏹️ Stop", "cig_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runGroupChatDualBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0, restoredSent, restoredAcc1, restoredAcc2, restoredFailed);
-          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups, sent=${restoredSent})`);
+          void runGroupChatDualBackground(s.userId, effectivePrimaryUserId, effectiveAutoUserId, s.userId, statusMsg.message_id, groups, s.autoChatExpiresAt, s.currentGroupIndex ?? 0, s.messageIndex ?? 0, restoredSent, restoredAcc1, restoredAcc2, restoredFailed);
+          console.log(`[AUTO_CHAT] Restored CIG session for userId=${s.userId} (${groups.length} groups, sent=${restoredSent}, using primary=${effectivePrimaryUserId})`);
 
         } else if (sessionType === "acf") {
           // ── Chat Friend restore ────────────────────────────────────────────
@@ -17836,8 +17896,8 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "acf_refresh").text("⏹️ Stop", "acf_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runChatFriendBackground(s.userId, primaryUserId, autoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt, restoredSent, restoredFailed);
-          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (sent=${restoredSent})`);
+          void runChatFriendBackground(s.userId, effectivePrimaryUserId, effectiveAutoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt, restoredSent, restoredFailed);
+          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (sent=${restoredSent}, using primary=${effectivePrimaryUserId})`);
 
         } else {
           // ── Legacy "old" Auto Chat restore ────────────────────────────────
