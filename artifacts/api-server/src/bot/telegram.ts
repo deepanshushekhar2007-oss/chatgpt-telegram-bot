@@ -16553,28 +16553,20 @@ bot.on("message:text", async (ctx, next) => {
       );
       const progMsgId = totalFiles > 20 ? progressMsg.message_id : null;
 
-      // Build and send each batch on the fly — no chunk array, no pre-built buffers.
-      // Each batch's Buffers are GC'd as soon as Promise.all resolves.
-      const BATCH = 10;
-      // Update progress every 5 batches (50 files) — fire-and-forget so edits never
-      // block file sending and stay within Telegram's ~20 edits/min rate limit.
+      // Send strictly one-by-one to guarantee delivery order (1, 2, 3…).
+      // Each Buffer is built, sent, then immediately GC'd before the next.
       const UPDATE_EVERY = 50;
-      for (let b = 0; b < totalFiles; b += BATCH) {
-        const bEnd = Math.min(b + BATCH, totalFiles);
-        await Promise.all(
-          Array.from({ length: bEnd - b }, (_, j) => {
-            const idx = b + j;
-            const start = idx * num;
-            const phones = allPhones.slice(start, Math.min(start + num, totalContacts));
-            const content = buildSplitContent(phones, ext);
-            const outName = `${baseName} ${idx + 1}${ext}`;
-            return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
-          })
-        );
-        if (progMsgId && bEnd < totalFiles && bEnd % UPDATE_EVERY === 0) {
-          const pct = Math.round((bEnd / totalFiles) * 100);
+      for (let idx = 0; idx < totalFiles; idx++) {
+        const start = idx * num;
+        const phones = allPhones.slice(start, Math.min(start + num, totalContacts));
+        const content = buildSplitContent(phones, ext);
+        const outName = `${baseName} ${idx + 1}${ext}`;
+        await retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
+        const sent = idx + 1;
+        if (progMsgId && sent < totalFiles && sent % UPDATE_EVERY === 0) {
+          const pct = Math.round((sent / totalFiles) * 100);
           bot.api.editMessageText(userId, progMsgId,
-            `⚡ <b>Splitting...</b> ${bEnd} / ${totalFiles} files sent\n📊 Progress: <b>${pct}%</b>`,
+            `⚡ <b>Splitting...</b> ${sent} / ${totalFiles} files sent\n📊 Progress: <b>${pct}%</b>`,
             { parse_mode: "HTML" }
           ).catch(() => {});
         }
@@ -17979,32 +17971,25 @@ async function doConvertAndSend(ctx: any, userId: number, state: any, outExt: st
 
   const summaryLines: string[] = [];
 
-  // Send files in batches of 5 — each iteration builds the Buffer, sends, then GC
-  const BATCH = 5;
-  for (let b = 0; b < files.length; b += BATCH) {
-    const bEnd = Math.min(b + BATCH, files.length);
-    await Promise.all(
-      Array.from({ length: bEnd - b }, async (_, j) => {
-        const i = b + j;
-        const phones = groups[i];
-        const baseName = files[i].replace(/\.[^.]+$/, "");
-        const outName = `${baseName}${outExt}`;
+  // Send strictly one-by-one to guarantee delivery order.
+  for (let i = 0; i < files.length; i++) {
+    const phones = groups[i];
+    const baseName = files[i].replace(/\.[^.]+$/, "");
+    const outName = `${baseName}${outExt}`;
 
-        let buf: Buffer;
-        if (outExt === ".vcf") {
-          buf = Buffer.from(buildSplitContent(phones, ".vcf"), "utf8");
-        } else if (outExt === ".txt") {
-          buf = Buffer.from(buildTXTContent(phones), "utf8");
-        } else if (outExt === ".csv") {
-          buf = Buffer.from(buildCSVContent(phones), "utf8");
-        } else {
-          buf = await buildXLSXBuffer(phones);
-        }
+    let buf: Buffer;
+    if (outExt === ".vcf") {
+      buf = Buffer.from(buildSplitContent(phones, ".vcf"), "utf8");
+    } else if (outExt === ".txt") {
+      buf = Buffer.from(buildTXTContent(phones), "utf8");
+    } else if (outExt === ".csv") {
+      buf = Buffer.from(buildCSVContent(phones), "utf8");
+    } else {
+      buf = await buildXLSXBuffer(phones);
+    }
 
-        summaryLines[i] = `📄 <code>${esc(outName)}</code> — <b>${phones.length}</b> contacts`;
-        return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(buf, outName)));
-      })
-    );
+    summaryLines[i] = `📄 <code>${esc(outName)}</code> — <b>${phones.length}</b> contacts`;
+    await retryTgApi(() => bot.api.sendDocument(userId, new InputFile(buf, outName)));
   }
 
   const totalContacts = groups.reduce((s, g) => s + g.length, 0);
@@ -18115,26 +18100,19 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
     } catch {}
   }
 
-  // Build and send batch-by-batch — no chunk array, no pre-built Buffer list.
-  // Each batch's string content and Buffers are GC'd after Promise.all resolves.
-  const BATCH = 10;
+  // Send strictly one-by-one to guarantee delivery order (file 1, 2, 3…).
   const UPDATE_EVERY = 50;
-  for (let b = 0; b < totalFiles; b += BATCH) {
-    const bEnd = Math.min(b + BATCH, totalFiles);
-    await Promise.all(
-      Array.from({ length: bEnd - b }, (_, j) => {
-        const idx = b + j;
-        const start = idx * contactsPerFile;
-        const phones = allPhones.slice(start, Math.min(start + contactsPerFile, totalContacts));
-        const content = buildVCFContent(phones, contactName, contactStartNum + start);
-        const fileName = `${baseName} ${startFileNum + idx}.vcf`;
-        return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), fileName)));
-      })
-    );
-    if (progMsgId && bEnd < totalFiles && bEnd % UPDATE_EVERY === 0) {
-      const pct = Math.round((bEnd / totalFiles) * 100);
+  for (let idx = 0; idx < totalFiles; idx++) {
+    const start = idx * contactsPerFile;
+    const phones = allPhones.slice(start, Math.min(start + contactsPerFile, totalContacts));
+    const content = buildVCFContent(phones, contactName, contactStartNum + start);
+    const fileName = `${baseName} ${startFileNum + idx}.vcf`;
+    await retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), fileName)));
+    const sent = idx + 1;
+    if (progMsgId && sent < totalFiles && sent % UPDATE_EVERY === 0) {
+      const pct = Math.round((sent / totalFiles) * 100);
       bot.api.editMessageText(userId, progMsgId,
-        `⚡ <b>Generating...</b> ${bEnd} / ${totalFiles} files\n📊 Progress: <b>${pct}%</b>`,
+        `⚡ <b>Generating...</b> ${sent} / ${totalFiles} files\n📊 Progress: <b>${pct}%</b>`,
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
