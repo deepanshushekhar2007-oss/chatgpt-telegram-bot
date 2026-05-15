@@ -63,6 +63,7 @@ import {
   getSessionAlias,
   isDisconnectPending,
   isWhatsAppConnecting,
+  suppressDisconnectNotification,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -12397,15 +12398,19 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     }); return;
   }
-  // 1. Drop the live Baileys socket + auth state and pending reconnect timers.
+  // 1. Suppress the "⚠️ Disconnected" push notification for this intentional
+  //    disconnect — the user just pressed the button, no need to alert them.
+  suppressDisconnectNotification(String(userId));
+  suppressDisconnectNotification(getAutoUserId(String(userId)));
+  // 2. Drop the live Baileys socket + auth state and pending reconnect timers.
   await disconnectWhatsApp(String(userId));
-  // 1a. Invalidate the session cache so the next /start or button press
+  // 2a. Invalidate the session cache so the next /start or button press
   //     does not incorrectly think a stored session still exists.
   hasSessionCache.del(String(userId));
-  // 2. Drop this user's slice of every per-user in-memory Map/Set so RAM
+  // 3. Drop this user's slice of every per-user in-memory Map/Set so RAM
   //    actually returns to baseline instead of being held by orphaned state.
   clearUserMemoryState(userId);
-  // 3. Also clear the Auto-Chat WhatsApp socket if it's open under the
+  // 4. Also clear the Auto-Chat WhatsApp socket if it's open under the
   //    derived auto-userId — otherwise that second socket keeps ~5-10MB.
   try { await disconnectWhatsApp(getAutoUserId(String(userId))); } catch {}
   // 4. Run a global purge to flush translation caches + nudge V8/glibc to
@@ -12642,6 +12647,8 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const autoUserId = getAutoUserId(String(userId));
+  // Suppress the "⚠️ Disconnected" push notification — user intentionally disconnected.
+  suppressDisconnectNotification(autoUserId);
   // Drop the auto-chat Baileys socket + its pending reconnect timers.
   await disconnectWhatsApp(autoUserId);
   hasSessionCache.del(autoUserId);

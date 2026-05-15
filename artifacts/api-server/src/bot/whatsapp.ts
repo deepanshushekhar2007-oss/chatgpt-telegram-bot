@@ -1000,8 +1000,23 @@ export function setDisconnectNotifier(fn: (userId: string, reason: string, phone
 // one "Disconnected" alert and then one implicit recovery (session comes back online).
 const disconnectNotifiedUsers = new Set<string>();
 
+// User IDs for which the next disconnect notification should be silently
+// suppressed — used when the bot itself initiates a voluntary disconnect
+// (user pressed "Disconnect" button) so the "⚠️ Disconnected" push message
+// is not sent for an action the user just consciously performed.
+const suppressedDisconnectNotifications = new Set<string>();
+
+export function suppressDisconnectNotification(userId: string): void {
+  suppressedDisconnectNotifications.add(userId);
+}
+
 export function notifyDisconnect(userId: string, reason: string): void {
   try {
+    // Skip notification if this was a voluntary/intentional disconnect.
+    if (suppressedDisconnectNotifications.has(userId)) {
+      suppressedDisconnectNotifications.delete(userId);
+      return;
+    }
     if (disconnectNotifiedUsers.has(userId)) return; // already notified for this disconnect cycle
     disconnectNotifiedUsers.add(userId);
     const phone = getConnectedWhatsAppNumber(userId) ?? sessions.get(userId)?.phoneNumber ?? null;
