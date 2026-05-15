@@ -16376,7 +16376,7 @@ async function handlePairCodePhone(ctx: any, userId: number, rawText: string): P
 
 // ─── Text Handler ─────────────────────────────────────────────────────────────
 
-bot.on("message:text", async (ctx) => {
+bot.on("message:text", async (ctx, next) => {
   const userId = ctx.from.id;
   await trackUser(userId);
   if (await isBanned(userId)) return;
@@ -16715,6 +16715,9 @@ bot.on("message:text", async (ctx) => {
   // ── End by-link accumulation steps ──
 
   if (!state) {
+    // Let command handlers (/file, /help, /start, etc.) fire — don't block them here.
+    if (text.startsWith("/")) return next();
+
     if (text.toLowerCase() === "start") {
       if (await isBanned(userId)) return;
       if (await hasAccess(userId)) {
@@ -16734,13 +16737,11 @@ bot.on("message:text", async (ctx) => {
     // ── Phone number fallback — handles bot restart between "Pair Code" tap and number input
     // If the user's state was wiped (server restart) but they're typing a phone number,
     // gracefully re-enter the pairing flow instead of showing a dead-end message.
-    if (!text.startsWith("/")) {
-      const digits = text.replace(/[^0-9]/g, "");
-      if (digits.length >= 10 && digits.length <= 15 && (text.startsWith("+") || text.match(/^\d/))) {
-        if (await hasAccess(userId)) {
-          await handlePairCodePhone(ctx, userId, text);
-          return;
-        }
+    const digits = text.replace(/[^0-9]/g, "");
+    if (digits.length >= 10 && digits.length <= 15 && (text.startsWith("+") || text.match(/^\d/))) {
+      if (await hasAccess(userId)) {
+        await handlePairCodePhone(ctx, userId, text);
+        return;
       }
     }
 
