@@ -144,8 +144,21 @@ export function detectMergeExt(exts: string[]): string {
   return ""; // mixed — user must choose
 }
 
-/** Download a Telegram file URL and return Buffer (streaming, RAM-safe). */
-export async function downloadBuffer(url: string, maxBytes = 20 * 1024 * 1024): Promise<Buffer> {
+/** Unwrap any error to a readable string — handles AggregateError properly. */
+export function unwrapError(err: unknown): string {
+  if (err instanceof AggregateError) {
+    const msgs = err.errors
+      .map((e: unknown) => (e instanceof Error ? e.message : String(e)))
+      .filter(Boolean)
+      .join("; ");
+    return msgs || err.message || "AggregateError";
+  }
+  if (err instanceof Error) return err.message || String(err);
+  return String(err);
+}
+
+/** Single-attempt download returning a Buffer (streaming, RAM-safe). */
+function downloadBufferOnce(url: string, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("https:") ? https : http;
     const req = mod.get(url, (res) => {
@@ -166,6 +179,25 @@ export async function downloadBuffer(url: string, maxBytes = 20 * 1024 * 1024): 
     req.on("error", reject);
     req.setTimeout(30_000, () => { req.destroy(); reject(new Error("Download timeout")); });
   });
+}
+
+/**
+ * Download a Telegram file URL and return Buffer.
+ * Retries up to 3 times with exponential back-off to survive transient
+ * DNS/network hiccups that Node.js surfaces as AggregateError.
+ */
+export async function downloadBuffer(url: string, maxBytes = 20 * 1024 * 1024): Promise<Buffer> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await downloadBufferOnce(url, maxBytes);
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof Error && err.message.includes("too large")) throw err;
+      await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
+    }
+  }
+  throw lastErr;
 }
 
 /** Supported file extensions for upload. */

@@ -114,6 +114,7 @@ import {
   downloadBuffer,
   isSupportedExt,
   extLabel,
+  unwrapError,
 } from "./file-tools";
 import {
   Language,
@@ -16545,10 +16546,14 @@ bot.on("message:text", async (ctx, next) => {
         { parse_mode: "HTML" }
       );
 
-      for (let i = 0; i < chunks.length; i++) {
-        const outName = `${baseName} ${i + 1}${ext}`;
-        const content = buildSplitContent(chunks[i], ext);
-        await bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName));
+      const BATCH = 10;
+      for (let b = 0; b < chunks.length; b += BATCH) {
+        const batch = chunks.slice(b, b + BATCH);
+        await Promise.all(batch.map((ch, j) => {
+          const outName = `${baseName} ${b + j + 1}${ext}`;
+          const content = buildSplitContent(ch, ext);
+          return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
+        }));
       }
 
       await bot.api.sendMessage(
@@ -17945,13 +17950,22 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
 
   const filesList: string[] = [];
   let contactSeq = d.contactStartNum;
+  const fileItems: Array<{ name: string; buf: Buffer }> = [];
   for (let i = 0; i < chunks.length; i++) {
     const fileNum = d.startFileNum + i;
     const fileName = `${d.baseName} ${fileNum}.vcf`;
     const content = buildVCFContent(chunks[i], d.contactName, contactSeq);
     contactSeq += chunks[i].length;
-    await bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), fileName));
+    fileItems.push({ name: fileName, buf: Buffer.from(content, "utf8") });
     filesList.push(`📄 <code>${esc(fileName)}</code> (${chunks[i].length} contacts)`);
+  }
+  const BATCH = 10;
+  for (let b = 0; b < fileItems.length; b += BATCH) {
+    await Promise.all(
+      fileItems.slice(b, b + BATCH).map(f =>
+        retryTgApi(() => bot.api.sendDocument(userId, new InputFile(f.buf, f.name)))
+      )
+    );
   }
 
   await bot.api.sendMessage(
@@ -18083,7 +18097,7 @@ bot.on("message:document", async (ctx) => {
         );
       }
     } catch (err: any) {
-      await ctx.reply(`❌ Error processing file: ${err?.message || String(err)}`);
+      await ctx.reply(`❌ Error processing file: ${unwrapError(err)}`);
     }
     return;
   }
