@@ -517,6 +517,9 @@ export interface PersistedAutoChatSession {
   // ── acf-specific ──────────────────────────────────────────────────────────
   primaryJid?: string;
   autoJid?: string;
+  // all-to-all multi-WA: full JID + userId arrays (N WA support)
+  allJids?: string[];
+  allUserIds?: string[];
   // autoChatExpiresAt shared above
 
   // ── message count fields (cig + acf) ─────────────────────────────────────
@@ -560,6 +563,8 @@ export async function loadAllAutoChatSessions(): Promise<PersistedAutoChatSessio
       messageIndex: d["messageIndex"] as number | undefined,
       primaryJid: d["primaryJid"] as string | undefined,
       autoJid: d["autoJid"] as string | undefined,
+      allJids: d["allJids"] as string[] | undefined,
+      allUserIds: d["allUserIds"] as string[] | undefined,
       sentCount: d["sentCount"] as number | undefined,
       sentByAccount1: d["sentByAccount1"] as number | undefined,
       sentByAccount2: d["sentByAccount2"] as number | undefined,
