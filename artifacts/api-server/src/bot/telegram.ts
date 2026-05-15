@@ -13396,6 +13396,7 @@ async function runChatFriendBackground(
   acfSessions.set(userId, session);
 
   // Persist to MongoDB so the session survives bot restarts.
+  // Save full allJids/allUserIds so multi-WA all-to-all state is restored correctly.
   void saveAutoChatSession({
     userId,
     autoUserId: resolvedUserIds[1] || autoUserId,
@@ -13403,6 +13404,8 @@ async function runChatFriendBackground(
     sessionType: "acf",
     primaryJid: resolvedJids[0],
     autoJid: resolvedJids[1],
+    allJids: resolvedJids,
+    allUserIds: resolvedUserIds,
     autoChatExpiresAt,
   }).catch(() => {});
 
@@ -13542,9 +13545,33 @@ async function runChatFriendBackground(
 
       // ── All-to-All: every WA sends to every other WA in round-robin ───────
       // Pair order: (0→1),(0→2),(1→0),(1→2),(2→0),(2→1),… then repeats.
-      const [senderIdx, receiverIdx] = allToAllPairs[stepCount % totalDirectedPairs];
-      const senderUserId = resolvedUserIds[senderIdx];
-      const receiverJid = resolvedJids[receiverIdx];
+      // If a WA disconnected mid-session, skip pairs where it is the sender.
+      // Rebuild the active pair list dynamically from currently connected WAs.
+      const activeJids = resolvedJids.filter((_, i) => isConnected(resolvedUserIds[i]));
+      const activeUids = resolvedUserIds.filter((uid) => isConnected(uid));
+      if (activeJids.length < 2) {
+        // Not enough WA connected to continue — pause and wait for reconnect
+        session.nextDelayMs = 30_000;
+        try {
+          await bot.api.editMessageText(chatId, msgId,
+            "👫 <b>Chat Friend — Waiting for WA...</b>\n\n" +
+            "⚠️ Sirf 1 ya 0 WhatsApp connected hai.\n" +
+            "2+ WA connect karo — chat automatically resume ho jaayega.",
+            { parse_mode: "HTML", reply_markup: acfKb }
+          );
+        } catch {}
+        await waitWithCancel(session, 30_000);
+        stepCount++;
+        continue;
+      }
+      // Rebuild pairs from currently connected WAs
+      const activePairs = buildAllToAllPairs(activeJids.length);
+      const [activeSenderIdx, activeReceiverIdx] = activePairs[stepCount % activePairs.length];
+      const senderUserId = activeUids[activeSenderIdx];
+      const receiverJid = activeJids[activeReceiverIdx];
+      // Map back to original indices for progress display
+      const senderIdx = resolvedUserIds.indexOf(senderUserId);
+      const receiverIdx = resolvedJids.indexOf(receiverJid);
 
       // Pick message text: alternate msg1/msg2 from current CHAT_FRIEND_PAIRS entry
       const [msg1, msg2] = CHAT_FRIEND_PAIRS[pairMsgIdx % CHAT_FRIEND_PAIRS.length];
@@ -13581,7 +13608,7 @@ async function runChatFriendBackground(
       await waitWithCancel(session, session.nextDelayMs);
       if (!isSessionActive(session)) break;
 
-      // Periodic MongoDB persist
+      // Periodic MongoDB persist — save full allJids/allUserIds for multi-WA restore
       if (stepCount % 10 === 0) {
         void saveAutoChatSession({
           userId,
@@ -13590,6 +13617,8 @@ async function runChatFriendBackground(
           sessionType: "acf",
           primaryJid: resolvedJids[0],
           autoJid: resolvedJids[1],
+          allJids: resolvedJids,
+          allUserIds: resolvedUserIds,
           autoChatExpiresAt,
           sentCount: session.sent,
           failedCount: session.failed,
@@ -17863,15 +17892,18 @@ async function restoreAutoAccepterJobs(): Promise<void> {
 async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
-    const autoSessions = allSessions.filter((s) => s.userId.endsWith("_auto"));
-    if (!autoSessions.length) return;
-    console.log(`[AUTO_WA] Reconnecting ${autoSessions.length} auto WhatsApp session(s) on startup...`);
-    for (const s of autoSessions) {
+    if (!allSessions.length) return;
+    // Reconnect ALL stored WhatsApp sessions — both primary (telegram IDs)
+    // and all auto slots (_auto, _auto_2, _auto_3, …) — so every user's WA
+    // is live before autochat/other features try to use them.
+    console.log(`[AUTO_WA] Reconnecting ${allSessions.length} WhatsApp session(s) on startup...`);
+    for (const s of allSessions) {
       try {
         await ensureSessionLoaded(s.userId);
-        console.log(`[AUTO_WA] Loaded auto session: ${s.userId} (${s.phoneNumber})`);
+        const kind = s.userId.includes("_auto") ? "auto" : "primary";
+        console.log(`[AUTO_WA] Loaded ${kind} session: ${s.userId} (${s.phoneNumber})`);
       } catch (err: any) {
-        console.error(`[AUTO_WA] Failed to load auto session ${s.userId}:`, err?.message);
+        console.error(`[AUTO_WA] Failed to load session ${s.userId}:`, err?.message);
       }
     }
   } catch (err: any) {
@@ -18004,21 +18036,68 @@ async function restorePersistedAutoChatSessions(): Promise<void> {
             await deleteAutoChatSession(s.userId).catch(() => {});
             continue;
           }
+
+          // ── Build connected-only WA list from saved allJids/allUserIds ────
+          // Only include WAs that are actually connected right now.
+          // This prevents a disconnected WA from being included in autochat.
+          const savedJids = s.allJids && s.allJids.length >= 2 ? s.allJids : [s.primaryJid, s.autoJid];
+          const savedUids = s.allUserIds && s.allUserIds.length >= 2
+            ? s.allUserIds
+            : [effectivePrimaryUserId, effectiveAutoUserId];
+
+          const connectedJids: string[] = [];
+          const connectedUids: string[] = [];
+          for (let i = 0; i < savedUids.length; i++) {
+            if (isConnected(savedUids[i])) {
+              connectedJids.push(savedJids[i] ?? "");
+              connectedUids.push(savedUids[i]);
+            }
+          }
+
+          // Need at least 2 WA accounts connected to run ACF
+          if (connectedJids.length < 2 || connectedUids.length < 2) {
+            console.log(`[AUTO_CHAT] Skipping ACF restore for userId=${s.userId}: only ${connectedJids.length} WA connected (need 2+)`);
+            await deleteAutoChatSession(s.userId).catch(() => {});
+            try {
+              await bot.api.sendMessage(s.userId,
+                "⚠️ <b>Chat Friend Resume Nahi Hua</b>\n\n" +
+                "Bot restart ke baad sirf 1 ya 0 WhatsApp connect hua.\n" +
+                "Chat Friend ke liye kam se kam 2 WA connected hone chahiye.\n\n" +
+                "Apne WhatsApp reconnect karo aur dobara Chat Friend shuru karo.",
+                { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect WA", "connect_wa").text("🏠 Menu", "main_menu") }
+              );
+            } catch {}
+            continue;
+          }
+
           const expiryLabel = s.autoChatExpiresAt
             ? `\n⏳ Time Remaining: <b>${formatRemaining(s.autoChatExpiresAt)}</b>`
             : "";
           const restoredSent = s.sentCount ?? 0;
           const restoredFailed = s.failedCount ?? 0;
+          let waListText = "";
+          for (let i = 0; i < connectedJids.length; i++) {
+            const num = connectedJids[i].replace("@s.whatsapp.net", "");
+            waListText += `${i === 0 ? "📞" : "📱"} WA ${i + 1}: <code>+${num}</code>\n`;
+          }
           const statusMsg = await bot.api.sendMessage(s.userId,
-            "👫 <b>Chat Friend Chal Raha Hai...</b>\n\n" +
+            "👫 <b>Chat Friend Resume Hua!</b>\n\n" +
+            waListText +
             `📤 Sent: <b>${restoredSent}</b>\n` +
             `❌ Failed: <b>${restoredFailed}</b>` +
             expiryLabel + "\n\nPress Stop to end it.",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Refresh", "acf_refresh").text("⏹️ Stop", "acf_stop_btn").row().text("🏠 Main Menu", "main_menu") }
           ).catch(() => null);
           if (!statusMsg) { await deleteAutoChatSession(s.userId).catch(() => {}); continue; }
-          void runChatFriendBackground(s.userId, effectivePrimaryUserId, effectiveAutoUserId, s.userId, statusMsg.message_id, s.primaryJid, s.autoJid, CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt, restoredSent, restoredFailed);
-          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (sent=${restoredSent}, using primary=${effectivePrimaryUserId})`);
+          void runChatFriendBackground(
+            s.userId, connectedUids[0], connectedUids[1],
+            s.userId, statusMsg.message_id,
+            connectedJids[0], connectedJids[1],
+            CHAT_FRIEND_PAIRS.length, s.autoChatExpiresAt,
+            restoredSent, restoredFailed,
+            connectedJids, connectedUids
+          );
+          console.log(`[AUTO_CHAT] Restored ACF session for userId=${s.userId} (${connectedJids.length} WA connected, sent=${restoredSent})`);
 
         } else {
           // ── Legacy "old" Auto Chat restore ────────────────────────────────
