@@ -200,6 +200,39 @@ export async function downloadBuffer(url: string, maxBytes = 20 * 1024 * 1024): 
   throw lastErr;
 }
 
+// ─── Output builders (Convert Files feature) ──────────────────────────────────
+
+/** Build a plain-text file: one phone per line. */
+export function buildTXTContent(phones: string[]): string {
+  return phones.join("\n");
+}
+
+/** Build a CSV file with a "Phone" header row. */
+export function buildCSVContent(phones: string[]): string {
+  return "Phone\n" + phones.join("\n");
+}
+
+/** Build an XLSX Buffer from a list of phone numbers. */
+export async function buildXLSXBuffer(phones: string[]): Promise<Buffer> {
+  const XLSX = await import("xlsx");
+  const ws = XLSX.utils.aoa_to_sheet([["Phone"], ...phones.map((p) => [p])]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Contacts");
+  return Buffer.from(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer);
+}
+
+/**
+ * Normalise any uploaded extension to a canonical output format key.
+ * Used to decide which Convert button to hide when all uploaded files
+ * are already in the same format.
+ */
+export function canonicalExt(ext: string): string {
+  const e = ext.toLowerCase();
+  if (e === ".xls" || e === ".xlsm") return ".xlsx";
+  if (e === ".tsv") return ".csv";
+  return e;
+}
+
 /** Supported file extensions for upload. */
 export const SUPPORTED_EXTS = new Set([".vcf", ".txt", ".csv", ".tsv", ".xlsx", ".xls", ".xlsm"]);
 

@@ -109,6 +109,10 @@ import {
   extractPhonesFromBuffer,
   buildVCFContent,
   buildSplitContent,
+  buildTXTContent,
+  buildCSVContent,
+  buildXLSXBuffer,
+  canonicalExt,
   chunkArray,
   detectMergeExt,
   downloadBuffer,
@@ -1310,7 +1314,7 @@ interface UserState {
   };
   // ── /file — VCF File Tools ────────────────────────────────────────────────
   fileEditorData?: {
-    mode: "editor" | "splitter" | "merge" | "number2vcf";
+    mode: "editor" | "splitter" | "merge" | "number2vcf" | "converter";
     contactsGroups: string[][];  // extracted phone arrays per file
     fileNames: string[];
     fileExts: string[];
@@ -17749,7 +17753,8 @@ function fileToolsMenuText(): string {
     "📝 <b>VCF Editor</b> — Convert any file to VCF with custom names\n" +
     "✂️ <b>Splitter</b> — Split one big file into smaller parts\n" +
     "🔗 <b>Merge</b> — Combine multiple files into one\n" +
-    "📞 <b>Number → VCF</b> — Type numbers → get a .vcf file\n\n" +
+    "📞 <b>Number → VCF</b> — Type numbers → get a .vcf file\n" +
+    "🔄 <b>Convert Files</b> — Change format: VCF ↔ TXT ↔ CSV ↔ XLSX\n\n" +
     "<b>Supported formats:</b> <code>.vcf · .txt · .csv · .xlsx · .xlsm</code>"
   );
 }
@@ -17758,6 +17763,7 @@ function fileToolsMenuKb(): InlineKeyboard {
   return new InlineKeyboard()
     .text("📝 VCF Editor", "ft_vcf_editor").text("✂️ Splitter", "ft_splitter").row()
     .text("🔗 Merge", "ft_merge").text("📞 Number → VCF", "ft_num2vcf").row()
+    .text("🔄 Convert Files", "ft_converter").row()
     .text("🏠 Main Menu", "main_menu");
 }
 
@@ -17890,6 +17896,128 @@ bot.callbackQuery(/^fm_fmt_(.+)$/, async (ctx) => {
   const fmt = "." + ctx.match[1];
   await doMergeAndSend(ctx, userId, state, fmt);
 });
+
+// ── Convert Files ─────────────────────────────────────────────────────────────
+
+bot.callbackQuery("ft_converter", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  userStates.set(userId, {
+    step: "fc_upload",
+    fileEditorData: { mode: "converter", contactsGroups: [], fileNames: [], fileExts: [] },
+  });
+  await ctx.editMessageText(
+    "🔄 <b>Convert Files</b>\n\n" +
+    "Send one or more files — <b>.vcf · .txt · .csv · .xlsx · .xlsm</b>\n" +
+    "You can send multiple files one by one.\n\n" +
+    "When done uploading, tap <b>✅ Done Uploading</b>",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done Uploading", "fc_done_upload").row().text("❌ Cancel", "ft_menu") }
+  );
+});
+
+bot.callbackQuery("fc_done_upload", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.fileEditorData || state.step !== "fc_upload") return;
+  const d = state.fileEditorData;
+  if (!d.contactsGroups.length) {
+    await ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
+    return;
+  }
+
+  // Determine which format button to hide: if all files share the same canonical
+  // format there's no point converting them to that same format.
+  const uniqueCanonical = new Set(d.fileExts.map(canonicalExt));
+  const hideExt = uniqueCanonical.size === 1 ? [...uniqueCanonical][0] : null;
+
+  state.step = "fc_format";
+  const total = d.contactsGroups.reduce((s, g) => s + g.length, 0);
+  const fileList = d.fileNames.map(
+    (n, i) => `• <code>${esc(n)}</code> — <b>${d.contactsGroups[i].length}</b> contacts`
+  ).join("\n");
+
+  const kb = new InlineKeyboard();
+  if (hideExt !== ".txt") kb.text("📄 TXT", "fc_fmt_txt");
+  if (hideExt !== ".vcf") kb.text("📱 VCF", "fc_fmt_vcf");
+  kb.row();
+  if (hideExt !== ".csv") kb.text("📊 CSV", "fc_fmt_csv");
+  if (hideExt !== ".xlsx") kb.text("📗 XLSX", "fc_fmt_xlsx");
+  kb.row().text("❌ Cancel", "ft_menu");
+
+  await ctx.editMessageText(
+    `🔄 <b>Convert Files</b>\n\n` +
+    `📁 <b>${d.fileNames.length} file(s) · ${total} contacts total</b>\n\n` +
+    `${fileList}\n\n` +
+    `Choose the <b>output format</b>:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^fc_fmt_(vcf|txt|csv|xlsx)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.fileEditorData) return;
+  const outExt = "." + ctx.match[1];
+  await doConvertAndSend(ctx, userId, state, outExt);
+});
+
+async function doConvertAndSend(ctx: any, userId: number, state: any, outExt: string): Promise<void> {
+  const d = state.fileEditorData as NonNullable<UserState["fileEditorData"]>;
+  const files = [...d.fileNames];
+  const groups = d.contactsGroups.map((g) => [...g]);
+  const fmtLabel = outExt.slice(1).toUpperCase();
+  userStates.delete(userId);
+
+  try {
+    await ctx.editMessageText(
+      `🔄 <b>Converting ${files.length} file(s) to ${fmtLabel}...</b>`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+
+  const summaryLines: string[] = [];
+
+  // Send files in batches of 5 — each iteration builds the Buffer, sends, then GC
+  const BATCH = 5;
+  for (let b = 0; b < files.length; b += BATCH) {
+    const bEnd = Math.min(b + BATCH, files.length);
+    await Promise.all(
+      Array.from({ length: bEnd - b }, async (_, j) => {
+        const i = b + j;
+        const phones = groups[i];
+        const baseName = files[i].replace(/\.[^.]+$/, "");
+        const outName = `${baseName}${outExt}`;
+
+        let buf: Buffer;
+        if (outExt === ".vcf") {
+          buf = Buffer.from(buildSplitContent(phones, ".vcf"), "utf8");
+        } else if (outExt === ".txt") {
+          buf = Buffer.from(buildTXTContent(phones), "utf8");
+        } else if (outExt === ".csv") {
+          buf = Buffer.from(buildCSVContent(phones), "utf8");
+        } else {
+          buf = await buildXLSXBuffer(phones);
+        }
+
+        summaryLines[i] = `📄 <code>${esc(outName)}</code> — <b>${phones.length}</b> contacts`;
+        return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(buf, outName)));
+      })
+    );
+  }
+
+  const totalContacts = groups.reduce((s, g) => s + g.length, 0);
+  await bot.api.sendMessage(
+    userId,
+    `✅ <b>Conversion Complete!</b>\n\n` +
+    `🔄 Output format: <b>${fmtLabel}</b>\n` +
+    `📁 Files converted: <b>${files.length}</b>\n` +
+    `📞 Total contacts: <b>${totalContacts}</b>\n\n` +
+    `📋 <b>Summary:</b>\n${summaryLines.join("\n")}`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Tools", "ft_menu").text("🏠 Main Menu", "main_menu") }
+  );
+}
 
 async function doMergeAndSend(ctx: any, userId: number, state: any, outExt: string): Promise<void> {
   const d = state.fileEditorData as NonNullable<UserState["fileEditorData"]>;
@@ -18093,7 +18221,7 @@ bot.on("message:document", async (ctx) => {
   const isTxt = fileNameLower.endsWith(".txt");
 
   // ── File Tools: handle upload states before format check ─────────────────
-  const fileToolsUploadStep = state.step === "fe_upload" || state.step === "fs_upload" || state.step === "fm_upload";
+  const fileToolsUploadStep = state.step === "fe_upload" || state.step === "fs_upload" || state.step === "fm_upload" || state.step === "fc_upload";
   if (fileToolsUploadStep) {
     if (!isSupportedExt(fileNameLower)) {
       await ctx.reply("❌ Unsupported format.\nAllowed: <b>.vcf · .txt · .csv · .xlsx · .xls · .xlsm</b>", { parse_mode: "HTML" });
@@ -18138,11 +18266,15 @@ bot.on("message:document", async (ctx) => {
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ft_menu") }
         );
       } else {
-        // Editor / Merge: accumulate, show running count
+        // Editor / Merge / Converter: accumulate, show running count
         const totalFiles = d.contactsGroups.length;
         const totalContacts = d.contactsGroups.reduce((s, g) => s + g.length, 0);
-        const doneBtn = state.step === "fe_upload" ? "fe_done_upload" : "fm_done_upload";
-        const label = state.step === "fe_upload" ? "VCF Editor" : "Merge";
+        const doneBtn = state.step === "fe_upload" ? "fe_done_upload"
+          : state.step === "fc_upload" ? "fc_done_upload"
+          : "fm_done_upload";
+        const label = state.step === "fe_upload" ? "VCF Editor"
+          : state.step === "fc_upload" ? "Convert Files"
+          : "Merge";
         await ctx.reply(
           `✅ <b>${esc(fileName)}</b> received · ${phones.length} contacts\n\n` +
           `📁 <b>${label}</b> — ${totalFiles} file(s) · ${totalContacts} total contacts so far\n\n` +
