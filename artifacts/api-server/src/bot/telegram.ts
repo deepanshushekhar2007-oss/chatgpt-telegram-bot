@@ -18205,64 +18205,88 @@ bot.on("message:document", async (ctx) => {
       await ctx.reply("❌ Unsupported format.\nAllowed: <b>.vcf · .txt · .csv · .xlsx · .xls · .xlsm</b>", { parse_mode: "HTML" });
       return;
     }
-    const d = state.fileEditorData;
-    if (!d) return;
 
-    // Splitter: only 1 file allowed
-    if (state.step === "fs_upload" && d.contactsGroups.length >= 1) {
-      await ctx.reply("✂️ <b>Splitter</b> — only <b>1 file</b> allowed.\nTap ❌ Cancel and start over if you want a different file.", { parse_mode: "HTML" });
-      return;
-    }
-
-    try {
-      const fileInfo = await retryGetFile(ctx.api, doc.file_id);
-      if (!fileInfo.file_path) { await ctx.reply("❌ Could not download file. Please try again."); return; }
-      const url = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
-      const buf = await downloadBuffer(url);
-      const phones = await extractPhonesFromBuffer(buf, fileNameLower);
-
-      if (!phones.length) {
-        await ctx.reply(`❌ No valid phone numbers found in <code>${esc(fileName)}</code>.`, { parse_mode: "HTML" });
+    // Splitter: only 1 file allowed — check before queuing to give instant feedback
+    if (state.step === "fs_upload") {
+      const dCheck = state.fileEditorData;
+      if (dCheck && dCheck.contactsGroups.length >= 1) {
+        await ctx.reply("✂️ <b>Splitter</b> — only <b>1 file</b> allowed.\nTap ❌ Cancel and start over if you want a different file.", { parse_mode: "HTML" });
         return;
       }
-
-      // Store only the phones array — raw buffer is GC'd immediately
-      d.contactsGroups.push(phones);
-      d.fileNames.push(fileName);
-      const ext = fileNameLower.includes(".") ? "." + fileNameLower.split(".").pop()! : ".vcf";
-      d.fileExts.push(ext);
-
-      if (state.step === "fs_upload") {
-        // Splitter: immediately ask for split count
-        state.step = "fs_count";
-        await ctx.reply(
-          `✂️ <b>File received!</b>\n` +
-          `📄 <code>${esc(fileName)}</code>\n` +
-          `📞 Total contacts: <b>${phones.length}</b>\n\n` +
-          "Enter the <b>number of contacts per split file</b>:\n" +
-          "<i>Example: type <code>200</code> to get files of 200 contacts each</i>",
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ft_menu") }
-        );
-      } else {
-        // Editor / Merge / Converter: accumulate, show running count
-        const totalFiles = d.contactsGroups.length;
-        const totalContacts = d.contactsGroups.reduce((s, g) => s + g.length, 0);
-        const doneBtn = state.step === "fe_upload" ? "fe_done_upload"
-          : state.step === "fc_upload" ? "fc_done_upload"
-          : "fm_done_upload";
-        const label = state.step === "fe_upload" ? "VCF Editor"
-          : state.step === "fc_upload" ? "Convert Files"
-          : "Merge";
-        await ctx.reply(
-          `✅ <b>${esc(fileName)}</b> received · ${phones.length} contacts\n\n` +
-          `📁 <b>${label}</b> — ${totalFiles} file(s) · ${totalContacts} total contacts so far\n\n` +
-          "Send more files, or tap <b>✅ Done Uploading</b>",
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done Uploading", doneBtn).row().text("❌ Cancel", "ft_menu") }
-        );
-      }
-    } catch (err: any) {
-      await ctx.reply(`❌ Error processing file: ${unwrapError(err)}`);
     }
+
+    // Capture everything we need from ctx before entering the async queue —
+    // the Grammy context object is only valid for the current tick.
+    const ftDocFileId = doc.file_id;
+    const ftFileName = fileName;
+    const ftFileNameLower = fileNameLower;
+    const ftApi = ctx.api;
+    const ftStep = state.step;
+
+    // Enqueue — serialises concurrent uploads so simultaneous file sends
+    // (e.g. a media album) don't race on the same fileEditorData object or
+    // flood Telegram's CDN with parallel downloads that trigger ETIMEDOUT.
+    void enqueueVcfProcessing(userId, async () => {
+      // Re-read state inside the task — it may have been updated by a
+      // prior queued upload finishing before us.
+      const s = userStates.get(userId);
+      if (!s) return;
+      const d = s.fileEditorData;
+      if (!d) return;
+
+      // Double-check splitter limit inside the queue (race-safe)
+      if (ftStep === "fs_upload" && d.contactsGroups.length >= 1) return;
+
+      try {
+        const fileInfo = await retryGetFile(ftApi, ftDocFileId);
+        if (!fileInfo.file_path) { await ctx.reply("❌ Could not download file. Please try again."); return; }
+        const url = `https://api.telegram.org/file/bot${token}/${fileInfo.file_path}`;
+        const buf = await downloadBuffer(url);
+        const phones = await extractPhonesFromBuffer(buf, ftFileNameLower);
+
+        if (!phones.length) {
+          await ctx.reply(`❌ No valid phone numbers found in <code>${esc(ftFileName)}</code>.`, { parse_mode: "HTML" });
+          return;
+        }
+
+        // Store only the phones array — raw buffer is GC'd immediately
+        d.contactsGroups.push(phones);
+        d.fileNames.push(ftFileName);
+        const ext = ftFileNameLower.includes(".") ? "." + ftFileNameLower.split(".").pop()! : ".vcf";
+        d.fileExts.push(ext);
+
+        if (s.step === "fs_upload") {
+          // Splitter: immediately ask for split count
+          s.step = "fs_count";
+          await ctx.reply(
+            `✂️ <b>File received!</b>\n` +
+            `📄 <code>${esc(ftFileName)}</code>\n` +
+            `📞 Total contacts: <b>${phones.length}</b>\n\n` +
+            "Enter the <b>number of contacts per split file</b>:\n" +
+            "<i>Example: type <code>200</code> to get files of 200 contacts each</i>",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ft_menu") }
+          );
+        } else {
+          // Editor / Merge / Converter: accumulate, show running count
+          const totalFiles = d.contactsGroups.length;
+          const totalContacts = d.contactsGroups.reduce((acc, g) => acc + g.length, 0);
+          const doneBtn = s.step === "fe_upload" ? "fe_done_upload"
+            : s.step === "fc_upload" ? "fc_done_upload"
+            : "fm_done_upload";
+          const label = s.step === "fe_upload" ? "VCF Editor"
+            : s.step === "fc_upload" ? "Convert Files"
+            : "Merge";
+          await ctx.reply(
+            `✅ <b>${esc(ftFileName)}</b> received · ${phones.length} contacts\n\n` +
+            `📁 <b>${label}</b> — ${totalFiles} file(s) · ${totalContacts} total contacts so far\n\n` +
+            "Send more files, or tap <b>✅ Done Uploading</b>",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done Uploading", doneBtn).row().text("❌ Cancel", "ft_menu") }
+          );
+        }
+      } catch (err: any) {
+        try { await ctx.reply(`❌ Error processing file: ${unwrapError(err)}`); } catch {}
+      }
+    });
     return;
   }
   // ── End File Tools upload handler ─────────────────────────────────────────
@@ -18474,12 +18498,12 @@ bot.on("message:document", async (ctx) => {
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
-function downloadBuffer(url: string): Promise<Buffer>;
-function downloadBuffer(url: string, asBuffer: true): Promise<Buffer>;
-function downloadBuffer(url: string, _asBuffer?: boolean): Promise<Buffer> {
+// Single-attempt download with a 45-second socket timeout so a stalled
+// Telegram CDN connection cannot block the processing queue indefinitely.
+function downloadBufferOnce(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
-    client.get(url, (res) => {
+    const req = client.get(url, (res) => {
       if (res.statusCode && res.statusCode >= 400) {
         res.resume();
         reject(new Error(`HTTP ${res.statusCode} downloading file`));
@@ -18489,8 +18513,38 @@ function downloadBuffer(url: string, _asBuffer?: boolean): Promise<Buffer> {
       res.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
       res.on("end", () => resolve(Buffer.concat(chunks)));
       res.on("error", reject);
-    }).on("error", reject);
+    });
+    req.on("error", reject);
+    // Hard socket timeout — kills the request if no data arrives for 45 s.
+    // Without this, a stalled TCP connection can hang indefinitely, blocking
+    // the per-user queue and causing "bot stuck" behaviour for subsequent
+    // file uploads.
+    req.setTimeout(45_000, () => {
+      req.destroy();
+      reject(new Error("Download timeout after 45s — please resend the file"));
+    });
   });
+}
+
+// Retry-safe downloadBuffer: up to 3 attempts with exponential back-off.
+// Fixes ETIMEDOUT / ENETUNREACH errors that occur when multiple VCF files
+// are uploaded simultaneously and Telegram's CDN briefly becomes unreachable.
+function downloadBuffer(url: string): Promise<Buffer>;
+function downloadBuffer(url: string, asBuffer: true): Promise<Buffer>;
+async function downloadBuffer(url: string, _asBuffer?: boolean): Promise<Buffer> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await downloadBufferOnce(url);
+    } catch (err) {
+      lastErr = err;
+      // Don't retry permanent HTTP 4xx errors (bad URL, forbidden, etc.)
+      if (err instanceof Error && /HTTP 4\d\d/.test(err.message)) throw err;
+      // Exponential back-off: 1 s, 2 s, 4 s
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+    }
+  }
+  throw lastErr;
 }
 
 function downloadText(url: string): Promise<string> {
@@ -18531,10 +18585,31 @@ async function retryGetFile(api: any, fileId: string, maxRetries = 3): Promise<a
 // advance it to the same next value, causing contacts to land in the wrong
 // group and silently dropping one file.  The queue ensures they are
 // processed one-at-a-time, in arrival order.
+//
+// Each task is also wrapped in a 90-second hard timeout so that a hung
+// download or API call can never permanently block all subsequent uploads
+// for the same user ("bot stuck" after large batch file uploads).
 const vcfProcessingQueue: Map<number, Promise<void>> = new Map();
+
+/** Run `task` but reject if it takes longer than `ms` milliseconds. */
+function withTaskTimeout<T>(task: () => Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) { done = true; reject(new Error(`File processing timed out after ${ms / 1000}s`)); }
+    }, ms);
+    task().then(
+      (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+      (e) => { if (!done) { done = true; clearTimeout(timer); reject(e); } }
+    );
+  });
+}
+
 function enqueueVcfProcessing(userId: number, task: () => Promise<void>): Promise<void> {
   const prev = vcfProcessingQueue.get(userId) ?? Promise.resolve();
-  const next = prev.then(() => task()).catch(() => {});
+  // Wrap each task in a 90 s timeout so a stalled download never permanently
+  // blocks subsequent uploads for the same user.
+  const next = prev.then(() => withTaskTimeout(task, 90_000)).catch(() => {});
   vcfProcessingQueue.set(userId, next);
   // Clean up map entry after the chain settles so it can't grow unbounded.
   next.finally(() => {
