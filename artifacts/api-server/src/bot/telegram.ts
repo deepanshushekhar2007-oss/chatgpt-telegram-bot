@@ -17769,9 +17769,13 @@ function fileToolsMenuKb(): InlineKeyboard {
 
 bot.command("file", async (ctx) => {
   const userId = ctx.from!.id;
-  await trackUser(userId);
-  if (await isBanned(userId)) return;
-  await ctx.reply(fileToolsMenuText(), { parse_mode: "HTML", reply_markup: fileToolsMenuKb() });
+  // Send menu instantly — no await on DB calls before replying.
+  // trackUser + isBanned run in background; if banned, delete the menu silently.
+  const sent = await ctx.reply(fileToolsMenuText(), { parse_mode: "HTML", reply_markup: fileToolsMenuKb() });
+  void trackUser(userId);
+  if (await isBanned(userId)) {
+    try { await ctx.api.deleteMessage(ctx.chat.id, sent.message_id); } catch {}
+  }
 });
 
 bot.callbackQuery("ft_menu", async (ctx) => {
