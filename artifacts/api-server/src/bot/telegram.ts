@@ -1731,6 +1731,10 @@ const maLinkCollectMsgId = new Map<number, number>();
 const daLinkCollectMsgId = new Map<number, number>();
 const lvLinkCollectMsgId = new Map<number, number>();
 const ctcLinkCollectMsgId = new Map<number, number>();
+// Tracks the last "X file(s) received" status message sent during a File Tools
+// batch upload so we can delete the old one before sending the updated count,
+// keeping only ONE status message visible at a time (no button spam).
+const ftUploadStatusMsgId = new Map<number, number>();
 
 function buildRlProgressBar(done: number, total: number): string {
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
@@ -17799,6 +17803,7 @@ bot.callbackQuery("ft_menu", async (ctx) => {
 bot.callbackQuery("ft_vcf_editor", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
+  ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
     step: "fe_upload",
     fileEditorData: { mode: "editor", contactsGroups: [], fileNames: [], fileExts: [] },
@@ -17824,6 +17829,7 @@ bot.callbackQuery("fe_done_upload", async (ctx) => {
   }
   const total = d.contactsGroups.reduce((s, g) => s + g.length, 0);
   state.step = "fe_step1";
+  ftUploadStatusMsgId.delete(userId);
   await ctx.editMessageText(
     `✅ <b>${d.fileNames.length} file(s) received · ${total} contacts found</b>\n\n` +
     "━━━━━━━━━━━━━━━━━━━━━━━\n" +
@@ -17856,6 +17862,7 @@ bot.callbackQuery("ft_splitter", async (ctx) => {
 bot.callbackQuery("ft_merge", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
+  ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
     step: "fm_upload",
     fileEditorData: { mode: "merge", contactsGroups: [], fileNames: [], fileExts: [] },
@@ -17880,6 +17887,7 @@ bot.callbackQuery("fm_done_upload", async (ctx) => {
     await ctx.answerCallbackQuery({ text: "⚠️ Send at least 2 files to merge!", show_alert: true });
     return;
   }
+  ftUploadStatusMsgId.delete(userId);
   const autoExt = detectMergeExt(d.fileExts);
   if (autoExt) {
     await doMergeAndSend(ctx, userId, state, autoExt);
@@ -17913,6 +17921,7 @@ bot.callbackQuery(/^fm_fmt_(.+)$/, async (ctx) => {
 bot.callbackQuery("ft_converter", async (ctx) => {
   await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
+  ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
     step: "fc_upload",
     fileEditorData: { mode: "converter", contactsGroups: [], fileNames: [], fileExts: [] },
@@ -17936,6 +17945,7 @@ bot.callbackQuery("fc_done_upload", async (ctx) => {
     await ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
     return;
   }
+  ftUploadStatusMsgId.delete(userId);
 
   // Determine which format button to hide: if all files share the same canonical
   // format there's no point converting them to that same format.
@@ -18286,7 +18296,9 @@ bot.on("message:document", async (ctx) => {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "ft_menu") }
           );
         } else {
-          // Editor / Merge / Converter: accumulate, show running count
+          // Editor / Merge / Converter: accumulate, show running count.
+          // Delete the previous status message first so only ONE "Done Uploading"
+          // button is ever visible — no spam when multiple files are sent at once.
           const totalFiles = d.contactsGroups.length;
           const totalContacts = d.contactsGroups.reduce((acc, g) => acc + g.length, 0);
           const doneBtn = s.step === "fe_upload" ? "fe_done_upload"
@@ -18295,12 +18307,18 @@ bot.on("message:document", async (ctx) => {
           const label = s.step === "fe_upload" ? "VCF Editor"
             : s.step === "fc_upload" ? "Convert Files"
             : "Merge";
-          await ctx.reply(
+          const prevMsgId = ftUploadStatusMsgId.get(userId);
+          if (prevMsgId) {
+            try { await ctx.api.deleteMessage(ctx.chat.id, prevMsgId); } catch {}
+            ftUploadStatusMsgId.delete(userId);
+          }
+          const sentMsg = await ctx.reply(
             `✅ <b>${esc(ftFileName)}</b> received · ${phones.length} contacts\n\n` +
             `📁 <b>${label}</b> — ${totalFiles} file(s) · ${totalContacts} total contacts so far\n\n` +
             "Send more files, or tap <b>✅ Done Uploading</b>",
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Done Uploading", doneBtn).row().text("❌ Cancel", "ft_menu") }
           );
+          ftUploadStatusMsgId.set(userId, sentMsg.message_id);
         }
       } catch (err: any) {
         try { await ctx.reply(`❌ Error processing file: ${unwrapError(err)}`); } catch {}
@@ -18999,7 +19017,6 @@ export async function startBot() {
     const telegramIdStr = isAuto ? sessionUserId.replace(/_auto$/, "") : sessionUserId;
     const telegramId = Number(telegramIdStr);
     if (!Number.isFinite(telegramId)) return;
-    const phoneText = phoneNumber ? phoneNumber : "(unknown)";
     const accountLabel = isAuto ? "Auto Chat WhatsApp" : "WhatsApp";
     const reasonLower = (reason || "").toLowerCase();
 
@@ -19013,6 +19030,16 @@ export async function startBot() {
     const isLogout =
       reasonLower.includes("logged out") ||
       reasonLower.includes("logout");
+
+    // If the phone number is unknown (session never connected, e.g. after bot
+    // restart with stale/invalid creds that WhatsApp immediately rejects) AND
+    // the reason is logout, skip the notification entirely — the session data
+    // is already deleted from MongoDB, so the user will just see the Connect
+    // button on next /start. Sending an "(unknown) disconnected" alert adds
+    // noise without giving the user any actionable information.
+    if (!phoneNumber && isLogout) return;
+
+    const phoneText = phoneNumber ?? "(unknown)";
 
     let reconnectHint: string;
     if (isQrExpiry) {
