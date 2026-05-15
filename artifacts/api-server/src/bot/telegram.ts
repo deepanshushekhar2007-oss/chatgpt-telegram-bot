@@ -16535,32 +16535,41 @@ bot.on("message:text", async (ctx, next) => {
       if (!d) return;
       const num = parseInt(text.trim(), 10);
       if (isNaN(num) || num < 1) { await ctx.reply("❌ Please enter a valid positive number:"); return; }
+      // Snapshot only what we need, then delete state to free RAM
       const allPhones = d.contactsGroups[0] ?? [];
       const ext = d.fileExts[0] ?? ".vcf";
       const baseName = (d.fileNames[0] ?? "file").replace(/\.[^.]+$/, "");
-      const chunks = chunkArray(allPhones, num);
+      const totalContacts = allPhones.length;
+      const totalFiles = Math.ceil(totalContacts / num);
       userStates.delete(userId);
 
       await ctx.reply(
-        `⚡ <b>Splitting into ${chunks.length} file(s)...</b>\n📞 ${num} contacts each`,
+        `⚡ <b>Splitting into ${totalFiles} file(s)...</b>\n📞 ${num} contacts each`,
         { parse_mode: "HTML" }
       );
 
+      // Build and send each batch on the fly — no chunk array, no pre-built buffers.
+      // Each batch's Buffers are GC'd as soon as Promise.all resolves.
       const BATCH = 10;
-      for (let b = 0; b < chunks.length; b += BATCH) {
-        const batch = chunks.slice(b, b + BATCH);
-        await Promise.all(batch.map((ch, j) => {
-          const outName = `${baseName} ${b + j + 1}${ext}`;
-          const content = buildSplitContent(ch, ext);
-          return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
-        }));
+      for (let b = 0; b < totalFiles; b += BATCH) {
+        const bEnd = Math.min(b + BATCH, totalFiles);
+        await Promise.all(
+          Array.from({ length: bEnd - b }, (_, j) => {
+            const idx = b + j;
+            const start = idx * num;
+            const phones = allPhones.slice(start, Math.min(start + num, totalContacts));
+            const content = buildSplitContent(phones, ext);
+            const outName = `${baseName} ${idx + 1}${ext}`;
+            return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
+          })
+        );
       }
 
       await bot.api.sendMessage(
         userId,
         "✅ <b>Split Complete!</b>\n\n" +
-        `📊 Total contacts: <b>${allPhones.length}</b>\n` +
-        `✂️ Files created: <b>${chunks.length}</b>\n` +
+        `📊 Total contacts: <b>${totalContacts}</b>\n` +
+        `✂️ Files created: <b>${totalFiles}</b>\n` +
         `📞 Contacts per file: <b>${num}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Tools", "ft_menu").text("🏠 Main Menu", "main_menu") }
       );
@@ -17936,47 +17945,56 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
   const d = state.fileEditorData;
   if (!d.baseName || !d.contactName || d.startFileNum === undefined || d.contactStartNum === undefined || !d.contactsPerFile) return;
 
+  // Snapshot scalars — then free state so contactsGroups can be GC'd
   const allPhones: string[] = ([] as string[]).concat(...(d.contactsGroups as string[][]));
-  const chunks = chunkArray(allPhones, d.contactsPerFile);
-  const endFileNum = d.startFileNum + chunks.length - 1;
+  const { baseName, contactName, startFileNum, contactStartNum, contactsPerFile } = d;
+  const totalContacts = allPhones.length;
+  const totalFiles = Math.ceil(totalContacts / contactsPerFile);
+  const endFileNum = startFileNum + totalFiles - 1;
   userStates.delete(userId);
 
   try {
     await ctx.editMessageText(
-      `⚡ <b>Generating ${chunks.length} VCF file(s)...</b>\n📞 Total: <b>${allPhones.length}</b> contacts`,
+      `⚡ <b>Generating ${totalFiles} VCF file(s)...</b>\n📞 Total: <b>${totalContacts}</b> contacts`,
       { parse_mode: "HTML" }
     );
   } catch {}
 
-  const filesList: string[] = [];
-  let contactSeq = d.contactStartNum;
-  const fileItems: Array<{ name: string; buf: Buffer }> = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const fileNum = d.startFileNum + i;
-    const fileName = `${d.baseName} ${fileNum}.vcf`;
-    const content = buildVCFContent(chunks[i], d.contactName, contactSeq);
-    contactSeq += chunks[i].length;
-    fileItems.push({ name: fileName, buf: Buffer.from(content, "utf8") });
-    filesList.push(`📄 <code>${esc(fileName)}</code> (${chunks[i].length} contacts)`);
-  }
+  // Build and send batch-by-batch — no chunk array, no pre-built Buffer list.
+  // Each batch's string content and Buffers are GC'd after Promise.all resolves.
   const BATCH = 10;
-  for (let b = 0; b < fileItems.length; b += BATCH) {
+  for (let b = 0; b < totalFiles; b += BATCH) {
+    const bEnd = Math.min(b + BATCH, totalFiles);
     await Promise.all(
-      fileItems.slice(b, b + BATCH).map(f =>
-        retryTgApi(() => bot.api.sendDocument(userId, new InputFile(f.buf, f.name)))
-      )
+      Array.from({ length: bEnd - b }, (_, j) => {
+        const idx = b + j;
+        const start = idx * contactsPerFile;
+        const phones = allPhones.slice(start, Math.min(start + contactsPerFile, totalContacts));
+        const content = buildVCFContent(phones, contactName, contactStartNum + start);
+        const fileName = `${baseName} ${startFileNum + idx}.vcf`;
+        return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), fileName)));
+      })
     );
   }
+
+  // Summary — listing every file would overflow Telegram's 4096-char limit for
+  // large jobs, so only show individual entries when there are ≤ 20 files.
+  const summaryFiles = totalFiles <= 20
+    ? Array.from({ length: totalFiles }, (_, i) => {
+        const count = Math.min(contactsPerFile, totalContacts - i * contactsPerFile);
+        return `📄 <code>${esc(`${baseName} ${startFileNum + i}.vcf`)}</code> (${count} contacts)`;
+      }).join("\n") + "\n\n"
+    : `📄 <code>${esc(`${baseName} ${startFileNum}.vcf`)}</code> … <code>${esc(`${baseName} ${endFileNum}.vcf`)}</code>\n\n`;
 
   await bot.api.sendMessage(
     userId,
     "✅ <b>Conversion Complete!</b>\n\n" +
     "📊 <b>Summary:</b>\n" +
-    `• Total contacts processed: <b>${allPhones.length}</b>\n` +
-    `• VCF files created: <b>${chunks.length}</b>\n` +
-    `• Contacts per file: <b>${d.contactsPerFile}</b>\n` +
-    `• File range: <b>${d.startFileNum}</b> to <b>${endFileNum}</b>\n\n` +
-    `📁 <b>Files created:</b>\n${filesList.join("\n")}\n\n` +
+    `• Total contacts processed: <b>${totalContacts}</b>\n` +
+    `• VCF files created: <b>${totalFiles}</b>\n` +
+    `• Contacts per file: <b>${contactsPerFile}</b>\n` +
+    `• File range: <b>${startFileNum}</b> to <b>${endFileNum}</b>\n\n` +
+    `📁 <b>Files created:</b>\n${summaryFiles}` +
     "🏁 All tasks complete! Use /file for more tools.",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Tools", "ft_menu").text("🏠 Main Menu", "main_menu") }
   );
