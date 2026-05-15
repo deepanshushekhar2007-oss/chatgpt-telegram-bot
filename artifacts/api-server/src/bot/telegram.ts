@@ -16543,14 +16543,18 @@ bot.on("message:text", async (ctx, next) => {
       const totalFiles = Math.ceil(totalContacts / num);
       userStates.delete(userId);
 
-      await ctx.reply(
+      const progressMsg = await ctx.reply(
         `⚡ <b>Splitting into ${totalFiles} file(s)...</b>\n📞 ${num} contacts each`,
         { parse_mode: "HTML" }
       );
+      const progMsgId = totalFiles > 20 ? progressMsg.message_id : null;
 
       // Build and send each batch on the fly — no chunk array, no pre-built buffers.
       // Each batch's Buffers are GC'd as soon as Promise.all resolves.
       const BATCH = 10;
+      // Update progress every 5 batches (50 files) — fire-and-forget so edits never
+      // block file sending and stay within Telegram's ~20 edits/min rate limit.
+      const UPDATE_EVERY = 50;
       for (let b = 0; b < totalFiles; b += BATCH) {
         const bEnd = Math.min(b + BATCH, totalFiles);
         await Promise.all(
@@ -16563,6 +16567,13 @@ bot.on("message:text", async (ctx, next) => {
             return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), outName)));
           })
         );
+        if (progMsgId && bEnd < totalFiles && bEnd % UPDATE_EVERY === 0) {
+          const pct = Math.round((bEnd / totalFiles) * 100);
+          bot.api.editMessageText(userId, progMsgId,
+            `⚡ <b>Splitting...</b> ${bEnd} / ${totalFiles} files sent\n📊 Progress: <b>${pct}%</b>`,
+            { parse_mode: "HTML" }
+          ).catch(() => {});
+        }
       }
 
       await bot.api.sendMessage(
@@ -16573,6 +16584,9 @@ bot.on("message:text", async (ctx, next) => {
         `📞 Contacts per file: <b>${num}</b>`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📁 File Tools", "ft_menu").text("🏠 Main Menu", "main_menu") }
       );
+      if (progMsgId) {
+        bot.api.deleteMessage(userId, progMsgId).catch(() => {});
+      }
       return;
     }
 
@@ -17960,9 +17974,23 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
     );
   } catch {}
 
+  // For large jobs send a dedicated progress message that we edit every 50 files.
+  // Fire-and-forget edits never block the send loop and stay within Telegram's rate limit.
+  let progMsgId: number | null = null;
+  if (totalFiles > 20) {
+    try {
+      const pm = await bot.api.sendMessage(userId,
+        `⚡ <b>Generating...</b> 0 / ${totalFiles} files\n📊 Progress: <b>0%</b>`,
+        { parse_mode: "HTML" }
+      );
+      progMsgId = pm.message_id;
+    } catch {}
+  }
+
   // Build and send batch-by-batch — no chunk array, no pre-built Buffer list.
   // Each batch's string content and Buffers are GC'd after Promise.all resolves.
   const BATCH = 10;
+  const UPDATE_EVERY = 50;
   for (let b = 0; b < totalFiles; b += BATCH) {
     const bEnd = Math.min(b + BATCH, totalFiles);
     await Promise.all(
@@ -17975,7 +18003,15 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
         return retryTgApi(() => bot.api.sendDocument(userId, new InputFile(Buffer.from(content, "utf8"), fileName)));
       })
     );
+    if (progMsgId && bEnd < totalFiles && bEnd % UPDATE_EVERY === 0) {
+      const pct = Math.round((bEnd / totalFiles) * 100);
+      bot.api.editMessageText(userId, progMsgId,
+        `⚡ <b>Generating...</b> ${bEnd} / ${totalFiles} files\n📊 Progress: <b>${pct}%</b>`,
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+    }
   }
+  if (progMsgId) bot.api.deleteMessage(userId, progMsgId).catch(() => {});
 
   // Summary — listing every file would overflow Telegram's 4096-char limit for
   // large jobs, so only show individual entries when there are ≤ 20 files.
