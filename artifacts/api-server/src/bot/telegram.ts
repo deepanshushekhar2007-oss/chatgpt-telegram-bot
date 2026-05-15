@@ -608,8 +608,16 @@ bot.use(async (ctx, next) => {
 // can always pick a language and confirm the channel join even if their
 // trial has just expired.
 // ─────────────────────────────────────────────────────────────────────────────
-const REFER_GATE_EXEMPT_PREFIXES = ["lang_", "force_sub_"];
-const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
+const REFER_GATE_EXEMPT_PREFIXES = [
+  "lang_", "force_sub_",
+  // ── /file — VCF File Tools is FREE for ALL users, no access check ──────────
+  "ft_",   // File Tools menu buttons (ft_menu, ft_vcf_editor, ft_splitter, etc.)
+  "fe_",   // VCF Editor steps
+  "fs_",   // Splitter steps
+  "fm_",   // Merge steps
+  "fc_",   // Convert Files steps
+];
+const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined", "ft_num2vcf", "fe_confirm"]);
 function isReferGateExempt(cbData: string): boolean {
   if (REFER_GATE_EXEMPT_EXACT.has(cbData)) return true;
   return REFER_GATE_EXEMPT_PREFIXES.some((p) => cbData.startsWith(p));
