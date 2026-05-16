@@ -219,12 +219,21 @@ const bannedCache = new TTLCache<number, boolean>(300_000);
 const accessCache = new TTLCache<number, boolean>(300_000);
 /** Whether user has a stored WA session — 120 s TTL. Invalidated on disconnect/logout. */
 const hasSessionCache = new TTLCache<string, boolean>(120_000);
+/**
+ * Force-sub channel membership — 5 min TTL.
+ * Eliminates a getChatMember() Telegram API round-trip (~100-300ms) on every
+ * button press for regular users. Only `true` is cached (joined); `false` is
+ * never stored so the user can retry immediately after joining the channel.
+ * Busted in check_joined (on successful join) and clearUserMemoryState.
+ */
+const forceSubCache = new TTLCache<number, boolean>(5 * 60_000);
 
 // Periodic sweep: remove expired entries from all caches every 5 minutes.
 setInterval(() => {
   bannedCache.sweep();
   accessCache.sweep();
   hasSessionCache.sweep();
+  forceSubCache.sweep();
 }, 5 * 60 * 1000);
 
 // by check_joined / clearUserMemoryState. Cap is small (one entry per user
@@ -1054,10 +1063,17 @@ async function checkForceSub(ctx: any): Promise<boolean> {
   const userId = ctx.from?.id;
   if (!userId) return false;
   if (isAdmin(userId)) return true;
+  // In-memory cache hit — skips a getChatMember() Telegram API call (~100-300ms)
+  // on every button press. Only `true` is cached; denied users re-check every time
+  // so they get in immediately after joining without waiting for TTL expiry.
+  if (forceSubCache.get(userId) === true) return true;
 
   try {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
-    if (["member", "administrator", "creator"].includes(member.status)) return true;
+    if (["member", "administrator", "creator"].includes(member.status)) {
+      forceSubCache.set(userId, true);
+      return true;
+    }
   } catch (err: any) {
     console.error("[FORCE_SUB] Check error:", err?.message);
   }
@@ -2520,6 +2536,8 @@ bot.callbackQuery("check_joined", async (ctx) => {
   try {
     const member = await bot.api.getChatMember(FORCE_SUB_CHANNEL, userId);
     if (["member", "administrator", "creator"].includes(member.status)) {
+      // Warm the force-sub cache so subsequent button presses skip getChatMember()
+      forceSubCache.set(userId, true);
       const data = await loadBotData();
 
       // ── Award any pending referral now that the user has joined the
@@ -3183,14 +3201,25 @@ bot.callbackQuery(/^help_pg_(\d+)$/, async (ctx) => {
 async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   const userId = ctx.from?.id;
   if (!userId) return false;
-  if (await isBanned(userId)) {
+
+  // Run ban + access checks in parallel — both are independent cached DB calls.
+  // forceSub is now cached too, so the sequential order below is near-instant
+  // after the first check; the parallel pre-fetch of hasAccess saves one extra
+  // DB round-trip on cold cache misses.
+  const [banned, userHasAccess] = await Promise.all([
+    isBanned(userId),
+    hasAccess(userId),
+  ]);
+
+  if (banned) {
     try { await ctx.answerCallbackQuery({ text: "🚫 You are banned from this bot.", show_alert: true }); } catch {
       await ctx.reply("🚫 You are banned from using this bot.");
     }
     return false;
   }
+  // checkForceSub is cached after first check — no Telegram API call overhead.
   if (!(await checkForceSub(ctx))) return false;
-  if (!(await hasAccess(userId))) {
+  if (!userHasAccess) {
     try {
       await ctx.answerCallbackQuery({
         text: `🔒 Subscription required! Contact ${OWNER_USERNAME}`,
@@ -4637,6 +4666,9 @@ function clearUserMemoryState(telegramUserId: number): void {
 
   // 2. Per-user activity / cooldown bookkeeping
   userActivity.delete(telegramUserId);
+
+  // Bust the force-sub cache so a freshly cleared user re-checks membership
+  forceSubCache.del(telegramUserId);
 
   // 3. /help paginated message buffers (can hold large translated strings)
   helpPages.delete(telegramUserId);
