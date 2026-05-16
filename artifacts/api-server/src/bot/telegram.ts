@@ -487,7 +487,7 @@ bot.use(async (ctx, next) => {
       if (hasStored && !isDisconnectPending(String(userId))) {
         // Answer the callback query IMMEDIATELY so Telegram's 10s timeout
         // does not fire and cause a silent "nothing happens" drop.
-        try { await ctx.answerCallbackQuery(); } catch {}
+        ctx.answerCallbackQuery().catch(() => {})
 
         // ── Silent fast-path ───────────────────────────────────────────────
         // If Baileys is already mid-auto-reconnect (brief network blip,
@@ -496,7 +496,7 @@ bot.use(async (ctx, next) => {
         // bar from flashing on button presses that happen to land during a
         // routine 1-3 s socket handshake that Baileys will resolve on its own.
         if (isWhatsAppConnecting(String(userId))) {
-          const quickConnected = await waitForWhatsAppConnected(String(userId), { timeoutMs: 5_000, pollMs: 150 }).catch(() => false);
+          const quickConnected = await waitForWhatsAppConnected(String(userId), { timeoutMs: 1_000, pollMs: 100 }).catch(() => false);
           if (quickConnected) {
             (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
             // Fall through to handler — no UI needed.
@@ -634,6 +634,20 @@ function isReferGateExempt(cbData: string): boolean {
   return REFER_GATE_EXEMPT_PREFIXES.some((p) => cbData.startsWith(p));
 }
 
+// ── In-memory cache for loadBotData in the refer-gate (5s TTL) ──────────────
+// Avoids a MongoDB round-trip on EVERY button click just to check referMode.
+// Cache is intentionally short so admin changes take effect within 5 seconds.
+let _referGateBotDataCache: { data: Awaited<ReturnType<typeof loadBotData>>; expiresAt: number } | null = null;
+async function _getCachedBotDataForReferGate() {
+  const now = Date.now();
+  if (_referGateBotDataCache && now < _referGateBotDataCache.expiresAt) {
+    return _referGateBotDataCache.data;
+  }
+  const data = await loadBotData();
+  _referGateBotDataCache = { data, expiresAt: now + 5_000 };
+  return data;
+}
+
 bot.use(async (ctx, next) => {
   const cbData = ctx.callbackQuery?.data;
   if (!cbData) return next();
@@ -642,10 +656,18 @@ bot.use(async (ctx, next) => {
   if (isAdmin(userId)) return next();
   if (isReferGateExempt(cbData)) return next();
 
+  // ── INSTANT RESPONSE: answer the callback query immediately so the button
+  // spinner disappears at zero latency. The access check happens in parallel
+  // and will edit the message text if the user is out of access.
+  // We patch answerCallbackQuery to a no-op so downstream handlers don't double-answer.
+  ctx.answerCallbackQuery().catch(() => {});
+  (ctx as any).answerCallbackQuery = () => Promise.resolve(true);
+
   // Fail-open: if MongoDB is unavailable, let the handler run rather than
   // silently dropping the update (which causes "nothing happens" for the user).
+  // Use cached bot data (5s TTL) to avoid MongoDB round-trip on every button click.
   let data: Awaited<ReturnType<typeof loadBotData>>;
-  try { data = await loadBotData(); } catch { return next(); }
+  try { data = await _getCachedBotDataForReferGate(); } catch { return next(); }
   if (!data.referMode) return next();
 
   let state: Awaited<ReturnType<typeof getAccessState>>;
@@ -653,8 +675,6 @@ bot.use(async (ctx, next) => {
   if (state.kind !== "none") return next();
 
   // Out of access — block the button and surface the refer-required UI.
-  // show_alert: true makes the popup clearly visible (not a brief invisible toast).
-  try { await ctx.answerCallbackQuery({ text: "🔒 Free access ended", show_alert: true }); } catch {}
   try {
     const { text, keyboard } = await buildReferRequiredMessage(userId);
     try {
@@ -2527,7 +2547,7 @@ function mainMenu(userId?: number): InlineKeyboard {
 }
 
 bot.callbackQuery("check_joined", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!FORCE_SUB_CHANNEL) {
     await ctx.editMessageText("✅ Bot is ready! Use /start to begin.");
@@ -2596,7 +2616,7 @@ bot.callbackQuery("check_joined", async (ctx) => {
       return;
     }
   } catch {}
-  await ctx.answerCallbackQuery({ text: "❌ You haven't joined the channel yet!", show_alert: true });
+  ctx.answerCallbackQuery({ text: "❌ You haven't joined the channel yet!", show_alert: true });
 });
 
 // Render a 10-segment progress bar as text: e.g. [█████░░░░░] 50%
@@ -2985,7 +3005,7 @@ bot.command("myaccess", async (ctx) => {
 
 async function applyLanguageSelection(ctx: any, lang: Language): Promise<void> {
   const userId = ctx.from.id;
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
 
   // Was this the user's very first language pick? If yes, this is the
   // moment we kick off their one-and-only 24h free trial — NOT on /start.
@@ -3181,12 +3201,12 @@ function buildHelpKeyboard(page: number, total: number): InlineKeyboard {
 }
 
 bot.callbackQuery(/^help_pg_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from!.id;
   const page = Number(ctx.match![1]);
   const chunks = helpPages.get(userId);
   if (!chunks || page < 0 || page >= chunks.length) {
-    try { await ctx.answerCallbackQuery({ text: "Help session expired. Send /help again.", show_alert: true }); } catch {}
+    try { ctx.answerCallbackQuery({ text: "Help session expired. Send /help again.", show_alert: true }); } catch {}
     return;
   }
   helpPagesLastTouched.set(userId, Date.now());
@@ -3212,7 +3232,7 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   ]);
 
   if (banned) {
-    try { await ctx.answerCallbackQuery({ text: "🚫 You are banned from this bot.", show_alert: true }); } catch {
+    try { ctx.answerCallbackQuery({ text: "🚫 You are banned from this bot.", show_alert: true }); } catch {
       await ctx.reply("🚫 You are banned from using this bot.");
     }
     return false;
@@ -3221,7 +3241,7 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   if (!(await checkForceSub(ctx))) return false;
   if (!userHasAccess) {
     try {
-      await ctx.answerCallbackQuery({
+      ctx.answerCallbackQuery({
         text: `🔒 Subscription required! Contact ${OWNER_USERNAME}`,
         show_alert: true,
       });
@@ -3242,7 +3262,7 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
 }
 
 bot.callbackQuery("main_menu", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   userStates.delete(userId);
@@ -3255,7 +3275,7 @@ bot.callbackQuery("main_menu", async (ctx) => {
 // ─── Get Pending List ────────────────────────────────────────────────────────
 
 bot.callbackQuery("pending_list", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -3301,7 +3321,7 @@ bot.callbackQuery("pending_list", async (ctx) => {
 });
 
 bot.callbackQuery(/^pl_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData?.selectedIndices) return;
@@ -3316,7 +3336,7 @@ bot.callbackQuery(/^pl_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("pl_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData) return;
@@ -3328,7 +3348,7 @@ bot.callbackQuery("pl_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("pl_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData) return;
@@ -3341,11 +3361,11 @@ bot.callbackQuery("pl_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("pl_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("pl_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData?.selectedIndices) return;
@@ -3357,7 +3377,7 @@ bot.callbackQuery("pl_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("pl_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData?.selectedIndices) return;
@@ -3369,7 +3389,7 @@ bot.callbackQuery("pl_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("pl_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData?.selectedIndices || state.pendingListData.selectedIndices.size === 0) return;
@@ -3392,7 +3412,7 @@ bot.callbackQuery("pl_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("pl_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData) return;
@@ -3422,7 +3442,7 @@ bot.callbackQuery("pl_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^pl_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData) return;
@@ -3453,7 +3473,7 @@ bot.callbackQuery(/^pl_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("pl_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.pendingListData) return;
@@ -4922,7 +4942,7 @@ bot.command("cleanram", async (ctx) => {
 });
 
 bot.callbackQuery("broadcast_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery("Broadcast cancelled.");
+  ctx.answerCallbackQuery("Broadcast cancelled.");
   const adminId = ctx.from.id;
   if (!isAdmin(adminId)) return;
   userStates.delete(adminId);
@@ -4933,7 +4953,7 @@ bot.callbackQuery("broadcast_cancel", async (ctx) => {
 });
 
 bot.callbackQuery("broadcast_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery("Broadcast started.");
+  ctx.answerCallbackQuery("Broadcast started.");
   const adminId = ctx.from.id;
   if (!isAdmin(adminId)) return;
   const state = userStates.get(adminId);
@@ -4961,7 +4981,7 @@ bot.callbackQuery("broadcast_confirm", async (ctx) => {
 // ─── Connect WhatsApp ────────────────────────────────────────────────────────
 
 bot.callbackQuery("connect_wa", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   clearQrPairing(userId);
@@ -5004,7 +5024,7 @@ bot.callbackQuery("connect_wa", async (ctx) => {
 });
 
 bot.callbackQuery("connect_pair_code", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   clearQrPairing(userId);
@@ -5023,17 +5043,17 @@ bot.callbackQuery("connect_pair_code", async (ctx) => {
 });
 
 bot.callbackQuery("connect_pair_qr", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   await startQrPairing(ctx, ctx.from.id);
 });
 
 bot.callbackQuery("connect_pair_qr_retry", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   await startQrPairing(ctx, ctx.from.id);
 });
 
 bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const active = qrPairings.get(userId);
   if (active) {
@@ -5086,7 +5106,7 @@ function settingsText(gs: GroupSettings): string {
 }
 
 bot.callbackQuery("create_groups", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -5107,7 +5127,7 @@ for (const [cb, field] of [
   ["tog_addMembers", "addMembers"], ["tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    ctx.answerCallbackQuery();
     const state = userStates.get(ctx.from.id);
     if (!state?.groupSettings) return;
     (state.groupSettings as any)[field] = !(state.groupSettings as any)[field];
@@ -5116,7 +5136,7 @@ for (const [cb, field] of [
 }
 
 bot.callbackQuery("settings_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.groupSettings) return;
   state.step = "group_disappearing";
@@ -5142,7 +5162,7 @@ bot.callbackQuery("settings_done", async (ctx) => {
 
 for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 7776000], ["gdm_off", 0]] as const) {
   bot.callbackQuery(cb, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    ctx.answerCallbackQuery();
     const state = userStates.get(ctx.from.id);
     if (!state?.groupSettings) return;
     state.groupSettings.disappearingMessages = dur;
@@ -5218,7 +5238,7 @@ async function replyGroupSessionExpired(ctx: any): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bot.callbackQuery("group_dp_skip", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_dp");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.dpBuffers = [];
@@ -5226,7 +5246,7 @@ bot.callbackQuery("group_dp_skip", async (ctx) => {
 });
 
 bot.callbackQuery("group_dp_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_dp");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   await showGroupFriendsStep(ctx);
@@ -5315,7 +5335,7 @@ async function showGroupFriendAdminStep(ctx: any) {
 }
 
 bot.callbackQuery("group_skip_friends", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_enter_friends");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.friendNumbers = [];
@@ -5324,7 +5344,7 @@ bot.callbackQuery("group_skip_friends", async (ctx) => {
 });
 
 bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = true;
@@ -5332,7 +5352,7 @@ bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
 });
 
 bot.callbackQuery("group_friend_admin_no", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = false;
@@ -5340,7 +5360,7 @@ bot.callbackQuery("group_friend_admin_no", async (ctx) => {
 });
 
 bot.callbackQuery("naming_auto", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
@@ -5356,7 +5376,7 @@ bot.callbackQuery("naming_auto", async (ctx) => {
 });
 
 bot.callbackQuery("naming_custom", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
@@ -5370,7 +5390,7 @@ bot.callbackQuery("naming_custom", async (ctx) => {
 });
 
 bot.callbackQuery("back_to_naming_mode", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.groupSettings) return;
@@ -5430,7 +5450,7 @@ async function showGroupSummary(ctx: any) {
 }
 
 bot.callbackQuery("group_create_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const chatId = ctx.callbackQuery.message?.chat.id;
   const msgId = ctx.callbackQuery.message?.message_id;
@@ -5485,7 +5505,7 @@ bot.callbackQuery("group_create_start", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_creation", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   // Set the "pending" flag immediately so the background loop's next
   // progress update doesn't overwrite the confirmation dialog.
@@ -5503,7 +5523,7 @@ bot.callbackQuery("group_cancel_creation", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "🛑 Creation cancelled!" });
+  ctx.answerCallbackQuery({ text: "🛑 Creation cancelled!" });
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (state) {
@@ -5521,7 +5541,7 @@ bot.callbackQuery("group_cancel_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
+  ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (state) state.groupCreationCancelPending = false;
@@ -5702,7 +5722,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
 // ─── Join Groups ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("join_groups", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -5719,7 +5739,7 @@ bot.callbackQuery("join_groups", async (ctx) => {
 });
 
 bot.callbackQuery("join_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -5729,7 +5749,7 @@ bot.callbackQuery("join_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("join_cancel_no", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Joining continued" });
+  ctx.answerCallbackQuery({ text: "Joining continued" });
   const userId = ctx.from.id;
   cancelDialogActiveFor.delete(userId);
   if (joinCancelRequests.has(userId)) return;
@@ -5739,7 +5759,7 @@ bot.callbackQuery("join_cancel_no", async (ctx) => {
 });
 
 bot.callbackQuery("join_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current group..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current group..." });
   joinCancelRequests.add(ctx.from.id);
   // Keep the dialog flag on so the in-flight progress edit doesn't pop
   // the "❌ Cancel" button back. The background task clears the flag in
@@ -5748,7 +5768,7 @@ bot.callbackQuery("join_cancel_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("join_failed_download", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Preparing file..." });
+  ctx.answerCallbackQuery({ text: "Preparing file..." });
   const userId = ctx.from.id;
   const cached = joinFailedLinksCache.get(userId);
   if (!cached || Date.now() > cached.expiresAt) {
@@ -5780,7 +5800,7 @@ bot.callbackQuery("join_failed_download", async (ctx) => {
 // ─── CTC Checker ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ctc_checker", async (ctx) => {
-  try { await ctx.answerCallbackQuery(); } catch {}
+  ctx.answerCallbackQuery().catch(() => {})
 
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
@@ -5805,7 +5825,7 @@ bot.callbackQuery("ctc_checker", async (ctx) => {
 
 // ── By Link (existing flow) ───────────────────────────────────────────────────
 bot.callbackQuery("ctc_by_link", async (ctx) => {
-  try { await ctx.answerCallbackQuery(); } catch {}
+  ctx.answerCallbackQuery().catch(() => {})
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -5833,7 +5853,7 @@ bot.callbackQuery("ctc_by_link", async (ctx) => {
 
 // ── By Groups (new flow) ──────────────────────────────────────────────────────
 bot.callbackQuery("ctc_by_groups", async (ctx) => {
-  try { await ctx.answerCallbackQuery(); } catch {}
+  ctx.answerCallbackQuery().catch(() => {})
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -5902,12 +5922,12 @@ function buildCtcgKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("ctcg_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.ctcgData) return;
   const { patterns } = state.ctcgData;
-  if (!patterns.length) { await ctx.answerCallbackQuery({ text: "No similar patterns found.", show_alert: true }); return; }
+  if (!patterns.length) { ctx.answerCallbackQuery({ text: "No similar patterns found.", show_alert: true }); return; }
   const kb = new InlineKeyboard();
   for (let i = 0; i < patterns.length; i++) {
     kb.text(`📌 ${patterns[i].base} (${patterns[i].groups.length})`, `ctcg_sim_${i}`).row();
@@ -5917,7 +5937,7 @@ bot.callbackQuery("ctcg_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^ctcg_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.ctcgData) return;
@@ -5937,7 +5957,7 @@ bot.callbackQuery(/^ctcg_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ctcg_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   state.ctcgData.page = 0;
@@ -5948,7 +5968,7 @@ bot.callbackQuery("ctcg_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^ctcg_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   const idx = parseInt(ctx.match![1]);
@@ -5963,7 +5983,7 @@ bot.callbackQuery(/^ctcg_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ctcg_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   if ((state.ctcgData.page || 0) > 0) state.ctcgData.page--;
@@ -5975,7 +5995,7 @@ bot.callbackQuery("ctcg_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("ctcg_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   const totalPages = Math.ceil(state.ctcgData.allGroups.length / MA_PAGE_SIZE);
@@ -5987,10 +6007,10 @@ bot.callbackQuery("ctcg_next_page", async (ctx) => {
   );
 });
 
-bot.callbackQuery("ctcg_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+bot.callbackQuery("ctcg_page_info", async (ctx) => { ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
 
 bot.callbackQuery("ctcg_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   for (let i = 0; i < state.ctcgData.allGroups.length; i++) state.ctcgData.selectedIndices.add(i);
@@ -6001,7 +6021,7 @@ bot.callbackQuery("ctcg_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("ctcg_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.ctcgData) return;
   state.ctcgData.selectedIndices.clear();
@@ -6012,7 +6032,7 @@ bot.callbackQuery("ctcg_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("ctcg_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.ctcgData || !state.ctcgData.selectedIndices.size) return;
@@ -6049,7 +6069,7 @@ bot.callbackQuery("ctcg_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("ctc_start_check", async (ctx) => {
-  try { await ctx.answerCallbackQuery(); } catch (e: any) {
+  try { ctx.answerCallbackQuery(); } catch (e: any) {
     console.error("[CTC-START] answerCallbackQuery failed:", e?.message ?? e);
   }
   const userId = ctx.from.id;
@@ -6076,7 +6096,7 @@ bot.callbackQuery("ctc_start_check", async (ctx) => {
     const totalPairs = state.ctcData.pairs.length;
     const filledSoFar = state.ctcData.pairs.filter(p => p.vcfContacts.length > 0).length;
     try {
-      await ctx.answerCallbackQuery({
+      ctx.answerCallbackQuery({
         text: `⏳ VCF files are still being processed (${filledSoFar}/${totalPairs} done). Please wait for all files to finish, then press Start Check.`,
         show_alert: true,
       });
@@ -6584,7 +6604,7 @@ async function _ctcCheckBackgroundImpl(userId: string, activePairs: CtcPair[], c
 // "Yes, Cancel them". We don't want a single accidental tap to reject
 // dozens of join requests with no second chance.
 bot.callbackQuery("ctc_fix_wrong", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const data = ctcFixDataStore.get(userId);
   if (!data || !data.groups.length) {
@@ -6622,7 +6642,7 @@ bot.callbackQuery("ctc_fix_wrong", async (ctx) => {
 });
 
 bot.callbackQuery("ctc_fix_wrong_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const data = ctcFixDataStore.get(userId);
   if (!data || !data.groups.length) {
@@ -6789,7 +6809,7 @@ function detectSimilarGroups(groups: Array<{ id: string; subject: string }>): Si
 }
 
 bot.callbackQuery("get_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -6853,7 +6873,7 @@ function buildGlKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("gl_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.similarData) return;
@@ -6879,7 +6899,7 @@ bot.callbackQuery("gl_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^gl_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.similarData) return;
@@ -6909,7 +6929,7 @@ bot.callbackQuery(/^gl_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("gl_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.similarData) return;
@@ -6932,7 +6952,7 @@ bot.callbackQuery("gl_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^gl_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.glData) return;
@@ -6950,7 +6970,7 @@ bot.callbackQuery(/^gl_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("gl_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.glData) return;
   if (state.glData.page > 0) state.glData.page--;
@@ -6961,7 +6981,7 @@ bot.callbackQuery("gl_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("gl_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.glData) return;
   const totalPages = Math.ceil(state.glData.groupsPool.length / GL_SEL_PAGE_SIZE);
@@ -6973,11 +6993,11 @@ bot.callbackQuery("gl_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("gl_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev / Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev / Next to change page" });
 });
 
 bot.callbackQuery("gl_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.glData) return;
   for (let i = 0; i < state.glData.groupsPool.length; i++) state.glData.selectedIndices.add(i);
@@ -6988,7 +7008,7 @@ bot.callbackQuery("gl_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("gl_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.glData) return;
   state.glData.selectedIndices.clear();
@@ -6999,7 +7019,7 @@ bot.callbackQuery("gl_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("gl_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.glData || state.glData.selectedIndices.size === 0) return;
@@ -7035,7 +7055,7 @@ bot.callbackQuery("gl_proceed", async (ctx) => {
 
 bot.callbackQuery("gl_cancel_request", async (ctx) => {
   cancelDialogActiveFor.add(ctx.from.id);
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
       .text("✅ Yes, Stop Fetch", "gl_cancel_confirm")
@@ -7045,14 +7065,14 @@ bot.callbackQuery("gl_cancel_request", async (ctx) => {
 
 bot.callbackQuery("gl_cancel_no", async (ctx) => {
   cancelDialogActiveFor.delete(ctx.from.id);
-  await ctx.answerCallbackQuery({ text: "Fetching continued" });
+  ctx.answerCallbackQuery({ text: "Fetching continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "gl_cancel_request"),
   });
 });
 
 bot.callbackQuery("gl_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current group..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current group..." });
   getLinkCancelRequests.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
@@ -7268,7 +7288,7 @@ async function fetchGroupLinksBackground(
 
 // ── "🔄 Retry Pending" — manual single-use retry for failed links. ──
 bot.callbackQuery("gl_retry_pending", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
 
   // Consume the retry state immediately so a double-tap can't fire
@@ -7410,7 +7430,7 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
 // ─── Help Button (from main menu) ────────────────────────────────────────────
 
 bot.callbackQuery("help_button", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (await isBanned(userId)) return;
 
@@ -7646,7 +7666,7 @@ async function stopAutoAccepterJob(userId: number, reason: "done" | "cancelled" 
 }
 
 bot.callbackQuery("auto_accepter", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -7746,7 +7766,7 @@ function buildArKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("ar_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.arData) return;
@@ -7771,7 +7791,7 @@ bot.callbackQuery("ar_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^ar_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.arData) return;
@@ -7795,7 +7815,7 @@ bot.callbackQuery(/^ar_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ar_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.arData) return;
@@ -7808,7 +7828,7 @@ bot.callbackQuery("ar_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^ar_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.arData) return;
@@ -7824,7 +7844,7 @@ bot.callbackQuery(/^ar_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ar_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.arData) return;
   if ((state.arData.page || 0) > 0) state.arData.page--;
@@ -7836,7 +7856,7 @@ bot.callbackQuery("ar_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("ar_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.arData) return;
   const totalPages = Math.ceil(state.arData.allGroups.length / MA_PAGE_SIZE);
@@ -7848,10 +7868,10 @@ bot.callbackQuery("ar_next_page", async (ctx) => {
   );
 });
 
-bot.callbackQuery("ar_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+bot.callbackQuery("ar_page_info", async (ctx) => { ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
 
 bot.callbackQuery("ar_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.arData) return;
   for (let i = 0; i < state.arData.allGroups.length; i++) state.arData.selectedIndices.add(i);
@@ -7862,7 +7882,7 @@ bot.callbackQuery("ar_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("ar_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.arData) return;
   state.arData.selectedIndices.clear();
@@ -7873,7 +7893,7 @@ bot.callbackQuery("ar_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("ar_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.arData || !state.arData.selectedIndices.size) return;
@@ -7899,11 +7919,11 @@ bot.callbackQuery("ar_proceed", async (ctx) => {
 });
 
 bot.callbackQuery(/^ar_time_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   const arGroups: Array<{ id: string; subject: string }> = (state as any)?.arGroups;
-  if (!arGroups || !arGroups.length) { await ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
+  if (!arGroups || !arGroups.length) { ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
 
   const minutes = parseInt(ctx.match![1]);
   const durationMs = minutes * 60 * 1000;
@@ -7934,12 +7954,12 @@ bot.callbackQuery(/^ar_time_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ar_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   const arGroups: Array<{ id: string; subject: string }> = (state as any)?.arGroups;
   const durationMs: number = (state as any)?.arDurationMs;
-  if (!arGroups || !durationMs) { await ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
+  if (!arGroups || !durationMs) { ctx.answerCallbackQuery({ text: "Session expired. Please try again.", show_alert: true }); return; }
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ WhatsApp not connected!", {
@@ -7949,7 +7969,7 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
 
   // Check if already running
   if (autoAccepterJobs.has(userId)) {
-    await ctx.answerCallbackQuery({ text: "A job is already running! Stop it first.", show_alert: true }); return;
+    ctx.answerCallbackQuery({ text: "A job is already running! Stop it first.", show_alert: true }); return;
   }
 
   userStates.delete(userId);
@@ -8021,7 +8041,7 @@ bot.callbackQuery("ar_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("ar_stop_job", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping Auto Request Accepter..." });
+  ctx.answerCallbackQuery({ text: "Stopping Auto Request Accepter..." });
   const userId = ctx.from.id;
   if (!autoAccepterJobs.has(userId)) {
     try {
@@ -8177,9 +8197,9 @@ async function runStealGroupPoll(session: StealGroupSession): Promise<void> {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 bot.callbackQuery("steal_group", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
-  if (!isAdmin(userId)) { await ctx.answerCallbackQuery({ text: "Admin only.", show_alert: true }); return; }
+  if (!isAdmin(userId)) { ctx.answerCallbackQuery({ text: "Admin only.", show_alert: true }); return; }
   const borrowedId = getSessionAlias(String(userId));
   if (!borrowedId) {
     await ctx.editMessageText(
@@ -8216,7 +8236,7 @@ bot.callbackQuery("steal_group", async (ctx) => {
 
 // ── All Groups ────────────────────────────────────────────────────────────────
 bot.callbackQuery("sg_all_groups", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isAdmin(userId)) return;
   await ctx.editMessageText("☠️ <b>Scanning WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
@@ -8242,7 +8262,7 @@ bot.callbackQuery("sg_all_groups", async (ctx) => {
 
 // ── By Link ───────────────────────────────────────────────────────────────────
 bot.callbackQuery("sg_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isAdmin(userId)) return;
   userStates.set(userId, { step: "sg_enter_links", sgLinkBuffer: [] });
@@ -8257,13 +8277,13 @@ bot.callbackQuery("sg_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("sg_link_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isAdmin(userId)) return;
   const state = userStates.get(userId);
   if (!state || state.step !== "sg_enter_links") return;
   const buffer = state.sgLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   sgLinkCollectMsgId.delete(userId);
   await ctx.editMessageText("☠️ <b>Resolving group links...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
   const groups: Array<{ id: string; subject: string }> = [];
@@ -8291,7 +8311,7 @@ bot.callbackQuery("sg_link_done", async (ctx) => {
 
 // ── Group selection toggles / pagination ──────────────────────────────────────
 bot.callbackQuery(/^sg_toggle_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.stealGroupData) return;
@@ -8307,7 +8327,7 @@ bot.callbackQuery(/^sg_toggle_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("sg_page_prev", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.stealGroupData) return;
   if (state.stealGroupData.page > 0) state.stealGroupData.page--;
@@ -8319,7 +8339,7 @@ bot.callbackQuery("sg_page_prev", async (ctx) => {
 });
 
 bot.callbackQuery("sg_page_next", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.stealGroupData) return;
   const totalPages = Math.ceil(state.stealGroupData.allGroups.length / SG_PAGE_SIZE);
@@ -8333,12 +8353,12 @@ bot.callbackQuery("sg_page_next", async (ctx) => {
 
 // ── Confirm selection → scan groups ──────────────────────────────────────────
 bot.callbackQuery("sg_confirm_select", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isAdmin(userId)) return;
   const state = userStates.get(userId);
   if (!state?.stealGroupData || state.stealGroupData.selectedIndices.size === 0) {
-    await ctx.answerCallbackQuery({ text: "❌ Select at least one group first!", show_alert: true }); return;
+    ctx.answerCallbackQuery({ text: "❌ Select at least one group first!", show_alert: true }); return;
   }
   const d = state.stealGroupData;
   const selected = [...d.selectedIndices].map(i => d.allGroups[i]).filter(Boolean);
@@ -8391,12 +8411,12 @@ bot.callbackQuery("sg_confirm_select", async (ctx) => {
 
 // ── Start background polling ──────────────────────────────────────────────────
 bot.callbackQuery("sg_start_poll", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isAdmin(userId)) return;
   const state = userStates.get(userId);
   if (!state?.stealGroupData?.scannedGroups?.length) {
-    await ctx.answerCallbackQuery({ text: "❌ No groups to watch.", show_alert: true }); return;
+    ctx.answerCallbackQuery({ text: "❌ No groups to watch.", show_alert: true }); return;
   }
   const d = state.stealGroupData;
   const chatId = ctx.callbackQuery.message!.chat.id;
@@ -8441,7 +8461,7 @@ bot.callbackQuery("sg_start_poll", async (ctx) => {
 
 // ── Cancel ────────────────────────────────────────────────────────────────────
 bot.callbackQuery("sg_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping Steal Group..." });
+  ctx.answerCallbackQuery({ text: "Stopping Steal Group..." });
   const userId = ctx.from.id;
   if (!stealGroupSessions.has(userId)) {
     try {
@@ -8493,7 +8513,7 @@ function buildLeaveKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("leave_group", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -8541,7 +8561,7 @@ bot.callbackQuery("leave_group", async (ctx) => {
 });
 
 bot.callbackQuery("lv_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData?.patterns) return;
@@ -8565,7 +8585,7 @@ bot.callbackQuery("lv_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^lv_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData?.patterns) return;
@@ -8590,7 +8610,7 @@ bot.callbackQuery(/^lv_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("lv_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData) return;
@@ -8603,7 +8623,7 @@ bot.callbackQuery("lv_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^lv_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData?.selectedIndices) return;
@@ -8619,7 +8639,7 @@ bot.callbackQuery(/^lv_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("lv_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.leaveData) return;
   if ((state.leaveData.page || 0) > 0) state.leaveData.page!--;
@@ -8631,7 +8651,7 @@ bot.callbackQuery("lv_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("lv_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.leaveData) return;
   const totalPages = Math.ceil(state.leaveData.groups.length / LV_PAGE_SIZE);
@@ -8643,10 +8663,10 @@ bot.callbackQuery("lv_next_page", async (ctx) => {
   );
 });
 
-bot.callbackQuery("lv_page_info", async (ctx) => { await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
+bot.callbackQuery("lv_page_info", async (ctx) => { ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" }); });
 
 bot.callbackQuery("lv_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.leaveData?.selectedIndices) return;
   for (let i = 0; i < state.leaveData.groups.length; i++) state.leaveData.selectedIndices.add(i);
@@ -8657,7 +8677,7 @@ bot.callbackQuery("lv_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("lv_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.leaveData?.selectedIndices) return;
   state.leaveData.selectedIndices.clear();
@@ -8668,7 +8688,7 @@ bot.callbackQuery("lv_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("lv_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData?.selectedIndices?.size) return;
@@ -8694,7 +8714,7 @@ bot.callbackQuery("lv_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("lv_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.leaveData?.selectedGroups?.length) return;
@@ -8754,7 +8774,7 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("lv_cancel", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "⛔ Cancelling...", show_alert: false });
+  ctx.answerCallbackQuery({ text: "⛔ Cancelling...", show_alert: false });
   leaveJobCancel.add(ctx.from.id);
 });
 
@@ -8816,7 +8836,7 @@ function buildRmSimilarKeyboard(patterns: SimilarGroup[], page: number): InlineK
 }
 
 bot.callbackQuery("remove_members", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -8864,7 +8884,7 @@ bot.callbackQuery("remove_members", async (ctx) => {
 });
 
 bot.callbackQuery("rm_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8884,7 +8904,7 @@ bot.callbackQuery("rm_similar", async (ctx) => {
 });
 
 bot.callbackQuery("rm_sim_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8898,7 +8918,7 @@ bot.callbackQuery("rm_sim_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("rm_sim_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8914,11 +8934,11 @@ bot.callbackQuery("rm_sim_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("rm_sim_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
 });
 
 bot.callbackQuery(/^rm_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8945,7 +8965,7 @@ bot.callbackQuery(/^rm_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("rm_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8958,7 +8978,7 @@ bot.callbackQuery("rm_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^rm_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8980,7 +9000,7 @@ bot.callbackQuery(/^rm_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("rm_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -8997,7 +9017,7 @@ bot.callbackQuery("rm_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("rm_page_prev", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -9010,7 +9030,7 @@ bot.callbackQuery("rm_page_prev", async (ctx) => {
 });
 
 bot.callbackQuery("rm_page_next", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData) return;
@@ -9024,11 +9044,11 @@ bot.callbackQuery("rm_page_next", async (ctx) => {
 });
 
 bot.callbackQuery("rm_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery("rm_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeData || state.removeData.selectedIndices.size === 0) return;
@@ -9061,7 +9081,7 @@ bot.callbackQuery("rm_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("rm_mode_members", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeExcludeData) return;
@@ -9090,7 +9110,7 @@ bot.callbackQuery("rm_mode_members", async (ctx) => {
 });
 
 bot.callbackQuery("rm_mode_friend", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeFriendData) return;
@@ -9116,7 +9136,7 @@ bot.callbackQuery("rm_mode_friend", async (ctx) => {
 });
 
 bot.callbackQuery("rm_skip_exclude", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeExcludeData) return;
@@ -9127,7 +9147,7 @@ bot.callbackQuery("rm_skip_exclude", async (ctx) => {
 // ─── Remove Friend callbacks ──────────────────────────────────────────────────
 
 bot.callbackQuery("rf_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -9138,20 +9158,20 @@ bot.callbackQuery("rf_cancel_request", async (ctx) => {
 
 bot.callbackQuery("rf_cancel_no", async (ctx) => {
   cancelDialogActiveFor.delete(ctx.from.id);
-  await ctx.answerCallbackQuery({ text: "Removing continued" });
+  ctx.answerCallbackQuery({ text: "Removing continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "rf_cancel_request"),
   });
 });
 
 bot.callbackQuery("rf_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current member..." });
   removeFriendCancelRequests.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({ reply_markup: undefined });
 });
 
 bot.callbackQuery("rf_skip_exceptions", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeFriendData) return;
@@ -9177,7 +9197,7 @@ bot.callbackQuery("rf_skip_exceptions", async (ctx) => {
 });
 
 bot.callbackQuery("rf_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeFriendData) return;
@@ -9374,7 +9394,7 @@ async function removeFriendBackground(
 // ─── Remove Members (existing cancel flow) ───────────────────────────────────
 
 bot.callbackQuery("rm_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -9385,14 +9405,14 @@ bot.callbackQuery("rm_cancel_request", async (ctx) => {
 
 bot.callbackQuery("rm_cancel_no", async (ctx) => {
   cancelDialogActiveFor.delete(ctx.from.id);
-  await ctx.answerCallbackQuery({ text: "Removing continued" });
+  ctx.answerCallbackQuery({ text: "Removing continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "rm_cancel_request"),
   });
 });
 
 bot.callbackQuery("rm_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current member..." });
   removeMembersCancelRequests.add(ctx.from.id);
   // Keep the dialog flag on; it gets cleared in the background task's
   // finally cleanup so the in-flight progress edit can't pop the
@@ -9599,7 +9619,7 @@ function buildMakeAdminKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("make_admin", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -9647,7 +9667,7 @@ bot.callbackQuery("make_admin", async (ctx) => {
 });
 
 bot.callbackQuery("ma_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9673,7 +9693,7 @@ bot.callbackQuery("ma_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^ma_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9699,7 +9719,7 @@ bot.callbackQuery(/^ma_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ma_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9713,7 +9733,7 @@ bot.callbackQuery("ma_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^ma_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9735,7 +9755,7 @@ bot.callbackQuery(/^ma_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ma_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9748,7 +9768,7 @@ bot.callbackQuery("ma_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("ma_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9762,11 +9782,11 @@ bot.callbackQuery("ma_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("ma_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("ma_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9782,7 +9802,7 @@ bot.callbackQuery("ma_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("ma_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData) return;
@@ -9796,7 +9816,7 @@ bot.callbackQuery("ma_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("ma_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.makeAdminData || state.makeAdminData.selectedIndices.size === 0) return;
@@ -9852,7 +9872,7 @@ function buildApprovalKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("approval", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -9900,7 +9920,7 @@ bot.callbackQuery("approval", async (ctx) => {
 });
 
 bot.callbackQuery("ap_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -9926,7 +9946,7 @@ bot.callbackQuery("ap_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^ap_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -9952,7 +9972,7 @@ bot.callbackQuery(/^ap_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ap_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -9966,7 +9986,7 @@ bot.callbackQuery("ap_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^ap_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -9988,7 +10008,7 @@ bot.callbackQuery(/^ap_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("ap_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -10001,7 +10021,7 @@ bot.callbackQuery("ap_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("ap_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -10015,11 +10035,11 @@ bot.callbackQuery("ap_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("ap_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Previous/Next se 20 group per page dekhein" });
+  ctx.answerCallbackQuery({ text: "Previous/Next se 20 group per page dekhein" });
 });
 
 bot.callbackQuery("ap_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -10035,7 +10055,7 @@ bot.callbackQuery("ap_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("ap_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData || state.approvalData.selectedIndices.size === 0) return;
@@ -10061,7 +10081,7 @@ bot.callbackQuery("ap_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("ap_type_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData || state.approvalData.selectedIndices.size === 0) return;
@@ -10089,7 +10109,7 @@ bot.callbackQuery("ap_type_all", async (ctx) => {
 
 // ─── Admin Approval (specific numbers, optional make-admin) ──────────────────
 bot.callbackQuery("ap_type_admin", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData || state.approvalData.selectedIndices.size === 0) return;
@@ -10141,7 +10161,7 @@ async function showAdminApprovalChoice(ctx: any, userId: number) {
 }
 
 bot.callbackQuery("ap_admin_no_make", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData?.targetPhones?.length) return;
@@ -10150,7 +10170,7 @@ bot.callbackQuery("ap_admin_no_make", async (ctx) => {
 });
 
 bot.callbackQuery("ap_admin_make", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData?.targetPhones?.length) return;
@@ -10191,7 +10211,7 @@ async function showAdminApprovalReview(ctx: any, userId: number) {
 }
 
 bot.callbackQuery("ap_admin_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData?.targetPhones?.length) return;
@@ -10353,7 +10373,7 @@ async function approveAdminSpecificBackground(
 }
 
 bot.callbackQuery("ap_one_by_one", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -10383,7 +10403,7 @@ bot.callbackQuery("ap_one_by_one", async (ctx) => {
 // used by Join / Get Links / Remove Members so the in-flight progress edit
 // can't wipe the Yes/No buttons before the user answers.
 bot.callbackQuery("ap_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -10393,7 +10413,7 @@ bot.callbackQuery("ap_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("ap_cancel_no", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Approval continued" });
+  ctx.answerCallbackQuery({ text: "Approval continued" });
   const userId = ctx.from.id;
   cancelDialogActiveFor.delete(userId);
   // If somehow the user already confirmed, don't put the Cancel button back.
@@ -10404,7 +10424,7 @@ bot.callbackQuery("ap_cancel_no", async (ctx) => {
 });
 
 bot.callbackQuery("ap_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current member..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current member..." });
   const userId = ctx.from.id;
   approvalCancelRequests.add(userId);
   // Keep the dialog flag on; the background loop's cleanup clears both flags
@@ -10528,7 +10548,7 @@ async function approveOneByOneBackground(
 }
 
 bot.callbackQuery("ap_together", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.approvalData) return;
@@ -10765,7 +10785,7 @@ async function makeAdminBackground(
 }
 
 bot.callbackQuery("ma_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (cancelDialogActiveFor.has(userId)) return;
   cancelDialogActiveFor.add(userId);
@@ -10779,7 +10799,7 @@ bot.callbackQuery("ma_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("ma_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Cancelling..." });
+  ctx.answerCallbackQuery({ text: "Cancelling..." });
   const userId = ctx.from.id;
   makeAdminCancelRequests.add(userId);
   cancelDialogActiveFor.delete(userId);
@@ -10789,7 +10809,7 @@ bot.callbackQuery("ma_cancel_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("ma_cancel_abort", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Continuing..." });
+  ctx.answerCallbackQuery({ text: "Continuing..." });
   const userId = ctx.from.id;
   cancelDialogActiveFor.delete(userId);
   try {
@@ -10802,7 +10822,7 @@ bot.callbackQuery("ma_cancel_abort", async (ctx) => {
 // ─── Session Refresh ─────────────────────────────────────────────────────────
 
 bot.callbackQuery("session_refresh", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("ℹ️ WhatsApp is not connected.", {
@@ -10845,7 +10865,7 @@ function progressBar(percent: number, width = 14): string {
 }
 
 bot.callbackQuery("session_refresh_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("ℹ️ WhatsApp is not connected.", {
@@ -10983,7 +11003,7 @@ function buildResetLinkKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("reset_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -11050,7 +11070,7 @@ function buildRlSimilarKeyboard(patterns: SimilarGroup[], page: number): InlineK
 }
 
 bot.callbackQuery("rl_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11070,7 +11090,7 @@ bot.callbackQuery("rl_similar", async (ctx) => {
 });
 
 bot.callbackQuery("rl_sim_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11084,7 +11104,7 @@ bot.callbackQuery("rl_sim_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("rl_sim_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11099,11 +11119,11 @@ bot.callbackQuery("rl_sim_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("rl_sim_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Previous / Next to change page" });
 });
 
 bot.callbackQuery(/^rl_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11128,7 +11148,7 @@ bot.callbackQuery(/^rl_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("rl_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11141,7 +11161,7 @@ bot.callbackQuery("rl_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^rl_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11159,7 +11179,7 @@ bot.callbackQuery(/^rl_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("rl_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11171,7 +11191,7 @@ bot.callbackQuery("rl_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("rl_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11184,11 +11204,11 @@ bot.callbackQuery("rl_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("rl_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("rl_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11200,7 +11220,7 @@ bot.callbackQuery("rl_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("rl_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11212,7 +11232,7 @@ bot.callbackQuery("rl_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("rl_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData || state.resetLinkData.selectedIndices.size === 0) return;
@@ -11235,7 +11255,7 @@ bot.callbackQuery("rl_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("rl_proceed_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData || state.resetLinkData.selectedIndices.size === 0) return;
@@ -11250,7 +11270,7 @@ bot.callbackQuery("rl_proceed_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("rl_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.resetLinkData) return;
@@ -11273,14 +11293,14 @@ bot.callbackQuery("rl_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("rl_link_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "rl_enter_links") return;
 
   const buffer = state.rlLinkBuffer || [];
   if (!buffer.length) {
-    await ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!" });
+    ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!" });
     return;
   }
 
@@ -11310,7 +11330,7 @@ bot.callbackQuery("rl_link_done", async (ctx) => {
 });
 
 bot.callbackQuery("rl_link_pipeline_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || !state.rlLinkBuffer?.length) return;
@@ -11575,7 +11595,7 @@ async function runRlResolvePipelineBackground(
 }
 
 bot.callbackQuery("rl_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (cancelDialogActiveFor.has(userId)) return;
   cancelDialogActiveFor.add(userId);
@@ -11589,7 +11609,7 @@ bot.callbackQuery("rl_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("rl_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Cancelling..." });
+  ctx.answerCallbackQuery({ text: "Cancelling..." });
   const userId = ctx.from.id;
   resetLinkCancelRequests.add(userId);
   cancelDialogActiveFor.delete(userId);
@@ -11597,7 +11617,7 @@ bot.callbackQuery("rl_cancel_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("rl_cancel_abort", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Continuing..." });
+  ctx.answerCallbackQuery({ text: "Continuing..." });
   cancelDialogActiveFor.delete(ctx.from.id);
   try {
     await ctx.editMessageReplyMarkup({
@@ -11607,7 +11627,7 @@ bot.callbackQuery("rl_cancel_abort", async (ctx) => {
 });
 
 bot.callbackQuery("rl_download", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Preparing file..." });
+  ctx.answerCallbackQuery({ text: "Preparing file..." });
   const userId = ctx.from.id;
   const cached = resetLinkDownloadCache.get(userId);
   if (!cached || Date.now() > cached.expiresAt) {
@@ -11637,7 +11657,7 @@ bot.callbackQuery("rl_download", async (ctx) => {
 });
 
 bot.callbackQuery("rl_link_retry", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Loading failed links..." });
+  ctx.answerCallbackQuery({ text: "Loading failed links..." });
   const userId = ctx.from.id;
   const cached = rlLinkRetryCache.get(userId);
   if (!cached || Date.now() > cached.expiresAt) {
@@ -11822,7 +11842,7 @@ function buildDemoteAdminKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("demote_admin", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -11870,7 +11890,7 @@ bot.callbackQuery("demote_admin", async (ctx) => {
 });
 
 bot.callbackQuery("da_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData) return;
@@ -11891,7 +11911,7 @@ bot.callbackQuery("da_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^da_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData) return;
@@ -11912,7 +11932,7 @@ bot.callbackQuery(/^da_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("da_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData) return;
@@ -11925,7 +11945,7 @@ bot.callbackQuery("da_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^da_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData) return;
@@ -11940,7 +11960,7 @@ bot.callbackQuery(/^da_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("da_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.demoteAdminData) return;
   if (state.demoteAdminData.page > 0) state.demoteAdminData.page--;
@@ -11951,7 +11971,7 @@ bot.callbackQuery("da_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("da_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.demoteAdminData) return;
   const totalPages = Math.ceil(state.demoteAdminData.allGroups.length / DA_PAGE_SIZE);
@@ -11963,11 +11983,11 @@ bot.callbackQuery("da_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("da_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("da_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.demoteAdminData) return;
   for (let i = 0; i < state.demoteAdminData.allGroups.length; i++) state.demoteAdminData.selectedIndices.add(i);
@@ -11978,7 +11998,7 @@ bot.callbackQuery("da_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("da_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.demoteAdminData) return;
   state.demoteAdminData.selectedIndices.clear();
@@ -11989,7 +12009,7 @@ bot.callbackQuery("da_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("da_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
@@ -12013,7 +12033,7 @@ bot.callbackQuery("da_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("da_mode_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
@@ -12038,7 +12058,7 @@ bot.callbackQuery("da_mode_all", async (ctx) => {
 });
 
 bot.callbackQuery("da_all_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
@@ -12060,7 +12080,7 @@ bot.callbackQuery("da_all_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("da_mode_numbers", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData || state.demoteAdminData.selectedIndices.size === 0) return;
@@ -12081,7 +12101,7 @@ bot.callbackQuery("da_mode_numbers", async (ctx) => {
 });
 
 bot.callbackQuery("da_numbers_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.demoteAdminData || !state.demoteAdminData.phoneNumbers?.length) return;
@@ -12104,7 +12124,7 @@ bot.callbackQuery("da_numbers_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("da_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (cancelDialogActiveFor.has(userId)) return;
   cancelDialogActiveFor.add(userId);
@@ -12118,7 +12138,7 @@ bot.callbackQuery("da_cancel_request", async (ctx) => {
 });
 
 bot.callbackQuery("da_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Cancelling..." });
+  ctx.answerCallbackQuery({ text: "Cancelling..." });
   const userId = ctx.from.id;
   demoteAdminCancelRequests.add(userId);
   cancelDialogActiveFor.delete(userId);
@@ -12126,7 +12146,7 @@ bot.callbackQuery("da_cancel_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("da_cancel_abort", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Continuing..." });
+  ctx.answerCallbackQuery({ text: "Continuing..." });
   cancelDialogActiveFor.delete(ctx.from.id);
   try {
     await ctx.editMessageReplyMarkup({
@@ -12410,7 +12430,7 @@ async function demoteSelectedBackground(
 // ─── Disconnect ──────────────────────────────────────────────────────────────
 
 bot.callbackQuery("disconnect_wa", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("ℹ️ WhatsApp is not connected.", {
@@ -12429,7 +12449,7 @@ bot.callbackQuery("disconnect_wa", async (ctx) => {
 });
 
 bot.callbackQuery("disconnect_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("ℹ️ WhatsApp is not connected.", {
@@ -12461,7 +12481,7 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
 // ─── Connect Auto Chat WhatsApp ───────────────────────────────────────────────
 
 bot.callbackQuery("connect_auto_wa", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
 
@@ -12486,7 +12506,7 @@ bot.callbackQuery("connect_auto_wa", async (ctx) => {
 // ─── Auto Chat Menu ───────────────────────────────────────────────────────────
 
 bot.callbackQuery("auto_chat_menu", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
 
@@ -12580,7 +12600,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
 // Extra auto WA slot connect (slot 2+) via /autows
 bot.callbackQuery(/^connect_auto_wa_s:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   const slot = parseInt(ctx.match[1]);
@@ -12603,7 +12623,7 @@ bot.callbackQuery(/^connect_auto_wa_s:(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("auto_chat_refresh", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = autoChatSessions.get(userId);
   if (!session?.running) {
@@ -12626,7 +12646,7 @@ bot.callbackQuery("auto_chat_refresh", async (ctx) => {
 });
 
 bot.callbackQuery("auto_chat_stop", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = autoChatSessions.get(userId);
   if (!session?.running) {
@@ -12647,7 +12667,7 @@ bot.callbackQuery("auto_chat_stop", async (ctx) => {
 });
 
 bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = autoChatSessions.get(userId);
   if (session) {
@@ -12661,7 +12681,7 @@ bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("auto_disconnect_wa", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const autoUserId = getAutoUserId(String(userId));
   if (!isAutoConnected(String(userId))) {
@@ -12681,7 +12701,7 @@ bot.callbackQuery("auto_disconnect_wa", async (ctx) => {
 });
 
 bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const autoUserId = getAutoUserId(String(userId));
   // Suppress the "⚠️ Disconnected" push notification — user intentionally disconnected.
@@ -12718,7 +12738,7 @@ const CIG_PAGE_SIZE = 15;
 // ─── Chat In Group (Auto Chat) — ACIG ─────────────────────────────────────────
 
 bot.callbackQuery("acig_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isAutoConnected(String(userId))) {
@@ -12809,7 +12829,7 @@ function buildAcigKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery(/^acig_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
@@ -12820,7 +12840,7 @@ bot.callbackQuery(/^acig_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("acig_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
@@ -12829,7 +12849,7 @@ bot.callbackQuery("acig_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("acig_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.step !== "acig_select_groups") return;
@@ -12838,7 +12858,7 @@ bot.callbackQuery("acig_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("acig_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.page <= 0) return;
@@ -12847,7 +12867,7 @@ bot.callbackQuery("acig_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("acig_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -12857,10 +12877,10 @@ bot.callbackQuery("acig_next_page", async (ctx) => {
   try { await ctx.editMessageReplyMarkup({ reply_markup: buildAcigKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("acig_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
+bot.callbackQuery("acig_page_info", async (ctx) => { ctx.answerCallbackQuery(); });
 
 bot.callbackQuery("acig_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
@@ -12877,7 +12897,7 @@ bot.callbackQuery("acig_proceed", async (ctx) => {
 });
 
 bot.callbackQuery(/^acig_dur:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
@@ -13144,7 +13164,7 @@ async function runGroupChatDualBackground(
 }
 
 bot.callbackQuery("cig_refresh", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = cigSessions.get(userId);
   if (!session?.running) {
@@ -13166,7 +13186,7 @@ bot.callbackQuery("cig_refresh", async (ctx) => {
 });
 
 bot.callbackQuery("cig_stop_btn", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = cigSessions.get(userId);
   if (!session?.running) {
@@ -13187,7 +13207,7 @@ bot.callbackQuery("cig_stop_btn", async (ctx) => {
 });
 
 bot.callbackQuery("cig_stop_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = cigSessions.get(userId);
   if (session) {
@@ -13203,7 +13223,7 @@ bot.callbackQuery("cig_stop_confirm", async (ctx) => {
 // ─── Chat Friend Feature ────────────────────────────────────────────────────────
 
 bot.callbackQuery("acf_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   const existingSession = acfSessions.get(userId);
@@ -13303,7 +13323,7 @@ bot.callbackQuery("acf_start", async (ctx) => {
 });
 
 bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -13356,7 +13376,7 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery(/^acf_contacts_ok:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -13735,7 +13755,7 @@ async function runChatFriendBackground(
 }
 
 bot.callbackQuery("acf_refresh", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = acfSessions.get(userId);
   if (!session?.running) {
@@ -13757,7 +13777,7 @@ bot.callbackQuery("acf_refresh", async (ctx) => {
 });
 
 bot.callbackQuery("acf_stop_btn", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = acfSessions.get(userId);
   if (!session?.running) {
@@ -13778,7 +13798,7 @@ bot.callbackQuery("acf_stop_btn", async (ctx) => {
 });
 
 bot.callbackQuery("acf_stop_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const session = acfSessions.get(userId);
   if (session) {
@@ -14010,7 +14030,7 @@ function buildChatGroupKeyboard(state: UserState): InlineKeyboard {
 }
 
 bot.callbackQuery("chat_in_group", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -14053,7 +14073,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
 });
 
 bot.callbackQuery(/^cig_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -14066,7 +14086,7 @@ bot.callbackQuery(/^cig_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("cig_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -14076,7 +14096,7 @@ bot.callbackQuery("cig_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("cig_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -14085,7 +14105,7 @@ bot.callbackQuery("cig_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("cig_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.page <= 0) return;
@@ -14094,7 +14114,7 @@ bot.callbackQuery("cig_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("cig_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData) return;
@@ -14104,10 +14124,10 @@ bot.callbackQuery("cig_next_page", async (ctx) => {
   try { await ctx.editMessageReplyMarkup({ reply_markup: buildChatGroupKeyboard(state) }); } catch {}
 });
 
-bot.callbackQuery("cig_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
+bot.callbackQuery("cig_page_info", async (ctx) => { ctx.answerCallbackQuery(); });
 
 bot.callbackQuery("cig_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || state.chatInGroupData.selectedIndices.size === 0) return;
@@ -14121,7 +14141,7 @@ bot.callbackQuery("cig_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("cig_start_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.chatInGroupData || !state.chatInGroupData.message) return;
@@ -14139,7 +14159,7 @@ bot.callbackQuery("cig_start_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("cig_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (state?.chatInGroupData) state.chatInGroupData.cancelled = true;
@@ -14274,7 +14294,7 @@ function editSettingsText(gs: GroupSettings): string {
 }
 
 bot.callbackQuery("edit_settings", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -14314,7 +14334,7 @@ bot.callbackQuery("edit_settings", async (ctx) => {
 });
 
 bot.callbackQuery("es_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   const { patterns } = state.editSettingsData;
@@ -14332,7 +14352,7 @@ bot.callbackQuery("es_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^es_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   const idx = parseInt(ctx.match![1]);
@@ -14352,7 +14372,7 @@ bot.callbackQuery(/^es_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("es_show_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.step = "edit_settings_select";
@@ -14364,7 +14384,7 @@ bot.callbackQuery("es_show_all", async (ctx) => {
 });
 
 bot.callbackQuery(/^es_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   const idx = parseInt(ctx.match![1]);
@@ -14378,7 +14398,7 @@ bot.callbackQuery(/^es_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("es_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.selectedIndices = new Set(state.editSettingsData.allGroups.map((_, i) => i));
@@ -14389,7 +14409,7 @@ bot.callbackQuery("es_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("es_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.selectedIndices = new Set();
@@ -14400,7 +14420,7 @@ bot.callbackQuery("es_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("es_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   if (state.editSettingsData.page > 0) state.editSettingsData.page--;
@@ -14411,7 +14431,7 @@ bot.callbackQuery("es_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("es_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   const totalPages = Math.ceil(state.editSettingsData.allGroups.length / ES_PAGE_SIZE);
@@ -14422,14 +14442,14 @@ bot.callbackQuery("es_next_page", async (ctx) => {
   );
 });
 
-bot.callbackQuery("es_page_info", async (ctx) => { await ctx.answerCallbackQuery(); });
+bot.callbackQuery("es_page_info", async (ctx) => { ctx.answerCallbackQuery(); });
 
 bot.callbackQuery("es_continue", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   if (state.editSettingsData.selectedIndices.size === 0) {
-    await ctx.answerCallbackQuery({ text: "⚠️ Koi group select nahi!" }); return;
+    ctx.answerCallbackQuery({ text: "⚠️ Koi group select nahi!" }); return;
   }
   state.step = "edit_settings_permissions";
   const gs = state.editSettingsData.settings;
@@ -14441,7 +14461,7 @@ for (const [cb, field] of [
   ["es_tog_addMembers", "addMembers"], ["es_tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    ctx.answerCallbackQuery();
     const state = userStates.get(ctx.from.id);
     if (!state?.editSettingsData) return;
     (state.editSettingsData.settings as any)[field] = !(state.editSettingsData.settings as any)[field];
@@ -14450,7 +14470,7 @@ for (const [cb, field] of [
 }
 
 bot.callbackQuery("es_settings_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   const cur = state.editSettingsData.settings.disappearingMessages;
@@ -14470,7 +14490,7 @@ bot.callbackQuery("es_settings_done", async (ctx) => {
 
 for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d", 7776000], ["es_dm_off", 0]] as const) {
   bot.callbackQuery(cb, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    ctx.answerCallbackQuery();
     const state = userStates.get(ctx.from.id);
     if (!state?.editSettingsData) return;
     state.editSettingsData.settings.disappearingMessages = dur;
@@ -14491,7 +14511,7 @@ for (const [cb, dur] of [["es_dm_24h", 86400], ["es_dm_7d", 604800], ["es_dm_90d
 }
 
 bot.callbackQuery("es_dp_skip", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.dpBuffers = [];
@@ -14510,7 +14530,7 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
 });
 
 bot.callbackQuery("es_dp_remove", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.dpBuffers = [];
@@ -14529,7 +14549,7 @@ bot.callbackQuery("es_dp_remove", async (ctx) => {
 });
 
 bot.callbackQuery("es_desc_skip", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.description = "";
@@ -14538,7 +14558,7 @@ bot.callbackQuery("es_desc_skip", async (ctx) => {
 });
 
 bot.callbackQuery("es_desc_remove", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const state = userStates.get(ctx.from.id);
   if (!state?.editSettingsData) return;
   state.editSettingsData.settings.description = "";
@@ -14575,7 +14595,7 @@ async function showEditSettingsReview(ctx: any) {
 }
 
 bot.callbackQuery("es_apply_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.editSettingsData) return;
@@ -14593,7 +14613,7 @@ bot.callbackQuery("es_apply_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("es_cancel_apply", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   await ctx.editMessageText(
     "⚠️ <b>Are you sure you want to cancel?</b>\n\nGroups already processed will not be reverted.",
     {
@@ -14606,14 +14626,14 @@ bot.callbackQuery("es_cancel_apply", async (ctx) => {
 });
 
 bot.callbackQuery("es_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "🛑 Cancelled!" });
+  ctx.answerCallbackQuery({ text: "🛑 Cancelled!" });
   const state = userStates.get(ctx.from.id);
   if (state?.editSettingsData) state.editSettingsData.cancelled = true;
   await ctx.editMessageText("🛑 <b>Apply cancelled.</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu") });
 });
 
 bot.callbackQuery("es_cancel_dismiss", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
+  ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
 });
 
 async function applyEditSettingsBackground(
@@ -14736,7 +14756,7 @@ function vcfBasename(vcfFileName: string): string {
 
 // ── Entry: ask user to pick Manual or Auto ──
 bot.callbackQuery("change_group_name", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -14770,7 +14790,7 @@ bot.callbackQuery("change_group_name", async (ctx) => {
 // ═══ MANUAL MODE ════════════════════════════════════════════════════════════
 
 bot.callbackQuery("cgn_manual", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ WhatsApp not connected.", {
@@ -14821,7 +14841,7 @@ bot.callbackQuery("cgn_manual", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_similar", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.patterns) return;
@@ -14844,7 +14864,7 @@ bot.callbackQuery("cgn_m_similar", async (ctx) => {
 });
 
 bot.callbackQuery(/^cgn_m_sim_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.patterns) return;
@@ -14860,7 +14880,7 @@ bot.callbackQuery(/^cgn_m_sim_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.allGroups) return;
@@ -14915,7 +14935,7 @@ async function renderCgnManualSelect(ctx: any) {
 }
 
 bot.callbackQuery(/^cgn_m_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.selectionPool) return;
@@ -14931,7 +14951,7 @@ bot.callbackQuery(/^cgn_m_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -14941,7 +14961,7 @@ bot.callbackQuery("cgn_m_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.selectionPool) return;
@@ -14952,11 +14972,11 @@ bot.callbackQuery("cgn_m_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("cgn_m_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.selectionPool) return;
@@ -14966,7 +14986,7 @@ bot.callbackQuery("cgn_m_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -14975,7 +14995,7 @@ bot.callbackQuery("cgn_m_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.selectedGroupIds?.length) return;
@@ -14997,7 +15017,7 @@ bot.callbackQuery("cgn_m_proceed", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_naming_auto", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15015,7 +15035,7 @@ bot.callbackQuery("cgn_m_naming_auto", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_m_naming_custom", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15066,7 +15086,7 @@ async function showCgnManualReview(ctx: any) {
 // ═══ AUTO MODE ══════════════════════════════════════════════════════════════
 
 bot.callbackQuery("cgn_auto", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ WhatsApp not connected.", {
@@ -15143,7 +15163,7 @@ async function renderCgnAutoSelect(ctx: any) {
 }
 
 bot.callbackQuery(/^cgn_a_tog_(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.pendingPool) return;
@@ -15159,7 +15179,7 @@ bot.callbackQuery(/^cgn_a_tog_(\d+)$/, async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_prev_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15169,7 +15189,7 @@ bot.callbackQuery("cgn_a_prev_page", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_next_page", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.pendingPool) return;
@@ -15180,11 +15200,11 @@ bot.callbackQuery("cgn_a_next_page", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_page_info", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
+  ctx.answerCallbackQuery({ text: "Use Prev/Next to change page" });
 });
 
 bot.callbackQuery("cgn_a_select_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.pendingPool) return;
@@ -15194,7 +15214,7 @@ bot.callbackQuery("cgn_a_select_all", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_clear_all", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15203,7 +15223,7 @@ bot.callbackQuery("cgn_a_clear_all", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_proceed", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.pendingSelectedIds?.length) return;
@@ -15256,7 +15276,7 @@ async function cgnAutoAfterVcfUploaded(ctx: any) {
 }
 
 bot.callbackQuery("cgn_a_name_same", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15265,7 +15285,7 @@ bot.callbackQuery("cgn_a_name_same", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_a_name_custom", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData) return;
@@ -15430,7 +15450,7 @@ async function buildAndShowCgnAutoReview(ctx: any) {
 // ═══ SHARED: Confirm + Background Rename + Cancel ═══════════════════════════
 
 bot.callbackQuery("cgn_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.changeGroupNameData?.renamePlan) return;
@@ -15452,7 +15472,7 @@ bot.callbackQuery("cgn_confirm", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_cancel_request", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   cancelDialogActiveFor.add(ctx.from.id);
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard()
@@ -15463,14 +15483,14 @@ bot.callbackQuery("cgn_cancel_request", async (ctx) => {
 
 bot.callbackQuery("cgn_cancel_no", async (ctx) => {
   cancelDialogActiveFor.delete(ctx.from.id);
-  await ctx.answerCallbackQuery({ text: "Renaming continued" });
+  ctx.answerCallbackQuery({ text: "Renaming continued" });
   await ctx.editMessageReplyMarkup({
     reply_markup: new InlineKeyboard().text("❌ Cancel", "cgn_cancel_request"),
   });
 });
 
 bot.callbackQuery("cgn_cancel_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "Stopping after current group..." });
+  ctx.answerCallbackQuery({ text: "Stopping after current group..." });
   const state = userStates.get(ctx.from.id);
   if (state?.changeGroupNameData) state.changeGroupNameData.cancel = true;
   // Keep dialog flag on; background loop's cleanup clears it.
@@ -15564,7 +15584,7 @@ async function runChangeGroupNameBackground(
 // ─── Add Members Feature ──────────────────────────────────────────────────────
 
 bot.callbackQuery("add_members", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   if (!isConnected(String(userId))) {
@@ -15595,7 +15615,7 @@ bot.callbackQuery("add_members", async (ctx) => {
 });
 
 bot.callbackQuery("am_skip_friends", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15617,7 +15637,7 @@ bot.callbackQuery("am_skip_friends", async (ctx) => {
 });
 
 bot.callbackQuery("am_skip_admin", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15632,7 +15652,7 @@ bot.callbackQuery("am_skip_admin", async (ctx) => {
 });
 
 bot.callbackQuery("am_skip_navy", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15647,7 +15667,7 @@ bot.callbackQuery("am_skip_navy", async (ctx) => {
 });
 
 bot.callbackQuery("am_skip_members", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15679,7 +15699,7 @@ bot.callbackQuery("am_skip_members", async (ctx) => {
 });
 
 bot.callbackQuery("am_mode_one_by_one", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15696,7 +15716,7 @@ bot.callbackQuery("am_mode_one_by_one", async (ctx) => {
 });
 
 bot.callbackQuery("am_delay_15", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15705,7 +15725,7 @@ bot.callbackQuery("am_delay_15", async (ctx) => {
 });
 
 bot.callbackQuery("am_mode_together", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15766,7 +15786,7 @@ async function showCustomBatchPrompt(ctx: any, userId: number) {
 }
 
 bot.callbackQuery("am_mode_custom", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15787,7 +15807,7 @@ for (const [cb, val] of [
   ["am_cb_all", -1],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    ctx.answerCallbackQuery();
     const userId = ctx.from.id;
     const state = userStates.get(userId);
     if (!state?.addMembersData?.customStep) return;
@@ -15886,7 +15906,7 @@ async function showAddMembersReview(ctx: any, userId: number) {
 }
 
 bot.callbackQuery("am_start_adding", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.addMembersData) return;
@@ -15938,7 +15958,7 @@ bot.callbackQuery("am_start_adding", async (ctx) => {
 });
 
 bot.callbackQuery("am_cancel_adding", async (ctx) => {
-  await ctx.answerCallbackQuery({ text: "⛔ Adding stopped!" });
+  ctx.answerCallbackQuery({ text: "⛔ Adding stopped!" });
   addMembersCancelRequests.add(ctx.from.id);
 });
 
@@ -17653,7 +17673,7 @@ bot.on("message:text", async (ctx, next) => {
 });
 
 bot.callbackQuery("rm_confirm_with_exclude", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.removeExcludeData) return;
@@ -17824,7 +17844,7 @@ bot.command("file", async (ctx) => {
 });
 
 bot.callbackQuery("ft_menu", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   try {
     await ctx.editMessageText(fileToolsMenuText(), { parse_mode: "HTML", reply_markup: fileToolsMenuKb() });
   } catch {
@@ -17835,7 +17855,7 @@ bot.callbackQuery("ft_menu", async (ctx) => {
 // ── VCF Editor ────────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ft_vcf_editor", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
@@ -17852,13 +17872,13 @@ bot.callbackQuery("ft_vcf_editor", async (ctx) => {
 });
 
 bot.callbackQuery("fe_done_upload", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData || state.step !== "fe_upload") return;
   const d = state.fileEditorData;
   if (!d.contactsGroups.length) {
-    await ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
+    ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
     return;
   }
   const total = d.contactsGroups.reduce((s, g) => s + g.length, 0);
@@ -17877,7 +17897,7 @@ bot.callbackQuery("fe_done_upload", async (ctx) => {
 // ── Splitter ──────────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ft_splitter", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   userStates.set(userId, {
     step: "fs_upload",
@@ -17894,7 +17914,7 @@ bot.callbackQuery("ft_splitter", async (ctx) => {
 // ── Merge ─────────────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ft_merge", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
@@ -17912,13 +17932,13 @@ bot.callbackQuery("ft_merge", async (ctx) => {
 });
 
 bot.callbackQuery("fm_done_upload", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData || state.step !== "fm_upload") return;
   const d = state.fileEditorData;
   if (d.contactsGroups.length < 2) {
-    await ctx.answerCallbackQuery({ text: "⚠️ Send at least 2 files to merge!", show_alert: true });
+    ctx.answerCallbackQuery({ text: "⚠️ Send at least 2 files to merge!", show_alert: true });
     return;
   }
   ftUploadStatusMsgId.delete(userId);
@@ -17942,7 +17962,7 @@ bot.callbackQuery("fm_done_upload", async (ctx) => {
 });
 
 bot.callbackQuery(/^fm_fmt_(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData) return;
@@ -17953,7 +17973,7 @@ bot.callbackQuery(/^fm_fmt_(.+)$/, async (ctx) => {
 // ── Convert Files ─────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ft_converter", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   ftUploadStatusMsgId.delete(userId);
   userStates.set(userId, {
@@ -17970,13 +17990,13 @@ bot.callbackQuery("ft_converter", async (ctx) => {
 });
 
 bot.callbackQuery("fc_done_upload", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData || state.step !== "fc_upload") return;
   const d = state.fileEditorData;
   if (!d.contactsGroups.length) {
-    await ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
+    ctx.answerCallbackQuery({ text: "⚠️ Please send at least one file first!", show_alert: true });
     return;
   }
   ftUploadStatusMsgId.delete(userId);
@@ -18010,7 +18030,7 @@ bot.callbackQuery("fc_done_upload", async (ctx) => {
 });
 
 bot.callbackQuery(/^fc_fmt_(vcf|txt|csv|xlsx)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData) return;
@@ -18109,7 +18129,7 @@ async function doMergeAndSend(ctx: any, userId: number, state: any, outExt: stri
 // ── Number → VCF ──────────────────────────────────────────────────────────────
 
 bot.callbackQuery("ft_num2vcf", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   userStates.set(userId, {
     step: "fn_numbers",
@@ -18128,7 +18148,7 @@ bot.callbackQuery("ft_num2vcf", async (ctx) => {
 // ── VCF Editor confirm ────────────────────────────────────────────────────────
 
 bot.callbackQuery("fe_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData) return;
@@ -18208,7 +18228,7 @@ bot.callbackQuery("fe_confirm", async (ctx) => {
 // ── Number → VCF confirm ──────────────────────────────────────────────────────
 
 bot.callbackQuery("fn_confirm", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state?.fileEditorData) return;
@@ -19242,13 +19262,13 @@ function byLinkPrompt(feature: string, emoji: string, count: number, doneCallbac
 
 // ─── CTC Links Done ───────────────────────────────────────────────
 bot.callbackQuery("ctc_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "ctc_enter_links") return;
   const buffer = state.ctcLinkBuffer || [];
   if (!buffer.length) {
-    await ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!", show_alert: true });
+    ctx.answerCallbackQuery({ text: "❌ Please send at least one link first!", show_alert: true });
     return;
   }
   ctcLinkCollectMsgId.delete(userId);
@@ -19303,7 +19323,7 @@ async function resolveLinksWithProgress(
 // ─────────────────────────────────────────────────────────────────────────────
 
 bot.callbackQuery("lv_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19317,12 +19337,12 @@ bot.callbackQuery("lv_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("lv_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "lv_enter_links_bl") return;
   const buffer = state.lvLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   lvLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19355,7 +19375,7 @@ bot.callbackQuery("lv_links_done", async (ctx) => {
 
 // ─── Remove Members — By Link ─────────────────────────────────────
 bot.callbackQuery("rm_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19369,12 +19389,12 @@ bot.callbackQuery("rm_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("rm_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "rm_enter_links_bl") return;
   const buffer = state.rmLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   rmLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19398,7 +19418,7 @@ bot.callbackQuery("rm_links_done", async (ctx) => {
 
 // ─── Approval — By Link ───────────────────────────────────────────
 bot.callbackQuery("ap_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19412,12 +19432,12 @@ bot.callbackQuery("ap_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("ap_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "ap_enter_links_bl") return;
   const buffer = state.apLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   apLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19441,7 +19461,7 @@ bot.callbackQuery("ap_links_done", async (ctx) => {
 
 // ─── Make Admin — By Link ─────────────────────────────────────────
 bot.callbackQuery("ma_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19455,12 +19475,12 @@ bot.callbackQuery("ma_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("ma_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "ma_enter_links_bl") return;
   const buffer = state.maLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   maLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19486,7 +19506,7 @@ bot.callbackQuery("ma_links_done", async (ctx) => {
 
 // ─── Demote Admin — By Link ───────────────────────────────────────
 bot.callbackQuery("da_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19500,12 +19520,12 @@ bot.callbackQuery("da_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("da_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "da_enter_links_bl") return;
   const buffer = state.daLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   daLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19529,7 +19549,7 @@ bot.callbackQuery("da_links_done", async (ctx) => {
 
 // ─── Edit Settings — By Link ──────────────────────────────────────
 bot.callbackQuery("es_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19543,12 +19563,12 @@ bot.callbackQuery("es_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("es_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "es_enter_links_bl") return;
   const buffer = state.esLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   esLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
@@ -19570,7 +19590,7 @@ bot.callbackQuery("es_links_done", async (ctx) => {
 
 // ─── Change Group Name — By Link ──────────────────────────────────
 bot.callbackQuery("cgn_by_link", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   if (!isConnected(String(userId))) {
     await ctx.editMessageText("❌ <b>WhatsApp not connected!</b>", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }); return;
@@ -19584,12 +19604,12 @@ bot.callbackQuery("cgn_by_link", async (ctx) => {
 });
 
 bot.callbackQuery("cgn_links_done", async (ctx) => {
-  await ctx.answerCallbackQuery();
+  ctx.answerCallbackQuery();
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (!state || state.step !== "cgn_enter_links_bl") return;
   const buffer = state.cgnLinkBuffer || [];
-  if (!buffer.length) { await ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
+  if (!buffer.length) { ctx.answerCallbackQuery({ text: "❌ Send at least one link first!", show_alert: true }); return; }
   cgnLinkCollectMsgId.delete(userId);
   const chatId = ctx.callbackQuery.message!.chat.id;
   const msgId = ctx.callbackQuery.message!.message_id;
