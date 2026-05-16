@@ -617,8 +617,9 @@ const REFER_GATE_EXEMPT_PREFIXES = [
   "fs_",   // Splitter steps
   "fm_",   // Merge steps
   "fc_",   // Convert Files steps
+  "fn_",   // Number → VCF steps (fn_confirm, fn_step1, fn_step2, etc.)
 ];
-const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined", "ft_num2vcf", "fe_confirm"]);
+const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
 function isReferGateExempt(cbData: string): boolean {
   if (REFER_GATE_EXEMPT_EXACT.has(cbData)) return true;
   return REFER_GATE_EXEMPT_PREFIXES.some((p) => cbData.startsWith(p));
