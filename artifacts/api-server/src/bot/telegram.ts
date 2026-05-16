@@ -4933,6 +4933,7 @@ bot.callbackQuery("connect_wa", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   clearQrPairing(userId);
+  userStates.delete(userId);
 
   const connectedText = "✅ <b>WhatsApp already connected!</b>\n\nYou can use all features.";
   const connectedKb = new InlineKeyboard().text("🏠 Main Menu", "main_menu");
@@ -4943,13 +4944,12 @@ bot.callbackQuery("connect_wa", async (ctx) => {
     .row()
     .text("🔙 Back", "main_menu");
 
-  userStates.delete(userId);
-
-  // Check connection FIRST — only disconnect if NOT already connected, to
-  // avoid killing a live QR-paired session when the user taps Back or Connect.
+  // Check connection state (in-memory, instant).
+  // Only disconnect if NOT already connected — and fire-and-forget so
+  // socket.logout() network latency never blocks the UI response.
   const alreadyConnected = isConnected(String(userId));
   if (!alreadyConnected) {
-    await disconnectWhatsApp(String(userId)).catch(() => {});
+    void disconnectWhatsApp(String(userId)).catch(() => {});
   }
 
   const isPhoto = !!ctx.callbackQuery.message?.photo;
@@ -5009,7 +5009,8 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
     active.expired = true;
   }
   clearQrPairing(userId);
-  await disconnectWhatsApp(String(userId)).catch(() => {});
+  // Fire-and-forget: don't block UI on socket.logout() network call
+  void disconnectWhatsApp(String(userId)).catch(() => {});
   try { await ctx.deleteMessage(); } catch {}
   await ctx.reply(
     "📱 <b>Connect WhatsApp</b>\n\nChoose pairing method:",
@@ -12407,17 +12408,16 @@ bot.callbackQuery("disconnect_confirm", async (ctx) => {
   //    disconnect — the user just pressed the button, no need to alert them.
   suppressDisconnectNotification(String(userId));
   suppressDisconnectNotification(getAutoUserId(String(userId)));
-  // 2. Drop the live Baileys socket + auth state and pending reconnect timers.
-  await disconnectWhatsApp(String(userId));
-  // 2a. Invalidate the session cache so the next /start or button press
-  //     does not incorrectly think a stored session still exists.
+  // 2a. Invalidate the session cache immediately so the next /start or button
+  //     press does not incorrectly think a stored session still exists.
   hasSessionCache.del(String(userId));
-  // 3. Drop this user's slice of every per-user in-memory Map/Set so RAM
-  //    actually returns to baseline instead of being held by orphaned state.
+  // 2b. Drop this user's slice of every per-user in-memory Map/Set so RAM
+  //     actually returns to baseline instead of being held by orphaned state.
   clearUserMemoryState(userId);
-  // 4. Also clear the Auto-Chat WhatsApp socket if it's open under the
-  //    derived auto-userId — otherwise that second socket keeps ~5-10MB.
-  try { await disconnectWhatsApp(getAutoUserId(String(userId))); } catch {}
+  // 3. Show "✅ Disconnected" immediately — don't block on socket.logout().
+  //    Fire-and-forget both WhatsApp disconnects so network latency is invisible.
+  void disconnectWhatsApp(String(userId)).catch(() => {});
+  void disconnectWhatsApp(getAutoUserId(String(userId))).catch(() => {});
   // 4. Run a global purge to flush translation caches + nudge V8/glibc to
   //    actually release pages back to the OS so RSS visibly drops.
   void runMemoryPurge("user disconnect");
@@ -12654,9 +12654,10 @@ bot.callbackQuery("auto_disconnect_confirm", async (ctx) => {
   const autoUserId = getAutoUserId(String(userId));
   // Suppress the "⚠️ Disconnected" push notification — user intentionally disconnected.
   suppressDisconnectNotification(autoUserId);
-  // Drop the auto-chat Baileys socket + its pending reconnect timers.
-  await disconnectWhatsApp(autoUserId);
+  // Invalidate session cache immediately, then fire-and-forget the socket
+  // teardown so socket.logout() network latency doesn't block the UI.
   hasSessionCache.del(autoUserId);
+  void disconnectWhatsApp(autoUserId).catch(() => {});
   // Stop and forget the auto-chat session object.
   const session = autoChatSessions.get(userId);
   if (session) { session.cancelled = true; session.running = false; }
