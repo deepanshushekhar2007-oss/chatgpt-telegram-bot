@@ -1608,17 +1608,27 @@ bot.callbackQuery("group_create_start", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_creation", async (ctx) => {
-  await ctx.answerCallbackQuery();
   const userId = ctx.from.id;
-  await ctx.editMessageText(
-    "⚠️ <b>Cancel Group Creation?</b>\n\nGroups already created will remain. Only remaining groups won't be created.\n\nAre you sure?",
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text("✅ Yes, Cancel", "group_cancel_confirm")
-        .text("▶️ Continue", "group_cancel_dismiss"),
-    }
-  );
+  const state = userStates.get(userId);
+  if (!state || state.step !== "group_creating") {
+    await ctx.answerCallbackQuery();
+    return;
+  }
+  // Use show_alert so progress message is NOT edited — background keeps updating it
+  // User clicks cancel again (or a different button if they want to confirm)
+  // We set a "pendingCancel" flag and show alert with instructions
+  if (!(state as any).pendingCancel) {
+    (state as any).pendingCancel = true;
+    await ctx.answerCallbackQuery({
+      text: "⚠️ Tap Cancel again to confirm cancellation.",
+      show_alert: true,
+    });
+  } else {
+    // Second tap = confirm cancel
+    (state as any).pendingCancel = false;
+    state.groupCreationCancel = true;
+    await ctx.answerCallbackQuery({ text: "🛑 Group creation cancelled!", show_alert: false });
+  }
 });
 
 bot.callbackQuery("group_cancel_confirm", async (ctx) => {
@@ -1628,10 +1638,6 @@ bot.callbackQuery("group_cancel_confirm", async (ctx) => {
   if (state) {
     state.groupCreationCancel = true;
   }
-  await ctx.editMessageText(
-    "🛑 <b>Group creation cancelled.</b>\n\nGroups already created will remain.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-  );
 });
 
 bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
@@ -1662,10 +1668,28 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
         if (gs.dpBuffer) { await new Promise((r) => setTimeout(r, 2000)); await setGroupIcon(userId, result.id, gs.dpBuffer); }
         results.push({ name: groupName, link: result.inviteCode });
       } else {
-        results.push({ name: groupName, link: null, error: "Failed to create" });
+        results.push({ name: groupName, link: null, error: "WhatsApp connect nahi hai" });
       }
     } catch (err: any) {
-      results.push({ name: groupName, link: null, error: err?.message || "Unknown error" });
+      const rawMsg: string = (err?.message || err?.data || String(err) || "").toLowerCase();
+      let friendlyError = "Group create nahi hua";
+      if (rawMsg.includes("rate") || rawMsg.includes("429") || rawMsg.includes("too many") || rawMsg.includes("spam")) {
+        friendlyError = "⛔ Rate limit / Spam detected — thodi der baad try karo";
+      } else if (rawMsg.includes("ban") || rawMsg.includes("forbidden") || rawMsg.includes("403") || rawMsg.includes("blocked")) {
+        friendlyError = "🚫 Account restricted ya banned — WhatsApp ne block kiya";
+      } else if (rawMsg.includes("not-authorized") || rawMsg.includes("401") || rawMsg.includes("unauthorized")) {
+        friendlyError = "🔐 Authorization fail — dobara WhatsApp connect karo";
+      } else if (rawMsg.includes("timeout") || rawMsg.includes("connection") || rawMsg.includes("network")) {
+        friendlyError = "🌐 Connection timeout — internet check karo";
+      } else if (rawMsg.includes("limit") || rawMsg.includes("quota")) {
+        friendlyError = "📊 WhatsApp group limit reach ho gayi";
+      } else if (rawMsg.includes("conflict") || rawMsg.includes("already exists")) {
+        friendlyError = "⚠️ Aise naam ka group pehle se hai";
+      } else if (rawMsg) {
+        // Show a shortened version of the actual error
+        friendlyError = rawMsg.length > 80 ? rawMsg.slice(0, 80) + "..." : rawMsg;
+      }
+      results.push({ name: groupName, link: null, error: friendlyError });
     }
 
     const done = i + 1;
@@ -4814,7 +4838,21 @@ bot.on("message:text", async (ctx) => {
 
   if (state.step === "group_enter_description") {
     if (!state.groupSettings) return;
-    state.groupSettings.description = text.toLowerCase() === "skip" ? "" : text;
+    if (text.toLowerCase() === "skip") {
+      state.groupSettings.description = "";
+    } else if (text.length > 512) {
+      // WhatsApp group description limit is 512 characters
+      await ctx.reply(
+        `⚠️ <b>Description bahut lamba hai!</b>\n\n` +
+        `WhatsApp sirf <b>512 characters</b> allow karta hai, aapne <b>${text.length} characters</b> diye.\n\n` +
+        `Bot automatically pehle 512 characters use karega.\n\n` +
+        `📝 Preview:\n<i>${esc(text.slice(0, 100))}...</i>`,
+        { parse_mode: "HTML" }
+      );
+      state.groupSettings.description = text.slice(0, 512);
+    } else {
+      state.groupSettings.description = text;
+    }
     state.step = "group_settings";
     await ctx.reply(settingsText(state.groupSettings), { parse_mode: "HTML", reply_markup: settingsKeyboard(state.groupSettings) });
     return;
