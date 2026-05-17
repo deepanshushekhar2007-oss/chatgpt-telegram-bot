@@ -10,6 +10,8 @@ import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions } fr
 
 const logger = pino({ level: "silent" });
 
+const DESCRIPTION_MAX_LENGTH = 512;
+
 let socketGenCounter = 0;
 
 interface WhatsAppSession {
@@ -95,6 +97,8 @@ async function createSocket(
     syncFullHistory: false,
     markOnlineOnConnect: false,
     retryRequestDelayMs: 250,
+    // Memory optimization: do not store messages in memory
+    getMessage: async () => undefined,
   });
 
   session.socket = sock;
@@ -445,9 +449,15 @@ export function getConnectedWhatsAppNumber(userId: string): string | null {
 
 export async function restoreWhatsAppSessions(): Promise<void> {
   const storedSessions = await listStoredWhatsAppSessions();
-  console.log(`[WA][RESTORE] Found ${storedSessions.length} saved WhatsApp session(s)`);
 
-  for (const stored of storedSessions) {
+  // Only restore Auto Chat sessions (_auto suffix) on restart.
+  // Main sessions are NOT restored — they reconnect only when user explicitly uses the bot.
+  // This prevents all sessions from loading at startup (which causes disconnects due to
+  // simultaneous connection attempts overwhelming the server memory / WhatsApp rate limits).
+  const autoSessions = storedSessions.filter(s => s.userId.endsWith("_auto"));
+  console.log(`[WA][RESTORE] Found ${storedSessions.length} total sessions, restoring ${autoSessions.length} auto chat session(s)`);
+
+  for (const stored of autoSessions) {
     if (sessions.has(stored.userId)) continue;
 
     const session: WhatsAppSession = {
@@ -484,6 +494,10 @@ export async function restoreWhatsAppSessions(): Promise<void> {
     } finally {
       session.connectLock = false;
     }
+
+    // Stagger reconnects to avoid simultaneous connections overwhelming WhatsApp servers
+    // and to reduce peak memory usage at startup
+    await new Promise(r => setTimeout(r, 4000));
   }
 }
 
@@ -522,7 +536,8 @@ export async function createWhatsAppGroup(
     };
   } catch (err: any) {
     console.error(`[WA][${userId}] Group creation error:`, err?.message);
-    return null;
+    // Re-throw with original error so caller can show reason to user
+    throw err;
   }
 }
 
@@ -544,7 +559,13 @@ export async function applyGroupSettings(
   const sock = session.socket;
 
   try {
-    if (description) await sock.groupUpdateDescription(groupId, description);
+    if (description) {
+      // WhatsApp group description limit is 512 characters
+      const safeDesc = description.length > DESCRIPTION_MAX_LENGTH
+        ? description.slice(0, DESCRIPTION_MAX_LENGTH)
+        : description;
+      await sock.groupUpdateDescription(groupId, safeDesc);
+    }
   } catch (e: any) { console.error(`[WA][${userId}] desc error:`, e?.message); }
 
   try {
