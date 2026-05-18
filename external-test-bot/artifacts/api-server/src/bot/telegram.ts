@@ -31,6 +31,8 @@ import {
   getAutoUserId,
   isAutoConnected,
   getAutoConnectedNumber,
+  clearAllSignalCaches,
+  pruneOldSignalKeys,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1309,6 +1311,35 @@ bot.command("status", async (ctx) => {
     `🚫 <b>Banned (${data.bannedUsers.length}):</b>\n${bannedText}`,
     { parse_mode: "HTML" }
   );
+});
+
+bot.command("cleanram", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+  const msg = await ctx.reply("🧹 <b>RAM cleanup shuru ho raha hai...</b>", { parse_mode: "HTML" });
+  const before = process.memoryUsage();
+  const cleared = clearAllSignalCaches();
+  // Also prune MongoDB signal keys older than 45 days (non-blocking)
+  void pruneOldSignalKeys(45).then(deleted => {
+    bot.api.sendMessage(ctx.chat.id,
+      `🗑️ <b>MongoDB prune:</b> ${deleted} purane signal key(s) delete hue (>45 days old)`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  });
+  // Small delay to let GC run
+  await new Promise(r => setTimeout(r, 500));
+  const after = process.memoryUsage();
+  const rssBefore = Math.round(before.rss / 1024 / 1024);
+  const rssAfter = Math.round(after.rss / 1024 / 1024);
+  const heapBefore = Math.round(before.heapUsed / 1024 / 1024);
+  const heapAfter = Math.round(after.heapUsed / 1024 / 1024);
+  await bot.api.editMessageText(ctx.chat.id, msg.message_id,
+    `✅ <b>RAM Cleanup Complete!</b>\n\n` +
+    `🧹 Signal caches cleared: <b>${cleared}</b> session(s)\n\n` +
+    `📦 RSS: ${rssBefore} MB → ${rssAfter} MB (${rssBefore - rssAfter >= 0 ? "-" : "+"}${Math.abs(rssBefore - rssAfter)} MB)\n` +
+    `💾 Heap: ${heapBefore} MB → ${heapAfter} MB (${heapBefore - heapAfter >= 0 ? "-" : "+"}${Math.abs(heapBefore - heapAfter)} MB)\n\n` +
+    `💡 Signal keys ab on-demand MongoDB se load honge. Koi session disconnect nahi hua.`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
 });
 
 bot.callbackQuery("broadcast_cancel", async (ctx) => {
