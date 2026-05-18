@@ -1,18 +1,118 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
   Browsers,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
 import { useMongoDBAuthState, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
+import { getCollection } from "./mongodb";
 
 const logger = pino({ level: "silent" });
 
 const DESCRIPTION_MAX_LENGTH = 512;
 
+// Maximum entries kept per signal-key category in the in-memory cache.
+// When this limit is exceeded, the oldest 25 % of entries are evicted.
+// Keys are always safely stored in MongoDB so eviction is lossless.
+const SIGNAL_CACHE_MAX_PER_CATEGORY = 400;
+
 let socketGenCounter = 0;
+
+// ─── Bounded signal-key cache ─────────────────────────────────────────────────
+// Replacement for Baileys' `makeCacheableSignalKeyStore` which uses an
+// unbounded plain-object cache. This version uses insertion-ordered Maps so
+// we can cheaply evict the oldest entries and keep memory flat over time.
+function makeBoundedCacheableSignalKeyStore(
+  store: { get: (t: string, ids: string[]) => Promise<Record<string, any>>; set: (d: Record<string, Record<string, any>>) => Promise<void> },
+  _logger: any
+): {
+  get: (type: string, ids: string[]) => Promise<Record<string, any>>;
+  set: (data: Record<string, Record<string, any>>) => Promise<void>;
+  isInTransaction: () => boolean;
+  transaction: <T>(exec: () => Promise<T>) => Promise<T>;
+  prefetch: (type: string, ids: string[]) => Promise<void>;
+  clearCache: () => void;
+} {
+  // One Map<id, value> per category. Map is insertion-ordered → easy FIFO eviction.
+  const cache = new Map<string, Map<string, any>>();
+
+  function cat(type: string): Map<string, any> {
+    let c = cache.get(type);
+    if (!c) { c = new Map(); cache.set(type, c); }
+    return c;
+  }
+
+  function evictIfNeeded(type: string): void {
+    const c = cache.get(type);
+    if (!c || c.size <= SIGNAL_CACHE_MAX_PER_CATEGORY) return;
+    const toRemove = Math.ceil(c.size * 0.25);
+    let n = 0;
+    for (const k of c.keys()) {
+      if (n++ >= toRemove) break;
+      c.delete(k);
+    }
+  }
+
+  let inTx = false;
+  let txQueue: Record<string, Record<string, any>> = {};
+
+  async function loadMissing(type: string, ids: string[]): Promise<void> {
+    const c = cat(type);
+    const missing = ids.filter(id => !c.has(id));
+    if (!missing.length) return;
+    const fetched = await store.get(type, missing);
+    for (const [id, val] of Object.entries(fetched)) {
+      c.delete(id); // refresh insertion order
+      c.set(id, val);
+    }
+    evictIfNeeded(type);
+  }
+
+  return {
+    get: async (type, ids) => {
+      await loadMissing(type, ids);
+      const c = cat(type);
+      const out: Record<string, any> = {};
+      for (const id of ids) { if (c.has(id)) out[id] = c.get(id); }
+      return out;
+    },
+
+    set: async (data) => {
+      for (const [type, entries] of Object.entries(data)) {
+        const c = cat(type);
+        for (const [id, val] of Object.entries(entries)) {
+          c.delete(id);
+          if (val !== null && val !== undefined) c.set(id, val);
+        }
+        evictIfNeeded(type);
+      }
+      if (inTx) {
+        for (const [type, entries] of Object.entries(data)) {
+          txQueue[type] = { ...txQueue[type], ...entries };
+        }
+        return;
+      }
+      await store.set(data);
+    },
+
+    isInTransaction: () => inTx,
+
+    transaction: async (exec) => {
+      inTx = true; txQueue = {};
+      try {
+        const result = await exec();
+        if (Object.keys(txQueue).length) { await store.set(txQueue); }
+        return result;
+      } finally { inTx = false; txQueue = {}; }
+    },
+
+    prefetch: async (type, ids) => { await loadMissing(type, ids); },
+
+    // Call this to drop all cached entries (they're safe in MongoDB).
+    clearCache: () => { cache.clear(); },
+  };
+}
 
 interface WhatsAppSession {
   socket: ReturnType<typeof makeWASocket> | null;
@@ -28,6 +128,7 @@ interface WhatsAppSession {
   retryCount: number;
   socketGenId: number;
   connectLock: boolean;
+  clearSignalCache?: () => void;
 }
 
 const sessions: Map<string, WhatsAppSession> = new Map();
@@ -79,11 +180,14 @@ async function createSocket(
   const { version } = await fetchLatestBaileysVersion();
   console.log(`[WA][${userId}] Creating socket gen=${myGenId} version=${version.join(".")} registered=${state.creds.registered}`);
 
+  const boundedKeyStore = makeBoundedCacheableSignalKeyStore(state.keys, logger);
+  session.clearSignalCache = boundedKeyStore.clearCache;
+
   const sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      keys: boundedKeyStore,
     },
     printQRInTerminal: false,
     logger,
@@ -97,7 +201,7 @@ async function createSocket(
     syncFullHistory: false,
     markOnlineOnConnect: false,
     retryRequestDelayMs: 250,
-    // Memory optimization: do not store messages in memory
+    // Do not store messages in memory (sending-only bot)
     getMessage: async () => undefined,
   });
 
@@ -1239,3 +1343,63 @@ export function isAutoConnected(userId: string): boolean {
 export function getAutoConnectedNumber(userId: string): string | null {
   return getConnectedWhatsAppNumber(getAutoUserId(userId));
 }
+
+// ─── Memory management ────────────────────────────────────────────────────────
+
+/**
+ * Clear the in-memory signal-key cache for every active session.
+ * Keys are safely persisted in MongoDB so this is non-destructive.
+ * Call this via /cleanram or on the periodic timer below.
+ */
+export function clearAllSignalCaches(): number {
+  let cleared = 0;
+  for (const [userId, session] of sessions.entries()) {
+    if (session.clearSignalCache) {
+      session.clearSignalCache();
+      cleared++;
+      console.log(`[WA][${userId}] Signal cache cleared`);
+    }
+  }
+  // Give the GC a hint if the flag is set (node --expose-gc)
+  if (typeof (global as any).gc === "function") {
+    (global as any).gc();
+    console.log("[WA] Manual GC triggered after cache clear");
+  }
+  return cleared;
+}
+
+/**
+ * Delete signal keys from MongoDB that haven't been updated in `olderThanDays` days.
+ * Safe because this is a sending-only bot — stale signal sessions are auto-renegotiated
+ * on the next send by WhatsApp's Signal protocol.
+ */
+export async function pruneOldSignalKeys(olderThanDays = 45): Promise<number> {
+  try {
+    const col = await getCollection("wa_keys");
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+    const result = await col.deleteMany({ updatedAt: { $lt: cutoff } });
+    console.log(`[WA][PRUNE] Deleted ${result.deletedCount} signal keys older than ${olderThanDays} days`);
+    return result.deletedCount ?? 0;
+  } catch (err: any) {
+    console.error("[WA][PRUNE] pruneOldSignalKeys error:", err?.message);
+    return 0;
+  }
+}
+
+// ─── Periodic memory cleanup ──────────────────────────────────────────────────
+// Every 4 hours: flush in-memory signal caches (keys reloaded from MongoDB on demand).
+// Every 24 hours: prune MongoDB signal keys older than 45 days.
+// This keeps memory flat regardless of uptime.
+
+const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+  const n = clearAllSignalCaches();
+  console.log(`[WA][PERIODIC] Signal cache flush: cleared ${n} session(s)`);
+}, FOUR_HOURS_MS);
+
+setInterval(async () => {
+  const deleted = await pruneOldSignalKeys(45);
+  console.log(`[WA][PERIODIC] MongoDB key prune: removed ${deleted} old key(s)`);
+}, TWENTY_FOUR_HOURS_MS);
