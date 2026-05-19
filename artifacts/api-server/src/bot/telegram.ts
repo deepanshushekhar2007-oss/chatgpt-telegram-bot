@@ -5556,16 +5556,38 @@ bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
   } catch {}
 });
 
+function categorizeGroupError(msg?: string): string {
+  const m = (msg || "").toLowerCase();
+  if (m.includes("rate") || m.includes("429") || m.includes("too many") || m.includes("spam") || m.includes("limit")) {
+    return "⛔ Rate limit hit — WhatsApp blocked temporarily. Wait a few minutes and try again.";
+  }
+  if (m.includes("403") || m.includes("forbidden") || m.includes("ban") || m.includes("blocked")) {
+    return "🚫 WhatsApp account is temporarily banned or restricted. Try again later.";
+  }
+  if (m.includes("group limit") || m.includes("max group") || m.includes("too many group")) {
+    return "📊 WhatsApp group limit reached. You cannot create more groups on this account.";
+  }
+  if (m.includes("not connected") || m.includes("socket") || m.includes("connection")) {
+    return "📵 WhatsApp disconnected during creation. Reconnect and try again.";
+  }
+  if (m.includes("timeout") || m.includes("timed out")) {
+    return "⏱️ Request timed out — WhatsApp servers are slow. Try again.";
+  }
+  if (msg && msg.length > 0 && msg !== "Failed to create") return `⚠️ ${msg}`;
+  return "❌ Failed to create — unknown reason. Check WhatsApp status.";
+}
+
 async function createGroupsBackground(userId: string, numericUserId: number, gs: GroupSettings, chatId: number, msgId: number) {
   const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, approveJoin: gs.approveJoin };
   const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean }> = [];
   const total = gs.finalNames.length;
 
+  // Helper: read cancel flag fresh each call so it picks up changes mid-creation
+  const isCancelled = (): boolean => !!userStates.get(numericUserId)?.groupCreationCancel;
+
   for (let i = 0; i < total; i++) {
-    const state = userStates.get(numericUserId);
-    if (state?.groupCreationCancel) {
-      results.push({ name: gs.finalNames[i], link: null, error: "Cancelled by user" });
-      for (let j = i + 1; j < total; j++) {
+    if (isCancelled()) {
+      for (let j = i; j < total; j++) {
         results.push({ name: gs.finalNames[j], link: null, error: "Cancelled by user" });
       }
       break;
@@ -5575,14 +5597,26 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
     try {
       // Pass friendNumbers at creation time — bypasses WhatsApp privacy restrictions on non-contacts
       const result = await createWhatsAppGroup(userId, groupName, gs.friendNumbers);
+
+      // Check cancel immediately after the slowest API call
+      if (isCancelled()) {
+        if (result) results.push({ name: groupName, link: result.inviteCode ?? null });
+        else results.push({ name: groupName, link: null, error: "Cancelled by user" });
+        for (let j = i + 1; j < total; j++) {
+          results.push({ name: gs.finalNames[j], link: null, error: "Cancelled by user" });
+        }
+        break;
+      }
+
       if (result) {
-        await new Promise((r) => setTimeout(r, 1500));
-        await applyGroupSettings(userId, result.id, perms, gs.description);
-        if (gs.disappearingMessages > 0) {
+        // Give WhatsApp time to fully initialise the new group before applying settings
+        await new Promise((r) => setTimeout(r, 2500));
+        if (!isCancelled()) await applyGroupSettings(userId, result.id, perms, gs.description);
+        if (!isCancelled() && gs.disappearingMessages > 0) {
           await new Promise((r) => setTimeout(r, 1000));
           await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
         }
-        if (gs.dpBuffers.length > 0) {
+        if (!isCancelled() && gs.dpBuffers.length > 0) {
           const dpBuf = gs.dpBuffers[i % gs.dpBuffers.length];
           await new Promise((r) => setTimeout(r, 2000));
           await setGroupIcon(userId, result.id, dpBuf);
@@ -5597,7 +5631,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
         let finalFriendsAdded = 0;
         let finalFriendsFailed = false;
 
-        if (gs.friendNumbers.length > 0) {
+        if (!isCancelled() && gs.friendNumbers.length > 0) {
           if (result.participantsFailed) {
             // Creation with participants failed — try adding separately as fallback
             await new Promise((r) => setTimeout(r, 3000));
@@ -5698,7 +5732,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       }
       message += line + "\n\n";
     } else {
-      message += `❌ <b>${esc(r.name)}</b>\n⚠️ ${esc(r.error || "")}\n\n`;
+      message += `❌ <b>${esc(r.name)}</b>\n${esc(categorizeGroupError(r.error))}\n\n`;
     }
   }
 
@@ -13339,42 +13373,45 @@ bot.callbackQuery(/^acf_dur:(\d+)$/, async (ctx) => {
   const allNumbers = numbersPart.split("|").filter(Boolean);
   const allUserIds = userIdsPart.split("|").filter(Boolean);
 
-  const primaryNumber = allNumbers[0] || "";
-  const autoNumber = allNumbers[1] || "";
-  if (!primaryNumber || !autoNumber) return;
+  if (!allNumbers[0] || !allNumbers[1]) return;
 
-  // ── Step 1: Show contact-save instruction screen BEFORE starting chat ──
-  // User must save all these numbers in their phone contacts, then tap confirm.
-  let saveInstructions = "📱 <b>Pehle Yeh Numbers Apne Phone Mein Save Karo!</b>\n\n";
-  saveInstructions += "⚠️ <i>Chat shuru hone se pehle neeche diye sab numbers apne har ek WhatsApp ke phone mein contacts mein save karo, tab hi messages deliver honge.</i>\n\n";
-  saveInstructions += "<b>📋 In numbers ko save karo:</b>\n";
+  // Start chat directly — contact save step removed
+  const allJids = allNumbers.map(n => n.replace(/[^0-9]/g, "") + "@s.whatsapp.net");
+  const primaryJid = allJids[0];
+  const autoJid = allJids[1];
+  const totalWa = allJids.length;
+  const totalPairs = CHAT_FRIEND_PAIRS.length;
+  const autoChatExpiresAt = durationMs === 0 ? undefined : Date.now() + durationMs;
+  const durationLabel = durationMs === 0 ? "No Limit" : `${Math.round(durationMs / (24 * 60 * 60 * 1000))} day(s)`;
+  const speedPct = Math.round(getAcfSpeedFactor(totalWa) * 100);
+
+  let waList = "";
   for (let i = 0; i < allNumbers.length; i++) {
-    const icon = i === 0 ? "📞" : "📱";
-    const clean = allNumbers[i].replace(/[^0-9]/g, "");
-    saveInstructions += `${icon} <b>WA ${i + 1}:</b> <code>+${clean}</code>\n`;
+    const role = i === 0 ? "Primary" : `Auto ${i}`;
+    waList += `${i === 0 ? "📞" : "📱"} WA ${i + 1}: <code>${esc(allNumbers[i])}</code> (${role})\n`;
   }
-  saveInstructions += "\n<b>Steps:</b>\n";
-  saveInstructions += "1️⃣ Apne phone ka <b>Contacts</b> app kholo\n";
-  saveInstructions += "2️⃣ Upar diye <b>sab numbers</b> ek ek karke save karo\n";
-  saveInstructions += "3️⃣ WhatsApp open karo — contacts refresh honge\n";
-  saveInstructions += "4️⃣ Neeche <b>\"✅ Save kar liya, Chat Shuru Karo\"</b> button dabao\n";
 
-  // Store all needed data in state so confirm callback can use it
-  userStates.set(userId, {
-    step: "acf_contacts_confirm",
-    chatInGroupData: {
-      ...state.chatInGroupData,
-      message: rawMsg,
-      delaySeconds: durationMs,
-    },
-  });
+  const statusMsg = await ctx.editMessageText(
+    "👫 <b>Chat Friend Started!</b>\n\n" +
+    waList +
+    `⏱️ Duration: <b>${durationLabel}</b>\n` +
+    (totalWa > 2 ? `⚡ Speed: <b>${speedPct}%</b> boost with ${totalWa} WA accounts!\n` : "") +
+    "\n⏳ Starting messages...",
+    { parse_mode: "HTML" }
+  );
+  const msgId = (statusMsg as any).message_id;
+  const chatId = ctx.chat!.id;
+  userStates.delete(userId);
 
-  await ctx.editMessageText(saveInstructions, {
-    parse_mode: "HTML",
-    reply_markup: new InlineKeyboard()
-      .text("✅ Save kar liya, Chat Shuru Karo", `acf_contacts_ok:${durationMs}`).row()
-      .text("❌ Cancel", "auto_chat_menu"),
-  });
+  void runChatFriendBackground(
+    userId,
+    allUserIds[0] || String(userId),
+    allUserIds[1] || getAutoUserId(String(userId)),
+    chatId, msgId,
+    primaryJid, autoJid, totalPairs, autoChatExpiresAt,
+    0, 0,
+    allJids, allUserIds
+  );
 });
 
 bot.callbackQuery(/^acf_contacts_ok:(\d+)$/, async (ctx) => {
@@ -13523,65 +13560,7 @@ async function runChatFriendBackground(
     .text("⏹️ Stop", "acf_stop_btn").row()
     .text("🏠 Main Menu", "main_menu");
 
-  // ── Pre-save contacts: each WA saves every other WA's number in its contact list ──
-  // Show real-time progress to the user. Chat only starts after ALL contacts are saved.
-  {
-    // Build initial status lines: one entry per (sender, receiver) pair
-    interface ContactSaveStatus { sLabel: string; rLabel: string; phone: string; done: boolean; failed: boolean; }
-    const contactSaveStatuses: ContactSaveStatus[] = [];
-    for (let sIdx = 0; sIdx < N; sIdx++) {
-      for (let rIdx = 0; rIdx < N; rIdx++) {
-        if (rIdx === sIdx) continue;
-        contactSaveStatuses.push({
-          sLabel: `WA ${sIdx + 1}`,
-          rLabel: `WA ${rIdx + 1}`,
-          phone: resolvedJids[rIdx].replace("@s.whatsapp.net", ""),
-          done: false,
-          failed: false,
-        });
-      }
-    }
-
-    const buildContactSaveMsg = (done: boolean) => {
-      let lines = "📋 <b>Contacts Save Ho Rahe Hain...</b>\n\n";
-      for (const s of contactSaveStatuses) {
-        const icon = s.done ? "✅" : s.failed ? "❌" : "⏳";
-        lines += `${icon} ${s.sLabel} → ${s.rLabel} (<code>${esc(s.phone)}</code>)\n`;
-      }
-      if (done) lines += "\n✅ <b>Sab contacts save ho gaye! Chat shuru ho raha hai...</b>";
-      else lines += "\n⌛ Please wait...";
-      return lines;
-    };
-
-    // Show initial status
-    try {
-      await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(false), { parse_mode: "HTML" });
-    } catch {}
-
-    // Save each contact and update status
-    for (const entry of contactSaveStatuses) {
-      if (!session.running || session.cancelled) break;
-      const senderIdx = Number(entry.sLabel.replace("WA ", "")) - 1;
-      const senderUserId = resolvedUserIds[senderIdx] ?? resolvedUserIds[0];
-
-      const saved = await saveContactToWhatsApp(senderUserId, entry.phone, `SPIDY ${entry.rLabel.replace("WA ", "")}`);
-      entry.done = saved;
-      entry.failed = !saved;
-
-      try {
-        await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(false), { parse_mode: "HTML" });
-      } catch {}
-      await sleep(400);
-    }
-
-    // Show completion message
-    if (session.running && !session.cancelled) {
-      try {
-        await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(true), { parse_mode: "HTML" });
-      } catch {}
-      await sleep(1500);
-    }
-  }
+  // Contact save step removed — chat starts immediately
 
   if (!session.running || session.cancelled) {
     for (const uid of resolvedUserIds) unprotectSession(uid);
@@ -17077,9 +17056,17 @@ bot.on("message:text", async (ctx, next) => {
 
   if (state.step === "group_enter_description") {
     if (!state.groupSettings) return;
-    state.groupSettings.description = text.toLowerCase() === "skip" ? "" : text;
+    const WA_DESC_MAX = 512;
+    const rawDesc = text.toLowerCase() === "skip" ? "" : text;
+    let descWarning = "";
+    if (rawDesc.length > WA_DESC_MAX) {
+      state.groupSettings.description = rawDesc.slice(0, WA_DESC_MAX);
+      descWarning = `⚠️ <b>Description truncated to ${WA_DESC_MAX} characters</b> (WhatsApp limit).\n\n`;
+    } else {
+      state.groupSettings.description = rawDesc;
+    }
     state.step = "group_settings";
-    await ctx.reply(settingsText(state.groupSettings), { parse_mode: "HTML", reply_markup: settingsKeyboard(state.groupSettings) });
+    await ctx.reply(descWarning + settingsText(state.groupSettings), { parse_mode: "HTML", reply_markup: settingsKeyboard(state.groupSettings) });
     return;
   }
 
@@ -18830,20 +18817,34 @@ async function restoreAutoAccepterJobs(): Promise<void> {
 }
 
 async function restoreAutoWaSessionsOnStartup(): Promise<void> {
+  // Only reconnect WhatsApp sessions for users who have an active Auto Chat
+  // session persisted in MongoDB. All other users reconnect on-demand when
+  // they first interact with the bot (silent reconnect in the middleware).
+  // This prevents the bot from loading every stored WA session on startup
+  // (which consumes RAM and causes connections that quickly disconnect).
   try {
-    const allSessions = await listStoredWhatsAppSessions();
-    if (!allSessions.length) return;
-    // Reconnect ALL stored WhatsApp sessions — both primary (telegram IDs)
-    // and all auto slots (_auto, _auto_2, _auto_3, …) — so every user's WA
-    // is live before autochat/other features try to use them.
-    console.log(`[AUTO_WA] Reconnecting ${allSessions.length} WhatsApp session(s) on startup...`);
-    for (const s of allSessions) {
+    const activeSessions = await loadAllAutoChatSessions();
+    if (!activeSessions.length) {
+      console.log("[AUTO_WA] No active auto chat sessions — skipping startup WA reconnect.");
+      return;
+    }
+
+    // Collect all unique WA user IDs needed by active auto chat sessions
+    const needed = new Set<string>();
+    for (const s of activeSessions) {
+      needed.add(String(s.userId));               // primary WA
+      if (s.autoUserId) needed.add(s.autoUserId); // auto slot
+      if (s.allUserIds) s.allUserIds.forEach((id: string) => needed.add(id));
+    }
+
+    console.log(`[AUTO_WA] Reconnecting ${needed.size} WA session(s) for ${activeSessions.length} active auto chat user(s)...`);
+    for (const uid of needed) {
       try {
-        await ensureSessionLoaded(s.userId);
-        const kind = s.userId.includes("_auto") ? "auto" : "primary";
-        console.log(`[AUTO_WA] Loaded ${kind} session: ${s.userId} (${s.phoneNumber})`);
+        await ensureSessionLoaded(uid);
+        const kind = uid.includes("_auto") ? "auto" : "primary";
+        console.log(`[AUTO_WA] Loaded ${kind} session: ${uid}`);
       } catch (err: any) {
-        console.error(`[AUTO_WA] Failed to load session ${s.userId}:`, err?.message);
+        console.error(`[AUTO_WA] Failed to load session ${uid}:`, err?.message);
       }
     }
   } catch (err: any) {
