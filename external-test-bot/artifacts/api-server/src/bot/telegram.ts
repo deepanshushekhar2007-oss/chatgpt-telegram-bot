@@ -3610,6 +3610,7 @@ bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
+  autoChatSessions.delete(userId);
   await ctx.editMessageText("⏹️ <b>Auto Chat band kar diya gaya!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
@@ -3885,6 +3886,7 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
   }
 
   session.running = false;
+  autoChatSessions.delete(userId);
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
@@ -3996,6 +3998,7 @@ bot.callbackQuery("cig_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
+  cigSessions.delete(userId);
   await ctx.editMessageText("⏹️ <b>Chat In Group band kar diya gaya!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
@@ -4209,6 +4212,7 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
   }
 
   session.running = false;
+  cigSessions.delete(userId);
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
