@@ -12674,6 +12674,7 @@ bot.callbackQuery("auto_chat_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
+  autoChatSessions.delete(userId);
   await ctx.editMessageText("⏹️ <b>Auto Chat stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
@@ -13214,6 +13215,7 @@ bot.callbackQuery("cig_stop_confirm", async (ctx) => {
     session.cancelled = true;
     session.running = false;
   }
+  cigSessions.delete(userId);
   await ctx.editMessageText("⏹️ <b>Chat In Group stopped!</b>", {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
@@ -14233,6 +14235,11 @@ async function cigSendBackground(userId: number, waUserId: string, chatId: numbe
 
   session.running = false;
   session.nextDelayMs = 0;
+  // Free per-user state so the Map doesn't grow unboundedly for long-running deployments.
+  setTimeout(() => {
+    const cur = cigSessions.get(userId);
+    if (cur && !cur.running) cigSessions.delete(userId);
+  }, 30_000);
   if (!session.cancelled) {
     try {
       await bot.api.editMessageText(chatId, msgId,
