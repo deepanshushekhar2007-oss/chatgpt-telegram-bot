@@ -1290,9 +1290,20 @@ export async function createWhatsAppGroup(
         // WhatsApp may silently reject some (privacy settings, 403, etc.) even
         // when groupCreate succeeds. Don't assume all participantList.length
         // were added — check the actual membership list returned by Baileys.
-        const memberSet = new Set(
-          (group.participants || []).map((p: any) => String(p.id ?? p.jid ?? "").replace(/:\d+@/, "@"))
-        );
+        //
+        // IMPORTANT — LID mode: In newer WhatsApp versions, group.participants
+        // returns JIDs in "@lid" format (e.g. "1234567890:0@lid") instead of
+        // "@s.whatsapp.net". The real phone-based JID is in p.phoneNumber / p.pn.
+        // We must index BOTH formats so the comparison hits regardless of which
+        // mode the WhatsApp server is currently using.
+        const memberSet = new Set<string>();
+        for (const p of (group.participants || [])) {
+          const rawId = String(p.id ?? p.jid ?? "").replace(/:\d+@/, "@");
+          if (rawId) memberSet.add(rawId);
+          // LID mode: phone JID in phoneNumber / pn field
+          const phoneJid = String(p.phoneNumber ?? (p as any).pn ?? "").replace(/:\d+@/, "@");
+          if (phoneJid && phoneJid.includes("@")) memberSet.add(phoneJid);
+        }
         const addedCount = participantList
           .map(jid => jid.replace(/:\d+@/, "@"))
           .filter(jid => memberSet.has(jid)).length;
@@ -1338,30 +1349,7 @@ export async function createWhatsAppGroup(
     const res2 = await tryCreate([], 3);
     if (res2) {
       groupId = res2.id;
-      // Step 2b: Group created empty — now try adding participants separately.
-      // groupCreate with participants may throw (WhatsApp rejects the whole call
-      // when even one participant has privacy settings blocking direct adds).
-      // groupParticipantsUpdate adds them individually so each rejection is
-      // isolated — the rest can still be added successfully.
-      if (validJids.length > 0) {
-        try {
-          // Wait for the group to be fully registered on WhatsApp servers.
-          await new Promise(r => setTimeout(r, 2500));
-          if (!isCancelled?.() && session.socket && session.connected) {
-            const addResult = await session.socket.groupParticipantsUpdate(groupId, validJids, "add");
-            const added = Array.isArray(addResult)
-              ? addResult.filter((r: any) => String(r?.status) === "200" || r?.status === "success").length
-              : 0;
-            addedAtCreation = added;
-            participantsFailed = added < validJids.length;
-          } else {
-            participantsFailed = true;
-          }
-        } catch (err: any) {
-          console.error(`[WA][${userId}] post-create addParticipants error:`, err?.message);
-          participantsFailed = true;
-        }
-      }
+      if (rawJids.length > 0) participantsFailed = true;
     }
   }
 
@@ -1642,17 +1630,32 @@ export async function joinGroupWithLink(
         return { success: false, error: "Link invalid or expired" };
       }
 
-      // WhatsApp account-level restriction — this account has been temporarily
-      // blocked from joining groups via invite links. Retrying won't help;
-      // user needs to wait for WhatsApp to lift the restriction (usually a few
-      // hours to 24h). Return immediately with a clear error code so the caller
-      // can surface a useful message instead of retrying 15 times.
+      // WhatsApp "account_reachout_restricted" — often triggered by WA's
+      // anti-bot detection when joining multiple groups quickly, NOT necessarily
+      // a permanent account ban. Retry up to 3 extra times with longer waits
+      // (30s → 90s → 150s) before giving up. If all retries exhaust, surface
+      // a clear error so the user knows to wait a few hours and try again.
       if (
         msg.includes("account_reachout_restricted") ||
         msg.includes("reachout_restricted") ||
         msg.includes("account_restricted")
       ) {
-        return { success: false, error: "account_reachout_restricted" };
+        const REACHOUT_MAX_RETRIES = 3;
+        if (attempt <= REACHOUT_MAX_RETRIES) {
+          const delay = attempt === 1 ? 30_000 : attempt === 2 ? 90_000 : 150_000;
+          console.log(`[WA][${userId}] account_reachout_restricted (attempt ${attempt}/${REACHOUT_MAX_RETRIES}) — waiting ${delay / 1000}s before retry...`);
+          await new Promise<void>((r) => {
+            const t = setTimeout(r, delay);
+            signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+          });
+          if (signal?.aborted) return { success: false, error: "Cancelled" };
+          const freshSession = useSession(userId);
+          if (!freshSession?.socket || !freshSession.connected) {
+            return { success: false, error: "WhatsApp not connected" };
+          }
+          continue;
+        }
+        return { success: false, error: "account_reachout_restricted — WhatsApp ne temporarily restrict kiya hai, kuch ghante baad try karo" };
       }
 
       // Transient / server-side throttling — retry silently, never surface to user
