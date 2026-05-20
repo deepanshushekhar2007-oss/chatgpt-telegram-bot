@@ -1355,6 +1355,7 @@ export interface GroupPermissions {
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
+  inviteLink: boolean;
   approveJoin: boolean;
 }
 
@@ -1445,6 +1446,12 @@ export async function applyGroupSettings(
   try {
     await (sock as any).groupMemberAddMode(groupId, perms.addMembers ? "all_member_add" : "admin_add");
   } catch (e: any) { console.error(`[WA][${userId}] addMembers error:`, e?.message); }
+
+  try {
+    // "Invite via link or QR code" permission — controls whether non-admin
+    // members can share the group invite link.
+    await (sock as any).groupInviteMode(groupId, perms.inviteLink ? "all_member_add" : "admin_add");
+  } catch (e: any) { console.error(`[WA][${userId}] inviteLink error:`, e?.message); }
 
   try {
     await (sock as any).groupJoinApprovalMode(groupId, perms.approveJoin ? "on" : "off");

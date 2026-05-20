@@ -588,6 +588,7 @@ export interface PersistedGroupSettings {
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
+  inviteLink: boolean;
   approveJoin: boolean;
   disappearingMessages: number;
   friendNumbers: string[];
