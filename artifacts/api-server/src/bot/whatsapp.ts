@@ -77,7 +77,7 @@ async function getGroupMetaCached(userId: string, groupId: string, socket: Retur
   return meta;
 }
 
-function clearGroupCaches(userId: string): void {
+export function clearGroupCaches(userId: string): void {
   groupFetchCache.delete(userId);
   for (const key of groupMetaCache.keys()) {
     if (key.startsWith(`${userId}:`)) groupMetaCache.delete(key);
@@ -1236,7 +1236,8 @@ export interface GroupResult {
 export async function createWhatsAppGroup(
   userId: string,
   groupName: string,
-  participants: string[] = []
+  participants: string[] = [],
+  isCancelled?: () => boolean
 ): Promise<GroupResult | null> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
@@ -1278,12 +1279,18 @@ export async function createWhatsAppGroup(
 
   async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string } | null> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Check cancel before every attempt so the user isn't kept waiting
+      // through multiple retries after they confirmed cancellation.
+      if (isCancelled?.()) return null;
       try {
         const group = await session.socket!.groupCreate(groupName, participantList);
         return { id: group.id };
       } catch (err: any) {
         console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
         if (attempt < maxAttempts) {
+          // Check cancel before sleeping so we abort immediately instead of
+          // waiting up to 5 s between retries when the user has cancelled.
+          if (isCancelled?.()) return null;
           await new Promise(r => setTimeout(r, attempt * 2500));
         }
       }
@@ -1299,6 +1306,7 @@ export async function createWhatsAppGroup(
   // usually means a bad participant, retrying with the same list won't help
   // and just burns rate-limit budget).
   if (validJids.length > 0) {
+    if (isCancelled?.()) return null;
     const res = await tryCreate(validJids, 1);
     if (res) {
       groupId = res.id;
@@ -1309,10 +1317,12 @@ export async function createWhatsAppGroup(
   // Step 2: If we don't have a group yet (either no valid jids, or creation
   // with participants failed), create an empty group with up to 3 attempts.
   if (!groupId) {
+    if (isCancelled?.()) return null;
     if (validJids.length > 0 || rawJids.length > 0) {
       // Brief cool-off after a failed create attempt to avoid rate-limit.
       await new Promise(r => setTimeout(r, 2500));
     }
+    if (isCancelled?.()) return null;
     const res2 = await tryCreate([], 3);
     if (res2) {
       groupId = res2.id;

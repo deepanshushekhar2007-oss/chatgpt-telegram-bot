@@ -64,6 +64,7 @@ import {
   isDisconnectPending,
   isWhatsAppConnecting,
   suppressDisconnectNotification,
+  clearGroupCaches,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -5523,21 +5524,28 @@ bot.callbackQuery("group_cancel_creation", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_confirm", async (ctx) => {
-  ctx.answerCallbackQuery({ text: "🛑 Creation cancelled!" });
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (state) {
     state.groupCreationCancel = true;
     // Keep the pending flag set as well — we don't want the background
-    // loop to overwrite the "cancelled" message with a stale progress
-    // update from a group that was already mid-creation when the user
-    // confirmed. The background loop checks both flags before editing.
+    // loop to overwrite the cancel UI with a stale progress update from
+    // a group that was already mid-creation when the user confirmed.
+    // The background loop checks both flags before editing.
     state.groupCreationCancelPending = true;
   }
-  await ctx.editMessageText(
-    "🛑 <b>Group creation cancelled.</b>\n\nGroups already created will remain.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
-  );
+  // ── Do NOT edit the message text here. ──
+  // The background function (createGroupsBackground) will rewrite this
+  // message with the final summary (including links for already-created
+  // groups) as soon as it detects the cancel flag. Editing here first
+  // causes a 1-2 second flash of a "cancelled" screen before the summary
+  // appears — which looks to the user like the creation restarted.
+  // Instead: just update the markup to remove the cancel button and show
+  // a brief popup so the user gets instant tactile feedback.
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard().text("⏳ Cancelling...", "noop") });
+  } catch {}
+  ctx.answerCallbackQuery({ text: "🛑 Cancelling... summary will appear shortly" });
 });
 
 bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
@@ -5595,8 +5603,9 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
 
     const groupName = gs.finalNames[i];
     try {
-      // Pass friendNumbers at creation time — bypasses WhatsApp privacy restrictions on non-contacts
-      const result = await createWhatsAppGroup(userId, groupName, gs.friendNumbers);
+      // Pass friendNumbers at creation time — bypasses WhatsApp privacy restrictions on non-contacts.
+      // isCancelled callback is passed so internal retries abort immediately when user cancels.
+      const result = await createWhatsAppGroup(userId, groupName, gs.friendNumbers, isCancelled);
 
       // Check cancel immediately after the slowest API call
       if (isCancelled()) {
@@ -5737,19 +5746,42 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   }
 
   const chunks = splitMessage(message, 4000);
-  try {
-    await bot.api.editMessageText(chatId, msgId, chunks[0], {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
-    });
-  } catch {}
-  for (let i = 1; i < chunks.length; i++) {
-    await bot.api.sendMessage(chatId, chunks[i], {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
-    });
+
+  if (cancelled) {
+    // When cancelled: the existing message shows "⏳ Cancelling..." markup.
+    // Send the summary as a NEW message so the user immediately sees the
+    // links of already-created groups without any "cancelled" → "summary"
+    // flicker. Also edit the original message to a simple "cancelled" footer
+    // so there's no dangling "Cancelling..." button left on screen.
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        "🛑 <b>Group creation cancelled.</b>\n\nGroups created before cancel are listed below ↓",
+        { parse_mode: "HTML" }
+      );
+    } catch {}
+    for (let i = 0; i < chunks.length; i++) {
+      await bot.api.sendMessage(chatId, chunks[i], {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      });
+    }
+  } else {
+    // Normal completion: edit the original progress message with the summary.
+    try {
+      await bot.api.editMessageText(chatId, msgId, chunks[0], {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: chunks.length === 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      });
+    } catch {}
+    for (let i = 1; i < chunks.length; i++) {
+      await bot.api.sendMessage(chatId, chunks[i], {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: i === chunks.length - 1 ? new InlineKeyboard().text("🏠 Main Menu", "main_menu") : undefined,
+      });
+    }
   }
 }
 
@@ -12679,6 +12711,10 @@ bot.callbackQuery("auto_chat_refresh", async (ctx) => {
   } catch {}
 });
 
+// No-op callback — used for disabled / in-progress inline buttons that should
+// show no action when tapped (e.g. "⏳ Cancelling..." during group creation).
+bot.callbackQuery("noop", (ctx) => { ctx.answerCallbackQuery(); });
+
 bot.callbackQuery("auto_chat_stop", async (ctx) => {
   ctx.answerCallbackQuery();
   const userId = ctx.from.id;
@@ -13708,6 +13744,19 @@ async function runChatFriendBackground(
         }).catch(() => {});
       }
 
+      // ── RAM: clear stale group/meta caches every 50 steps ──────────────────
+      // ACF sessions are protected from idle eviction so clearGroupCaches is
+      // never called by the sweeper. Without this, the in-memory group-fetch
+      // and group-meta caches grow unboundedly while ACF is running (each
+      // unique groupId seen during a send adds an entry). Clearing every 50
+      // steps (roughly every few minutes depending on delay) keeps the cache
+      // footprint near zero for pure chat-friend traffic.
+      if (stepCount % 50 === 0 && stepCount > 0) {
+        for (const uid of resolvedUserIds) {
+          clearGroupCaches(uid);
+        }
+      }
+
       stepCount++;
     }
   } catch (err: any) {
@@ -13941,6 +13990,12 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
           await waitWithCancel(session, delayMs);
         }
       }
+
+      // ── RAM: clear group/meta caches at the end of every round ────────────
+      // The session is protected from idle eviction, so the sweeper never
+      // frees these caches. Clearing once per round keeps memory flat
+      // regardless of how many rounds repeat-forever runs for.
+      clearGroupCaches(autoUserId);
 
       if (!session.cancelled && round < maxRounds) {
         const delayMs = getSequentialDelayMs(session.rotationIndex);
