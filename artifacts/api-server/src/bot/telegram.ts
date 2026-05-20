@@ -1930,7 +1930,11 @@ async function runJoinBackground(userId: number): Promise<void> {
       if (res.success) {
         session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
       } else {
-        const errMsg = res.error || "Unknown";
+        const rawErr = res.error || "Unknown";
+        // Translate WhatsApp internal error codes to user-readable messages
+        const errMsg = rawErr === "account_reachout_restricted"
+          ? "account_reachout_restricted — WhatsApp ne is account ko temporarily restrict kiya hai (kuch ghanton baad retry karo)"
+          : rawErr;
         session.results.push(`❌ ${esc(errMsg)}\n🔗 <code>${esc(link)}</code>`);
         session.failedLinks.push({ link, reason: errMsg });
       }
