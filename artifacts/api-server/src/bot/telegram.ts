@@ -1135,7 +1135,6 @@ interface GroupSettings {
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
-  inviteLink: boolean;
   approveJoin: boolean;
   disappearingMessages: number;
   friendNumbers: string[];
@@ -1928,7 +1927,11 @@ async function runJoinBackground(userId: number): Promise<void> {
         res = { success: false, error: e?.message || "Unknown error" };
       }
       if (res.success) {
-        session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
+        session.results.push(
+          res.joinRequestSent
+            ? `⏳ Request Sent: ${esc(res.groupName || "Group")} (admin approval pending)`
+            : `✅ Joined: ${esc(res.groupName || "Group")}`
+        );
       } else {
         const errMsg = res.error || "Unknown";
         session.results.push(`❌ ${esc(errMsg)}\n🔗 <code>${esc(link)}</code>`);
@@ -5082,15 +5085,14 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, inviteLink: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
   return new InlineKeyboard()
     .text(`📝 Edit Info: ${on(gs.editGroupInfo)}`, "tog_editInfo").text(`💬 Send Msgs: ${on(gs.sendMessages)}`, "tog_sendMsg").row()
-    .text(`➕ Add Members: ${on(gs.addMembers)}`, "tog_addMembers").text(`🔗 Invite Link: ${on(gs.inviteLink)}`, "tog_inviteLink").row()
-    .text(`🔐 Approve Join: ${on(gs.approveJoin)}`, "tog_approveJoin").row()
+    .text(`➕ Add Members: ${on(gs.addMembers)}`, "tog_addMembers").text(`🔐 Approve Join: ${on(gs.approveJoin)}`, "tog_approveJoin").row()
     .text("💾 Save Settings", "settings_done");
 }
 
@@ -5101,8 +5103,7 @@ function settingsText(gs: GroupSettings): string {
     "<b>👥 Members can:</b>\n" +
     `📝 Edit Group Info: ${on(gs.editGroupInfo)}\n` +
     `💬 Send Messages: ${on(gs.sendMessages)}\n` +
-    `➕ Add Members: ${on(gs.addMembers)}\n` +
-    `🔗 Invite via Link or QR Code: ${on(gs.inviteLink)}\n\n` +
+    `➕ Add Members: ${on(gs.addMembers)}\n\n` +
     "<b>👑 Admins:</b>\n" +
     `🔐 Approve New Members: ${on(gs.approveJoin)}\n\n` +
     "Tap to toggle each setting:"
@@ -5128,7 +5129,7 @@ bot.callbackQuery("create_groups", async (ctx) => {
 
 for (const [cb, field] of [
   ["tog_editInfo", "editGroupInfo"], ["tog_sendMsg", "sendMessages"],
-  ["tog_addMembers", "addMembers"], ["tog_inviteLink", "inviteLink"], ["tog_approveJoin", "approveJoin"],
+  ["tog_addMembers", "addMembers"], ["tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
     ctx.answerCallbackQuery();
@@ -5184,7 +5185,6 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
       editGroupInfo: gs.editGroupInfo,
       sendMessages: gs.sendMessages,
       addMembers: gs.addMembers,
-      inviteLink: gs.inviteLink,
       approveJoin: gs.approveJoin,
       disappearingMessages: gs.disappearingMessages,
       friendNumbers: gs.friendNumbers,
@@ -5277,7 +5277,6 @@ async function showGroupFriendsStep(ctx: any) {
     editGroupInfo: gs.editGroupInfo,
     sendMessages: gs.sendMessages,
     addMembers: gs.addMembers,
-    inviteLink: gs.inviteLink,
     approveJoin: gs.approveJoin,
     disappearingMessages: gs.disappearingMessages,
     friendNumbers: gs.friendNumbers,
@@ -5317,7 +5316,6 @@ async function showGroupFriendAdminStep(ctx: any) {
     editGroupInfo: gs.editGroupInfo,
     sendMessages: gs.sendMessages,
     addMembers: gs.addMembers,
-    inviteLink: gs.inviteLink,
     approveJoin: gs.approveJoin,
     disappearingMessages: gs.disappearingMessages,
     friendNumbers: gs.friendNumbers,
@@ -5429,8 +5427,7 @@ async function showGroupSummary(ctx: any) {
     `\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${gs.editGroupInfo ? "✅" : "❌"} Edit Info | ${gs.sendMessages ? "✅" : "❌"} Send Msgs\n` +
-    `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.inviteLink ? "✅" : "❌"} Invite Link\n` +
-    `${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
+    `${gs.addMembers ? "✅" : "❌"} Add Members | ${gs.approveJoin ? "✅" : "❌"} Approve Join\n\n` +
     "🚀 Ready to create?";
   const markup = new InlineKeyboard().text("✅ Create Now", "group_create_start").text("❌ Cancel", "main_menu");
 
@@ -5447,7 +5444,6 @@ async function showGroupSummary(ctx: any) {
     editGroupInfo: gs.editGroupInfo,
     sendMessages: gs.sendMessages,
     addMembers: gs.addMembers,
-    inviteLink: gs.inviteLink,
     approveJoin: gs.approveJoin,
     disappearingMessages: gs.disappearingMessages,
     friendNumbers: gs.friendNumbers,
@@ -5478,7 +5474,6 @@ bot.callbackQuery("group_create_start", async (ctx) => {
     if (persisted) {
       gs = {
         ...persisted,
-        inviteLink: persisted.inviteLink ?? true, // default ON for sessions saved before this field existed
         dpBuffers: [], // Photos are not persisted — re-upload needed
       };
       // Re-create the state entry so cancel/progress logic works.
@@ -5595,7 +5590,7 @@ function categorizeGroupError(msg?: string): string {
 }
 
 async function createGroupsBackground(userId: string, numericUserId: number, gs: GroupSettings, chatId: number, msgId: number) {
-  const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, inviteLink: gs.inviteLink, approveJoin: gs.approveJoin };
+  const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, approveJoin: gs.approveJoin };
   const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean }> = [];
   const total = gs.finalNames.length;
 
@@ -14320,8 +14315,7 @@ function editSettingsKeyboard(gs: GroupSettings): InlineKeyboard {
   const on = (v: boolean) => v ? "✅ ON" : "❌ OFF";
   return new InlineKeyboard()
     .text(`📝 Edit Info: ${on(gs.editGroupInfo)}`, "es_tog_editInfo").text(`💬 Send Msgs: ${on(gs.sendMessages)}`, "es_tog_sendMsg").row()
-    .text(`➕ Add Members: ${on(gs.addMembers)}`, "es_tog_addMembers").text(`🔗 Invite Link: ${on(gs.inviteLink)}`, "es_tog_inviteLink").row()
-    .text(`🔐 Approve Join: ${on(gs.approveJoin)}`, "es_tog_approveJoin").row()
+    .text(`➕ Add Members: ${on(gs.addMembers)}`, "es_tog_addMembers").text(`🔐 Approve Join: ${on(gs.approveJoin)}`, "es_tog_approveJoin").row()
     .text("💾 Save Settings", "es_settings_done");
 }
 
@@ -14332,8 +14326,7 @@ function editSettingsText(gs: GroupSettings): string {
     "<b>👥 Members can:</b>\n" +
     `📝 Edit Group Info: ${on(gs.editGroupInfo)}\n` +
     `💬 Send Messages: ${on(gs.sendMessages)}\n` +
-    `➕ Add Members: ${on(gs.addMembers)}\n` +
-    `🔗 Invite via Link or QR Code: ${on(gs.inviteLink)}\n\n` +
+    `➕ Add Members: ${on(gs.addMembers)}\n\n` +
     "<b>👑 Admins:</b>\n" +
     `🔐 Approve New Members: ${on(gs.approveJoin)}\n\n` +
     "Tap to toggle each setting:"
@@ -14505,7 +14498,7 @@ bot.callbackQuery("es_continue", async (ctx) => {
 
 for (const [cb, field] of [
   ["es_tog_editInfo", "editGroupInfo"], ["es_tog_sendMsg", "sendMessages"],
-  ["es_tog_addMembers", "addMembers"], ["es_tog_inviteLink", "inviteLink"], ["es_tog_approveJoin", "approveJoin"],
+  ["es_tog_addMembers", "addMembers"], ["es_tog_approveJoin", "approveJoin"],
 ] as const) {
   bot.callbackQuery(cb, async (ctx) => {
     ctx.answerCallbackQuery();
@@ -14634,8 +14627,7 @@ async function showEditSettingsReview(ctx: any) {
     `⏳ Disappearing: ${dmText}\n\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${on(settings.editGroupInfo)} Edit Info | ${on(settings.sendMessages)} Send Msgs\n` +
-    `${on(settings.addMembers)} Add Members | ${on(settings.inviteLink)} Invite Link\n` +
-    `${on(settings.approveJoin)} Approve Join\n\n` +
+    `${on(settings.addMembers)} Add Members | ${on(settings.approveJoin)} Approve Join\n\n` +
     "✅ Confirm to apply these settings to all selected groups:";
   const kb = new InlineKeyboard().text("✅ Apply to All Groups", "es_apply_confirm").text("❌ Cancel", "main_menu");
   try { await ctx.editMessageText(reviewText, { parse_mode: "HTML", reply_markup: kb }); }
@@ -14690,7 +14682,7 @@ async function applyEditSettingsBackground(
   groups: Array<{ id: string; subject: string }>,
   chatId: number, msgId: number
 ) {
-  const perms: GroupPermissions = { editGroupInfo: settings.editGroupInfo, sendMessages: settings.sendMessages, addMembers: settings.addMembers, inviteLink: settings.inviteLink, approveJoin: settings.approveJoin };
+  const perms: GroupPermissions = { editGroupInfo: settings.editGroupInfo, sendMessages: settings.sendMessages, addMembers: settings.addMembers, approveJoin: settings.approveJoin };
   const results: Array<{ name: string; ok: boolean; error?: string }> = [];
   const total = groups.length;
 
