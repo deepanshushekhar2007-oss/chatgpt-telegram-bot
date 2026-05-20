@@ -1265,11 +1265,13 @@ export async function createWhatsAppGroup(
           .map((r: any) => String(r.jid));
         if (verifiedJids.length > 0) {
           validJids = verifiedJids;
-        } else {
-          // None of the supplied numbers exist on WhatsApp — create empty.
-          validJids = [];
         }
-        console.log(`[WA][${userId}] onWhatsApp check: ${verifiedJids.length}/${cleanedNumbers.length} valid`);
+        // If verifiedJids is empty: keep validJids = rawJids.
+        // Do NOT bail to an empty list here — the onWhatsApp check can return
+        // false negatives (rate-limited, format mismatch, privacy settings on
+        // the check itself). Better to try with raw JIDs and let groupCreate
+        // reject them individually than silently skip the add entirely.
+        console.log(`[WA][${userId}] onWhatsApp check: ${verifiedJids.length}/${cleanedNumbers.length} verified (using ${verifiedJids.length > 0 ? "verified" : "raw"} jids)`);
       }
     } catch (err: any) {
       console.error(`[WA][${userId}] onWhatsApp check failed, using raw jids:`, err?.message);
@@ -1277,14 +1279,22 @@ export async function createWhatsAppGroup(
     }
   }
 
-  async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string } | null> {
+  async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string; addedCount: number } | null> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // Check cancel before every attempt so the user isn't kept waiting
       // through multiple retries after they confirmed cancellation.
       if (isCancelled?.()) return null;
       try {
         const group = await session.socket!.groupCreate(groupName, participantList);
-        return { id: group.id };
+        // Count which of the requested participants are actually in the group.
+        // WhatsApp may silently reject some (privacy settings, 403, etc.) even
+        // when groupCreate succeeds. Don't assume all participantList.length
+        // were added — check the actual membership list returned by Baileys.
+        const memberSet = new Set(
+          (group.participants || []).map((p: any) => String(p.id ?? p.jid ?? ""))
+        );
+        const addedCount = participantList.filter(jid => memberSet.has(jid)).length;
+        return { id: group.id, addedCount };
       } catch (err: any) {
         console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
         if (attempt < maxAttempts) {
@@ -1310,7 +1320,7 @@ export async function createWhatsAppGroup(
     const res = await tryCreate(validJids, 1);
     if (res) {
       groupId = res.id;
-      addedAtCreation = validJids.length;
+      addedAtCreation = res.addedCount; // actual count confirmed by Baileys
     }
   }
 

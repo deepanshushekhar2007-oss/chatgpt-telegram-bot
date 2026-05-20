@@ -5650,14 +5650,29 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
         let finalFriendsFailed = false;
 
         if (!isCancelled() && gs.friendNumbers.length > 0) {
-          if (result.participantsFailed) {
-            // Creation with participants failed — try adding separately as fallback
+          const addedAtCreation = result.addedParticipants ?? 0;
+          const allAddedAtCreation = !result.participantsFailed && addedAtCreation >= gs.friendNumbers.length;
+
+          if (allAddedAtCreation) {
+            // All friends confirmed added at group creation time — no extra call needed.
+            finalFriendsAdded = addedAtCreation;
+          } else {
+            // Either creation used empty-group fallback (participantsFailed=true), or
+            // some participants were silently rejected by WhatsApp at creation time
+            // (privacy settings, 403, etc.) even though groupCreate succeeded.
+            // In both cases: wait for group to stabilise, then add all friends
+            // separately. groupParticipantsUpdate gives per-number status codes so
+            // already-in-group members (from creation) just come back as 409 and
+            // are correctly excluded from the added count.
             await new Promise((r) => setTimeout(r, 3000));
             const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
-            finalFriendsAdded = addResults.filter(r => r.success).length;
+            const separatelyAdded = addResults.filter(r => r.success).length;
+            // Friends already added at creation will get 409 (success: false) in the
+            // separate call — count those from addedAtCreation so they're not lost.
+            finalFriendsAdded = result.participantsFailed
+              ? separatelyAdded
+              : Math.min(gs.friendNumbers.length, addedAtCreation + separatelyAdded);
             finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
-          } else {
-            finalFriendsAdded = result.addedParticipants ?? 0;
           }
 
           // Promote friends to admin if user chose Yes
