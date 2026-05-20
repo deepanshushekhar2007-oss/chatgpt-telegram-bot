@@ -1338,7 +1338,30 @@ export async function createWhatsAppGroup(
     const res2 = await tryCreate([], 3);
     if (res2) {
       groupId = res2.id;
-      if (rawJids.length > 0) participantsFailed = true;
+      // Step 2b: Group created empty — now try adding participants separately.
+      // groupCreate with participants may throw (WhatsApp rejects the whole call
+      // when even one participant has privacy settings blocking direct adds).
+      // groupParticipantsUpdate adds them individually so each rejection is
+      // isolated — the rest can still be added successfully.
+      if (validJids.length > 0) {
+        try {
+          // Wait for the group to be fully registered on WhatsApp servers.
+          await new Promise(r => setTimeout(r, 2500));
+          if (!isCancelled?.() && session.socket && session.connected) {
+            const addResult = await session.socket.groupParticipantsUpdate(groupId, validJids, "add");
+            const added = Array.isArray(addResult)
+              ? addResult.filter((r: any) => String(r?.status) === "200" || r?.status === "success").length
+              : 0;
+            addedAtCreation = added;
+            participantsFailed = added < validJids.length;
+          } else {
+            participantsFailed = true;
+          }
+        } catch (err: any) {
+          console.error(`[WA][${userId}] post-create addParticipants error:`, err?.message);
+          participantsFailed = true;
+        }
+      }
     }
   }
 
@@ -1462,23 +1485,20 @@ export async function applyGroupSettings(
   try {
     // "Invite via link or QR code" permission — controls whether non-admin
     // members can share the group invite link.
-    // Uses WhatsApp WAP protocol node "link_privacy" with type "all" (all members)
-    // or "admins" (admin-only). groupInviteMode is not standard in Baileys so
-    // we use the raw query approach as the primary method.
+    // WhatsApp Web protocol: link_privacy IQ sets whether all members or only
+    // admins can share the group invite link. Must include v:"2" — without it
+    // WhatsApp silently ignores the node. groupInviteMode does not exist in
+    // Baileys 7.x so we always use the raw WAP query.
     const linkPrivacyType = perms.inviteLink ? "all" : "admins";
-    if (typeof (sock as any).groupInviteMode === "function") {
-      await (sock as any).groupInviteMode(groupId, perms.inviteLink ? "all_member_add" : "admin_add");
-    } else {
-      await (sock as any).query({
-        tag: "iq",
-        attrs: { type: "set", to: groupId, xmlns: "w:g2" },
-        content: [{
-          tag: "group",
-          attrs: {},
-          content: [{ tag: "link_privacy", attrs: { type: linkPrivacyType } }],
-        }],
-      });
-    }
+    await (sock as any).query({
+      tag: "iq",
+      attrs: { type: "set", to: groupId, xmlns: "w:g2" },
+      content: [{
+        tag: "group",
+        attrs: {},
+        content: [{ tag: "link_privacy", attrs: { v: "2", type: linkPrivacyType } }],
+      }],
+    });
   } catch (e: any) { console.error(`[WA][${userId}] inviteLink error:`, e?.message); }
 
   try {
@@ -1620,6 +1640,19 @@ export async function joinGroupWithLink(
         msg.includes("revoked")
       ) {
         return { success: false, error: "Link invalid or expired" };
+      }
+
+      // WhatsApp account-level restriction — this account has been temporarily
+      // blocked from joining groups via invite links. Retrying won't help;
+      // user needs to wait for WhatsApp to lift the restriction (usually a few
+      // hours to 24h). Return immediately with a clear error code so the caller
+      // can surface a useful message instead of retrying 15 times.
+      if (
+        msg.includes("account_reachout_restricted") ||
+        msg.includes("reachout_restricted") ||
+        msg.includes("account_restricted")
+      ) {
+        return { success: false, error: "account_reachout_restricted" };
       }
 
       // Transient / server-side throttling — retry silently, never surface to user
