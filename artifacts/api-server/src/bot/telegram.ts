@@ -1930,11 +1930,7 @@ async function runJoinBackground(userId: number): Promise<void> {
       if (res.success) {
         session.results.push(`✅ Joined: ${esc(res.groupName || "Group")}`);
       } else {
-        const rawErr = res.error || "Unknown";
-        // Translate WhatsApp internal error codes to user-readable messages
-        const errMsg = rawErr === "account_reachout_restricted"
-          ? "account_reachout_restricted — WhatsApp ne is account ko temporarily restrict kiya hai (kuch ghanton baad retry karo)"
-          : rawErr;
+        const errMsg = res.error || "Unknown";
         session.results.push(`❌ ${esc(errMsg)}\n🔗 <code>${esc(link)}</code>`);
         session.failedLinks.push({ link, reason: errMsg });
       }
@@ -5650,36 +5646,16 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           }
         }
 
-        let finalFriendsAdded = 0;
-        let finalFriendsFailed = false;
+        // Friends added at group creation time (inside groupCreate call).
+        // Do NOT call addGroupParticipantsBulk separately — WhatsApp group
+        // creation is the right moment to add friends. If they weren't added
+        // during groupCreate (privacy settings, not-contact, etc.) we report
+        // that honestly; we do NOT retry via a separate post-creation add call.
+        const finalFriendsAdded = result.addedParticipants ?? 0;
+        const finalFriendsFailed = gs.friendNumbers.length > 0 && finalFriendsAdded < gs.friendNumbers.length;
 
         if (!isCancelled() && gs.friendNumbers.length > 0) {
-          const addedAtCreation = result.addedParticipants ?? 0;
-          const allAddedAtCreation = !result.participantsFailed && addedAtCreation >= gs.friendNumbers.length;
-
-          if (allAddedAtCreation) {
-            // All friends confirmed added at group creation time — no extra call needed.
-            finalFriendsAdded = addedAtCreation;
-          } else {
-            // Either creation used empty-group fallback (participantsFailed=true), or
-            // some participants were silently rejected by WhatsApp at creation time
-            // (privacy settings, 403, etc.) even though groupCreate succeeded.
-            // In both cases: wait for group to stabilise, then add all friends
-            // separately. groupParticipantsUpdate gives per-number status codes so
-            // already-in-group members (from creation) just come back as 409 and
-            // are correctly excluded from the added count.
-            await new Promise((r) => setTimeout(r, 3000));
-            const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
-            const separatelyAdded = addResults.filter(r => r.success).length;
-            // Friends already added at creation will get 409 (success: false) in the
-            // separate call — count those from addedAtCreation so they're not lost.
-            finalFriendsAdded = result.participantsFailed
-              ? separatelyAdded
-              : Math.min(gs.friendNumbers.length, addedAtCreation + separatelyAdded);
-            finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
-          }
-
-          // Promote friends to admin if user chose Yes
+          // Promote friends to admin if user chose Yes (only those actually added)
           if (gs.makeFriendAdmin && finalFriendsAdded > 0) {
             await new Promise((r) => setTimeout(r, 2000));
             for (const num of gs.friendNumbers) {
