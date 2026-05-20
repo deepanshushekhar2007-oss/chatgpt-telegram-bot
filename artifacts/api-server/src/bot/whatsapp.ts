@@ -1349,7 +1349,30 @@ export async function createWhatsAppGroup(
     const res2 = await tryCreate([], 3);
     if (res2) {
       groupId = res2.id;
-      if (rawJids.length > 0) participantsFailed = true;
+      // Step 2b: Empty group created — now add participants separately.
+      // groupCreate threw (e.g. privacy settings blocked the whole call), so
+      // we fall back to groupParticipantsUpdate which tolerates per-participant
+      // rejections without failing the entire operation.
+      if (validJids.length > 0) {
+        try {
+          await new Promise(r => setTimeout(r, 2500));
+          if (!isCancelled?.() && session.socket && session.connected) {
+            const addResult = await session.socket.groupParticipantsUpdate(groupId, validJids, "add");
+            const added = Array.isArray(addResult)
+              ? addResult.filter((r: any) => String(r?.status) === "200" || r?.status === "success").length
+              : 0;
+            addedAtCreation = added;
+            participantsFailed = added < validJids.length;
+          } else {
+            participantsFailed = true;
+          }
+        } catch (err: any) {
+          console.error(`[WA][${userId}] post-create addParticipants error:`, err?.message);
+          participantsFailed = true;
+        }
+      } else if (rawJids.length > 0) {
+        participantsFailed = true;
+      }
     }
   }
 
@@ -1378,7 +1401,6 @@ export interface GroupPermissions {
   editGroupInfo: boolean;
   sendMessages: boolean;
   addMembers: boolean;
-  inviteLink: boolean;
   approveJoin: boolean;
 }
 
@@ -1471,25 +1493,6 @@ export async function applyGroupSettings(
   } catch (e: any) { console.error(`[WA][${userId}] addMembers error:`, e?.message); }
 
   try {
-    // "Invite via link or QR code" permission — controls whether non-admin
-    // members can share the group invite link.
-    // WhatsApp Web protocol: link_privacy IQ sets whether all members or only
-    // admins can share the group invite link. Must include v:"2" — without it
-    // WhatsApp silently ignores the node. groupInviteMode does not exist in
-    // Baileys 7.x so we always use the raw WAP query.
-    const linkPrivacyType = perms.inviteLink ? "all" : "admins";
-    await (sock as any).query({
-      tag: "iq",
-      attrs: { type: "set", to: groupId, xmlns: "w:g2" },
-      content: [{
-        tag: "group",
-        attrs: {},
-        content: [{ tag: "link_privacy", attrs: { v: "2", type: linkPrivacyType } }],
-      }],
-    });
-  } catch (e: any) { console.error(`[WA][${userId}] inviteLink error:`, e?.message); }
-
-  try {
     await (sock as any).groupJoinApprovalMode(groupId, perms.approveJoin ? "on" : "off");
   } catch (e: any) { console.error(`[WA][${userId}] approveJoin error:`, e?.message); }
 }
@@ -1569,7 +1572,7 @@ export async function joinGroupWithLink(
   userId: string,
   link: string,
   signal?: AbortSignal
-): Promise<{ success: boolean; groupName?: string; error?: string }> {
+): Promise<{ success: boolean; groupName?: string; error?: string; joinRequestSent?: boolean }> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
@@ -1593,6 +1596,7 @@ export async function joinGroupWithLink(
       // This mirrors what the official WhatsApp Web client does before showing
       // the group preview screen and the "Join" button.
       let inviteGroupName = "Group";
+      let inviteJoinApprovalMode: string | undefined;
       try {
         const inviteInfo = await Promise.race([
           (session.socket as any).groupGetInviteInfo(code),
@@ -1601,6 +1605,7 @@ export async function joinGroupWithLink(
           ),
         ]);
         if (inviteInfo?.subject) inviteGroupName = inviteInfo.subject;
+        inviteJoinApprovalMode = inviteInfo?.joinApprovalMode;
       } catch (infoErr: any) {
         const infoMsg = (infoErr?.message || String(infoErr || "")).toLowerCase();
         // If the link itself is bad, groupGetInviteInfo fails first — bail early.
@@ -1644,7 +1649,7 @@ export async function joinGroupWithLink(
           // keep inviteGroupName
         }
       }
-      return { success: true, groupName };
+      return { success: true, groupName, joinRequestSent: inviteJoinApprovalMode === "on" };
     } catch (err: any) {
       const msg = (err?.message || String(err || "")).toLowerCase();
       console.error(`[WA][${userId}] Join group error (attempt ${attempt}/${MAX_RETRIES}):`, err?.message);
