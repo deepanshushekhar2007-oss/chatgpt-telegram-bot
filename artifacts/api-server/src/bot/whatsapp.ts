@@ -1584,17 +1584,54 @@ export async function joinGroupWithLink(
     if (signal?.aborted) return { success: false, error: "Cancelled" };
     try {
       const code = extractInviteCode(link);
+
+      // ── Step 1: Fetch invite info BEFORE accepting ──────────────────────
+      // Newer WhatsApp Web protocol requires a groupGetInviteInfo call first
+      // to "preview" the group. Skipping this step causes WhatsApp to classify
+      // the join request as automated bot behavior and return
+      // account_reachout_restricted — even when the account is not banned.
+      // This mirrors what the official WhatsApp Web client does before showing
+      // the group preview screen and the "Join" button.
+      let inviteGroupName = "Group";
+      try {
+        const inviteInfo = await Promise.race([
+          (session.socket as any).groupGetInviteInfo(code),
+          new Promise<never>((_, rej) =>
+            setTimeout(() => rej(new Error("timeout")), 10_000)
+          ),
+        ]);
+        if (inviteInfo?.subject) inviteGroupName = inviteInfo.subject;
+      } catch (infoErr: any) {
+        const infoMsg = (infoErr?.message || String(infoErr || "")).toLowerCase();
+        // If the link itself is bad, groupGetInviteInfo fails first — bail early.
+        if (
+          infoMsg.includes("gone") ||
+          infoMsg.includes("not-found") ||
+          infoMsg.includes("invalid invite") ||
+          infoMsg.includes("bad request") ||
+          infoMsg.includes("forbidden") ||
+          infoMsg.includes("revoked")
+        ) {
+          return { success: false, error: "Link invalid or expired" };
+        }
+        // For transient info-fetch errors (network etc.) — proceed to accept anyway.
+        console.warn(`[WA][${userId}] groupGetInviteInfo failed (proceeding): ${infoErr?.message}`);
+      }
+
+      // ── Step 2: Accept the invite ────────────────────────────────────────
       // 15 s hard cap: without this, a stalled WA connection causes
       // groupAcceptInvite to hang indefinitely and accumulate zombie
-      // socket requests that block ALL subsequent joins (0% stuck).
+      // socket requests that block ALL subsequent joins.
       const result = await Promise.race([
         session.socket.groupAcceptInvite(code),
         new Promise<never>((_, rej) =>
           setTimeout(() => rej(new Error("timeout")), 15_000)
         ),
       ]);
-      let groupName = "Group";
-      if (typeof result === "string" && result) {
+      // Use name from inviteInfo (already resolved above); fall back to
+      // fresh metadata fetch only when inviteInfo didn't return a subject.
+      let groupName = inviteGroupName;
+      if (groupName === "Group" && typeof result === "string" && result) {
         try {
           const metadata = await Promise.race([
             getGroupMetaCached(userId, result, session.socket),
@@ -1602,9 +1639,9 @@ export async function joinGroupWithLink(
               setTimeout(() => rej(new Error("timeout")), 10_000)
             ),
           ]);
-          groupName = metadata?.subject || result;
+          groupName = metadata?.subject || groupName;
         } catch {
-          groupName = result;
+          // keep inviteGroupName
         }
       }
       return { success: true, groupName };
@@ -1628,34 +1665,6 @@ export async function joinGroupWithLink(
         msg.includes("revoked")
       ) {
         return { success: false, error: "Link invalid or expired" };
-      }
-
-      // WhatsApp "account_reachout_restricted" — often triggered by WA's
-      // anti-bot detection when joining multiple groups quickly, NOT necessarily
-      // a permanent account ban. Retry up to 3 extra times with longer waits
-      // (30s → 90s → 150s) before giving up. If all retries exhaust, surface
-      // a clear error so the user knows to wait a few hours and try again.
-      if (
-        msg.includes("account_reachout_restricted") ||
-        msg.includes("reachout_restricted") ||
-        msg.includes("account_restricted")
-      ) {
-        const REACHOUT_MAX_RETRIES = 3;
-        if (attempt <= REACHOUT_MAX_RETRIES) {
-          const delay = attempt === 1 ? 30_000 : attempt === 2 ? 90_000 : 150_000;
-          console.log(`[WA][${userId}] account_reachout_restricted (attempt ${attempt}/${REACHOUT_MAX_RETRIES}) — waiting ${delay / 1000}s before retry...`);
-          await new Promise<void>((r) => {
-            const t = setTimeout(r, delay);
-            signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
-          });
-          if (signal?.aborted) return { success: false, error: "Cancelled" };
-          const freshSession = useSession(userId);
-          if (!freshSession?.socket || !freshSession.connected) {
-            return { success: false, error: "WhatsApp not connected" };
-          }
-          continue;
-        }
-        return { success: false, error: "account_reachout_restricted — WhatsApp ne temporarily restrict kiya hai, kuch ghante baad try karo" };
       }
 
       // Transient / server-side throttling — retry silently, never surface to user
