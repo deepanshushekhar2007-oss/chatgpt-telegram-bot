@@ -1262,7 +1262,7 @@ export async function createWhatsAppGroup(
       if (Array.isArray(checkResults)) {
         const verifiedJids = checkResults
           .filter((r: any) => r && r.exists && r.jid)
-          .map((r: any) => String(r.jid));
+          .map((r: any) => String(r.jid).replace(/:\d+@/, "@"));
         if (verifiedJids.length > 0) {
           validJids = verifiedJids;
         }
@@ -1291,9 +1291,11 @@ export async function createWhatsAppGroup(
         // when groupCreate succeeds. Don't assume all participantList.length
         // were added — check the actual membership list returned by Baileys.
         const memberSet = new Set(
-          (group.participants || []).map((p: any) => String(p.id ?? p.jid ?? ""))
+          (group.participants || []).map((p: any) => String(p.id ?? p.jid ?? "").replace(/:\d+@/, "@"))
         );
-        const addedCount = participantList.filter(jid => memberSet.has(jid)).length;
+        const addedCount = participantList
+          .map(jid => jid.replace(/:\d+@/, "@"))
+          .filter(jid => memberSet.has(jid)).length;
         return { id: group.id, addedCount };
       } catch (err: any) {
         console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
@@ -1460,7 +1462,23 @@ export async function applyGroupSettings(
   try {
     // "Invite via link or QR code" permission — controls whether non-admin
     // members can share the group invite link.
-    await (sock as any).groupInviteMode(groupId, perms.inviteLink ? "all_member_add" : "admin_add");
+    // Uses WhatsApp WAP protocol node "link_privacy" with type "all" (all members)
+    // or "admins" (admin-only). groupInviteMode is not standard in Baileys so
+    // we use the raw query approach as the primary method.
+    const linkPrivacyType = perms.inviteLink ? "all" : "admins";
+    if (typeof (sock as any).groupInviteMode === "function") {
+      await (sock as any).groupInviteMode(groupId, perms.inviteLink ? "all_member_add" : "admin_add");
+    } else {
+      await (sock as any).query({
+        tag: "iq",
+        attrs: { type: "set", to: groupId, xmlns: "w:g2" },
+        content: [{
+          tag: "group",
+          attrs: {},
+          content: [{ tag: "link_privacy", attrs: { type: linkPrivacyType } }],
+        }],
+      });
+    }
   } catch (e: any) { console.error(`[WA][${userId}] inviteLink error:`, e?.message); }
 
   try {
@@ -2473,7 +2491,7 @@ export async function addGroupParticipantsBulk(
     const checkResults = await (session.socket as any).onWhatsApp(...cleanedNumbers);
     if (Array.isArray(checkResults)) {
       const validJidSet = new Set(
-        checkResults.filter((r: any) => r && r.exists && r.jid).map((r: any) => String(r.jid))
+        checkResults.filter((r: any) => r && r.exists && r.jid).map((r: any) => String(r.jid).replace(/:\d+@/, "@"))
       );
       const next: typeof toAdd = [];
       for (const item of toAdd) {
