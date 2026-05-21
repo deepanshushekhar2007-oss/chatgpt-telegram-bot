@@ -2388,10 +2388,10 @@ function qrExpiredKeyboard(): InlineKeyboard {
 function qrCaption(remainingSeconds: number): string {
   return (
     "📷 <b>Pair WhatsApp with QR</b>\n\n" +
-    "1️⃣ WhatsApp open karo\n" +
+    "1️⃣ Open WhatsApp\n" +
     "2️⃣ Settings → Linked Devices\n" +
-    "3️⃣ Link a Device tap karo\n" +
-    "4️⃣ Ye QR scan karo\n\n" +
+    "3️⃣ Tap Link a Device\n" +
+    "4️⃣ Scan this QR code\n\n" +
     `⏳ QR expires in: <b>${remainingSeconds}s</b>`
   );
 }
@@ -3122,36 +3122,36 @@ bot.command("help", async (ctx) => {
     `🤖 WhatsApp Bot Manager — Help Guide\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `📌 Features:\n\n` +
-    `📱 1. Connect WhatsApp — Phone number do, pairing code aayega\n` +
-    `   WhatsApp → Linked Devices → Link with phone number → code daalo\n\n` +
-    `🏗️ 2. Create Groups — Batch mein groups banao (naam, DP, description, permissions, disappearing msgs, friends add)\n\n` +
-    `🔗 3. Get Group Links — Sabhi/similar groups ke invite links lo\n\n` +
-    `🔗 4. Join Groups — Multiple links paste karo, bot sab join kar leta hai\n\n` +
-    `🚪 5. Leave Groups — Similar/All groups batch mein leave karo (member/admin/sab)\n\n` +
-    `📊 6. CTC Checker — Group links + VCF do → check karo kaun member/pending/absent/wrong-add hai\n\n` +
-    `🗑️ 7. Remove Members — Similar/All/By Link groups select karo → non-admin members remove\n\n` +
-    `👑 8. Make Admin — Numbers do → bot unhe admin promote karta hai\n\n` +
-    `✅ 9. Approval — Pending members approve karo:\n` +
-    `   ☝️ 1 by 1 (individually) ya 👥 Together (approval OFF→ON, sab ek saath)\n\n` +
-    `📋 10. Get Pending List — Har admin group mein kitne pending hain\n\n` +
-    `➕ 11. Add Members — VCF + friends numbers → multiple groups mein add (1 by 1 / Together / Custom pace)\n\n` +
-    `⚙️ 12. Edit Settings — Permissions, DP, description, disappearing msgs → Similar/All groups batch mein\n\n` +
-    `🔗 13. Reset Link — Invite links reset karo (Similar/All/By Link)\n\n` +
-    `🏷️ 14. Change Group Name — Manual (auto-numbered ya custom) ya Auto (VCF match)\n\n` +
-    `👤 15. Demote Admin — All admins ya selected numbers demote karo\n\n` +
+    `📱 1. Connect WhatsApp — Enter phone number, get a pairing code\n` +
+    `   WhatsApp → Linked Devices → Link with phone number → enter the code\n\n` +
+    `🏗️ 2. Create Groups — Batch-create groups (name, DP, description, permissions, disappearing msgs, add friends)\n\n` +
+    `🔗 3. Get Group Links — Fetch invite links for all/similar groups\n\n` +
+    `🔗 4. Join Groups — Paste multiple links, bot joins all of them\n\n` +
+    `🚪 5. Leave Groups — Leave similar/all groups in batch (member/admin/all)\n\n` +
+    `📊 6. CTC Checker — Group links + VCF → check who is member/pending/absent/wrong-add\n\n` +
+    `🗑️ 7. Remove Members — Select similar/all/by-link groups → remove non-admin members\n\n` +
+    `👑 8. Make Admin — Send numbers → bot promotes them to admin\n\n` +
+    `✅ 9. Approval — Approve pending members:\n` +
+    `   ☝️ 1 by 1 (individually) or 👥 Together (approval OFF→ON, all at once)\n\n` +
+    `📋 10. Get Pending List — See how many pending requests in each admin group\n\n` +
+    `➕ 11. Add Members — VCF + friend numbers → add to multiple groups (1 by 1 / Together / Custom pace)\n\n` +
+    `⚙️ 12. Edit Settings — Permissions, DP, description, disappearing msgs → apply to similar/all groups in batch\n\n` +
+    `🔗 13. Reset Link — Reset invite links (similar/all/by link)\n\n` +
+    `🏷️ 14. Change Group Name — Manual (auto-numbered or custom) or Auto (VCF match)\n\n` +
+    `👤 15. Demote Admin — Demote all admins or selected numbers\n\n` +
     (canUserSeeAutoChat(userId)
-      ? `🤖 16. Auto Chat ⭐ — 2nd WhatsApp se friends/groups ko auto messages bhejo\n\n`
-      : `🤖 16. Auto Chat ⭐ Paid — Buy karne ke liye ${OWNER_USERNAME} ko msg karo\n\n`) +
-    `🛡️ 17. Auto Accepter — Selected groups mein pending join requests auto-accept (15min–2hr)\n\n` +
+      ? `🤖 16. Auto Chat ⭐ — Auto-send messages to friends/groups using a 2nd WhatsApp\n\n`
+      : `🤖 16. Auto Chat ⭐ Paid — Contact ${OWNER_USERNAME} to purchase\n\n`) +
+    `🛡️ 17. Auto Accepter — Auto-accept pending join requests in selected groups (every 15min–2hr)\n\n` +
     `📁 18. File Tools — VCF Editor, Splitter, Merge, Number→VCF (FREE · /file)\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💬 /start — Main menu  |  /help — Yeh message  |  /file — File Tools\n\n` +
+    `💬 /start — Main menu  |  /help — This message  |  /file — File Tools\n\n` +
     `⚠️ Notes:\n` +
-    `• Group features ke liye admin hona zaroori hai\n` +
-    `• Approval features ke liye "Approval required" mode ON hona chahiye\n` +
-    `• Description max 512 characters honi chahiye\n` +
-    `• Number kisi bhi format mein de sakte ho (+91 9999-999999, 919999999999)\n` +
-    `• WhatsApp disconnect hone par alert milega\n` +
+    `• You must be admin to use group features\n` +
+    `• "Approval required" mode must be ON to use approval features\n` +
+    `• Description max 512 characters\n` +
+    `• Numbers can be in any format (+91 9999-999999, 919999999999)\n` +
+    `• You will get an alert when WhatsApp disconnects\n` +
     `• Support: ${OWNER_USERNAME}`;
 
   // Telegram has a 4096-character limit per message. The full help guide
@@ -3721,7 +3721,7 @@ bot.command("autochat", async (ctx) => {
   if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
   const arg = (ctx.message?.text || "").split(/\s+/)[1]?.toLowerCase();
   if (arg !== "on" && arg !== "off") {
-    await ctx.reply("❓ Usage:\n<code>/autochat on</code> — Sabhi users ke liye ON\n<code>/autochat off</code> — Sabhi users ke liye OFF", { parse_mode: "HTML" });
+    await ctx.reply("❓ Usage:\n<code>/autochat on</code> — Enable for all users\n<code>/autochat off</code> — Disable for all users", { parse_mode: "HTML" });
     return;
   }
   const data = await loadBotData();
@@ -3730,8 +3730,8 @@ bot.command("autochat", async (ctx) => {
   autoChatGlobalEnabled = data.autoChatEnabled;
   await ctx.reply(
     arg === "on"
-      ? "✅ <b>Auto Chat: ON</b>\n\n🤖 Sabhi users ko Auto Chat button dikhega." 
-      : "🔴 <b>Auto Chat: OFF</b>\n\n🚫 Kisi bhi user ko Auto Chat button nahi dikhega.\n💡 Specific user ke liye: <code>/accessautochat [user_id]</code>",
+      ? "✅ <b>Auto Chat: ON</b>\n\n🤖 All users will see the Auto Chat button." 
+      : "🔴 <b>Auto Chat: OFF</b>\n\n🚫 No user will see the Auto Chat button.\n💡 For a specific user: <code>/accessautochat [user_id]</code>",
     { parse_mode: "HTML" }
   );
 });
@@ -5153,7 +5153,7 @@ bot.callbackQuery("settings_done", async (ctx) => {
   };
   const cur = state.groupSettings.disappearingMessages;
   await ctx.editMessageText(
-    "⏳ <b>Disappearing Messages</b>\n\nGroup mein messages kitne time baad automatically delete hone chahiye?\n\n" +
+    "⏳ <b>Disappearing Messages</b>\n\nHow long before messages are automatically deleted in the group?\n\n" +
     `Current: <b>${cur === 0 ? "Off" : cur === 86400 ? "24 Hours" : cur === 604800 ? "7 Days" : "90 Days"}</b>`,
     {
       parse_mode: "HTML",
@@ -5193,11 +5193,11 @@ for (const [cb, dur] of [["gdm_24h", 86400], ["gdm_7d", 604800], ["gdm_90d", 777
 
     await ctx.editMessageText(
       "🖼️ <b>Group Profile Photo(s)</b>\n\n" +
-      `Ek ya zyada photos bhejo (max ${maxDps}).\n\n` +
-      "• 1 photo bhejoge → sab groups mein wahi DP lagega\n" +
-      `• N photos bhejoge → 1st DP → 1st group, 2nd DP → 2nd group, ... (max ${maxDps} kyunki tum ${maxDps} group bana rahe ho)\n\n` +
-      "Photos ek ek karke bhejo. Saare bhej do to <b>✅ Done</b> dabao.\n" +
-      "DP nahi lagana to <b>⏭️ Skip</b> karo.",
+      `Send one or more photos (max ${maxDps}).\n\n` +
+      "• 1 photo → same DP for all groups\n" +
+      `• N photos → 1st DP → 1st group, 2nd DP → 2nd group, ... (max ${maxDps} since you're creating ${maxDps} group(s))\n\n` +
+      "Send photos one by one. When done tap <b>✅ Done</b>.\n" +
+      "To skip, tap <b>⏭️ Skip</b>.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_dp_skip").text("❌ Cancel", "main_menu") }
     );
   });
@@ -5375,9 +5375,18 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   const preview = state.groupSettings.finalNames.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   await ctx.editMessageText(
     `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
-    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
+    "📄 <b>Group Description</b>\n\nSend a description, or tap Skip:",
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_desc_skip").text("◀️ Back", "back_to_naming_mode").row().text("❌ Cancel", "main_menu") }
   );
+});
+
+bot.callbackQuery("group_desc_skip", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const state = userStates.get(ctx.from.id);
+  if (!state?.groupSettings) return;
+  state.groupSettings.description = "";
+  state.step = "group_settings";
+  await ctx.editMessageText(settingsText(state.groupSettings), { parse_mode: "HTML", reply_markup: settingsKeyboard(state.groupSettings) });
 });
 
 bot.callbackQuery("naming_custom", async (ctx) => {
@@ -5420,7 +5429,7 @@ async function showGroupSummary(ctx: any) {
     "📋 <b>Group Creation Summary</b>\n\n" +
     `📝 <b>Names (${gs.finalNames.length}):</b>\n${namesList}\n\n` +
     `📄 <b>Description:</b> ${gs.description ? esc(gs.description) : "None"}\n` +
-    `🖼️ <b>Group DPs:</b> ${gs.dpBuffers.length > 0 ? `${gs.dpBuffers.length} photo(s)${gs.dpBuffers.length === 1 ? " (sab groups mein same)" : " (rotate honge)"}` : "❌ None"}\n` +
+    `🖼️ <b>Group DPs:</b> ${gs.dpBuffers.length > 0 ? `${gs.dpBuffers.length} photo(s)${gs.dpBuffers.length === 1 ? " (same for all groups)" : " (will rotate)"}` : "❌ None"}\n` +
     `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
     `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
     (gs.friendNumbers.length > 0 ? `👑 <b>Make Friend Admin:</b> ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
@@ -7400,7 +7409,7 @@ bot.callbackQuery("gl_retry_pending", async (ctx) => {
     try {
       await bot.api.editMessageText(state.chatId, state.msgId,
         "❌ <b>WhatsApp not connected</b>\n\n" +
-        "Retry nahi ho sakta — pehle WhatsApp connect karo, phir Get Link dobara dabao.",
+        "Cannot retry — connect WhatsApp first, then tap Get Link again.",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
       );
     } catch {}
@@ -12561,8 +12570,8 @@ bot.callbackQuery("connect_auto_wa", async (ctx) => {
   userStates.set(userId, { step: "auto_connect_phone", autoConnectStep: "phone", autoSlot: 1 });
   await ctx.editMessageText(
     "🤖 <b>Connect Auto Chat WhatsApp</b>\n\n" +
-    "Yeh alag WhatsApp number Auto Chat ke liye connect hoga.\n\n" +
-    "📱 Apna phone number bhejo (country code ke saath):\n" +
+    "This separate WhatsApp number will be used for Auto Chat.\n\n" +
+    "📱 Send your phone number (with country code):\n" +
     "Example: <code>919876543210</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
@@ -12577,7 +12586,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!canUserSeeAutoChat(userId)) {
     await ctx.editMessageText(
-      "🚫 <b>Auto Chat Access Nahi Hai</b>\n\nYe feature abhi aapke liye available nahi hai.\nAdmin se contact karo.",
+      "🚫 <b>Auto Chat Access Denied</b>\n\nThis feature is not available for your account.\nContact the admin.",
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
     );
     return;
@@ -12585,7 +12594,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
 
   if (!isConnected(String(userId))) {
     await ctx.editMessageText(
-      "🤖 <b>Auto Chat</b>\n\nPrimary WhatsApp connected nahi hai.\n\nPehle apna 1st WhatsApp connect karo.",
+      "🤖 <b>Auto Chat</b>\n\nPrimary WhatsApp is not connected.\n\nConnect your 1st WhatsApp first.",
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
@@ -12642,7 +12651,7 @@ bot.callbackQuery("auto_chat_menu", async (ctx) => {
   } else {
     statusText += "\n⚠️ No auto WA connected yet.";
   }
-  statusText += "\n\nKya karna chahte ho?";
+  statusText += "\n\nWhat would you like to do?";
 
   const kb = new InlineKeyboard();
   // Show connect buttons for unconnected slots (up to user's limit)
@@ -12680,8 +12689,8 @@ bot.callbackQuery(/^connect_auto_wa_s:(\d+)$/, async (ctx) => {
   userStates.set(userId, { step: "auto_connect_phone", autoConnectStep: "phone", autoSlot: slot });
   await ctx.editMessageText(
     `🤖 <b>Connect WA ${slot + 1}</b>\n\n` +
-    `Yeh number Auto Chat ke liye extra WA ${slot} hoga.\n\n` +
-    "📱 Apna phone number bhejo (country code ke saath):\n" +
+    `This number will be used as extra WA ${slot} for Auto Chat.\n\n` +
+    "📱 Send your phone number (with country code):\n" +
     "Example: <code>919876543210</code>",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "auto_chat_menu") }
   );
@@ -13319,7 +13328,7 @@ bot.callbackQuery("acf_start", async (ctx) => {
   if (totalConnectedCount < 2) {
     if (connectedSlots.length === 0) {
       await ctx.editMessageText(
-        "❌ Auto Chat WA connected nahi hai.\n\nPehle extra WhatsApp connect karo Auto Chat menu se.",
+        "❌ Auto Chat WhatsApp is not connected.\n\nConnect an extra WhatsApp from the Auto Chat menu first.",
         {
           reply_markup: new InlineKeyboard()
             .text("🔙 Back", "auto_chat_menu")
@@ -13328,10 +13337,10 @@ bot.callbackQuery("acf_start", async (ctx) => {
       );
     } else {
       await ctx.editMessageText(
-        "❌ Chat Friend ke liye kam se kam 2 WhatsApp connected hone chahiye.\n\n" +
+        "❌ Chat Friend requires at least 2 WhatsApp accounts connected.\n\n" +
         (primaryConnected
-          ? "Primary WhatsApp connected hai — ek aur Auto WA bhi connect karo."
-          : "Primary WhatsApp connected nahi hai aur sirf 1 Auto WA connected hai.\n\nDono WA connect karo ya 2 Auto WA connect karo."),
+          ? "Primary WhatsApp is connected — connect one more Auto WA."
+          : "Primary WhatsApp is not connected and only 1 Auto WA is connected.\n\nConnect both WA accounts, or connect 2 Auto WA accounts."),
         {
           reply_markup: new InlineKeyboard()
             .text("🔙 Back", "auto_chat_menu")
@@ -13673,8 +13682,8 @@ async function runChatFriendBackground(
         try {
           await bot.api.editMessageText(chatId, msgId,
             "👫 <b>Chat Friend — Waiting for WA...</b>\n\n" +
-            "⚠️ Sirf 1 ya 0 WhatsApp connected hai.\n" +
-            "2+ WA connect karo — chat automatically resume ho jaayega.",
+            "⚠️ Only 1 or 0 WhatsApp connected.\n" +
+            "Connect 2+ WA accounts — chat will resume automatically.",
             { parse_mode: "HTML", reply_markup: acfKb }
           );
         } catch {}
@@ -14082,7 +14091,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
   } catch {}
 
   if (!groups.length) {
-    await ctx.editMessageText("❌ <b>Koi group nahi mila!</b>", {
+    await ctx.editMessageText("❌ <b>No groups found!</b>", {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
     });
@@ -14102,7 +14111,7 @@ bot.callbackQuery("chat_in_group", async (ctx) => {
   });
 
   await ctx.editMessageText(
-    `💬 <b>Chat In Group</b>\n\n📋 ${groups.length} groups mile.\nJin groups me msg bhejnha hai unhe select karo:`,
+    `💬 <b>Chat In Group</b>\n\n📋 ${groups.length} group(s) found.\nSelect the groups you want to send messages to:`,
     { parse_mode: "HTML", reply_markup: buildChatGroupKeyboard(userStates.get(userId)!) }
   );
 });
@@ -14169,8 +14178,8 @@ bot.callbackQuery("cig_proceed", async (ctx) => {
   state.step = "cig_enter_message";
   const count = state.chatInGroupData.selectedIndices.size;
   await ctx.editMessageText(
-    `✅ <b>${count} groups select kiye!</b>\n\n` +
-    "📝 Ab wo message bhejo jo in groups me bhejnha hai:",
+    `✅ <b>${count} group(s) selected!</b>\n\n` +
+    "📝 Send the message you want to send in these groups:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
   );
 });
@@ -14558,7 +14567,7 @@ bot.callbackQuery("es_dp_skip", async (ctx) => {
   state.editSettingsData.settings.removeDp = false;
   state.step = "edit_settings_desc";
   await ctx.editMessageText(
-    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    "📄 <b>Group Description</b>\n\nSend a description to apply to all selected groups, or tap Skip.",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -14577,7 +14586,7 @@ bot.callbackQuery("es_dp_remove", async (ctx) => {
   state.editSettingsData.settings.removeDp = true;
   state.step = "edit_settings_desc";
   await ctx.editMessageText(
-    "📄 <b>Group Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+    "📄 <b>Group Description</b>\n\nSend a description to apply to all selected groups, or tap Skip.",
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
@@ -17081,7 +17090,7 @@ bot.on("message:text", async (ctx, next) => {
     if (count === 1) {
       state.groupSettings.finalNames = [state.groupSettings.name];
       state.step = "group_enter_description";
-      await ctx.reply("📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
+      await ctx.reply("📄 <b>Group Description</b>\n\nSend a description, or tap Skip:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_desc_skip").text("❌ Cancel", "main_menu") });
     } else {
       state.step = "group_naming_mode";
       await ctx.reply(
@@ -17102,8 +17111,8 @@ bot.on("message:text", async (ctx, next) => {
     state.step = "group_enter_description";
     const preview = names.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
     await ctx.reply(
-      `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+      `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend a description, or tap Skip:`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_desc_skip").text("❌ Cancel", "main_menu") }
     );
     return;
   }
@@ -17837,7 +17846,7 @@ bot.on("message:photo", async (ctx) => {
         s.editSettingsData.settings.removeDp = false;
         s.step = "edit_settings_desc";
         await retryTgApi(() => tgApi.sendMessage(chatId,
-          "✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nSare selected groups mein description lagani hai?\nDescription bhejo ya skip karo.",
+          "✅ <b>DP saved!</b>\n\n📄 <b>Description</b>\n\nSend a description to apply to all selected groups, or tap Skip.",
           {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard()
