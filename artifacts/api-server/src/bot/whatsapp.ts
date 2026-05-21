@@ -1063,11 +1063,15 @@ export async function restoreWhatsAppSessions(): Promise<void> {
   // the rest will be lazy-restored on demand when the user interacts with
   // the bot (see ensureSessionLoaded). All session creds stay in MongoDB —
   // lazy restore reuses them, no re-pairing needed.
-  const restoreLimit = Math.min(storedSessions.length, MAX_LIVE_SESSIONS);
-  if (storedSessions.length > restoreLimit) {
+  // Default to 0: lazy-restore all sessions on demand (saves ~6 MB per
+  // stored session at startup). Set WA_STARTUP_RESTORE=N to proactively
+  // warm N sessions if you want faster first-interaction response time.
+  const STARTUP_RESTORE_LIMIT = Number(process.env["WA_STARTUP_RESTORE"] || 0);
+  const restoreLimit = Math.min(storedSessions.length, STARTUP_RESTORE_LIMIT);
+  if (storedSessions.length > 0) {
     console.log(
-      `[WA][RESTORE] Restoring first ${restoreLimit} of ${storedSessions.length} sessions on startup; ` +
-      `rest will lazy-restore on demand to keep memory under ${MEMORY_PRESSURE_RSS_MB}MB.`
+      `[WA][RESTORE] ${storedSessions.length} saved session(s); restoring ${restoreLimit} on startup ` +
+      `(rest lazy-restore on demand, WA_STARTUP_RESTORE=${STARTUP_RESTORE_LIMIT}).`
     );
   }
 
