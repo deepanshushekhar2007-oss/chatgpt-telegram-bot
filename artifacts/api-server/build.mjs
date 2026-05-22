@@ -103,6 +103,7 @@ async function buildAll() {
       "jimp",
       "link-preview-js",
       "qrcode-terminal",
+      "grammy",
     ],
     sourcemap: "linked",
     plugins: [
