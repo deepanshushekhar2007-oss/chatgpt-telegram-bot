@@ -53,7 +53,7 @@ async function buildAll() {
       "handlebars",
       "knex",
       "typeorm",
-      "protobufjs",
+
       "onnxruntime-node",
       "@tensorflow/*",
       "@prisma/client",
@@ -100,10 +100,6 @@ async function buildAll() {
       "puppeteer",
       "puppeteer-core",
       "electron",
-      "jimp",
-      "link-preview-js",
-      "qrcode-terminal",
-      "grammy",
     ],
     sourcemap: "linked",
     plugins: [
