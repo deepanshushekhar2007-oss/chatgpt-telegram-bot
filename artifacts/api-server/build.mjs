@@ -57,6 +57,8 @@ async function buildAll() {
       "link-preview-js",
       "qrcode-terminal",
       "grammy",
+      "@whiskeysockets/baileys",
+      "protobufjs",
 
       "onnxruntime-node",
       "@tensorflow/*",
