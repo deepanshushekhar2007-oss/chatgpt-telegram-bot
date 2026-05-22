@@ -53,6 +53,9 @@ async function buildAll() {
       "handlebars",
       "knex",
       "typeorm",
+      "jimp",
+      "link-preview-js",
+      "qrcode-terminal",
 
       "onnxruntime-node",
       "@tensorflow/*",
