@@ -227,6 +227,7 @@ function evictSessionSocket(userId: string, session: WhatsAppSession): void {
   // full lazy restore (which loads creds from MongoDB and reopens the socket).
   sessions.delete(userId);
   clearGroupCaches(userId);
+  disconnectNotifiedUsers.delete(userId); // clear on eviction so Set doesn't grow unbounded
   console.log(`[WA][EVICT][${userId}] Idle socket closed to free memory (cleared ${cleared} timers)`);
   // Best-effort: ask V8 to reclaim now so RSS actually drops on disconnect.
   void forceMemoryReclaim();
@@ -1027,6 +1028,28 @@ export function notifyDisconnect(userId: string, reason: string): void {
 export function clearDisconnectNotified(userId: string): void {
   disconnectNotifiedUsers.delete(userId);
 }
+// ── Periodic stale-cache sweep ──────────────────────────────────────────────
+// groupFetchCache/groupMetaCache are cleared on session eviction, but entries
+// can accumulate during a session. disconnectNotifiedUsers grows with every
+// disconnect and is only cleared per-user on reconnect — cap it so it can't
+// grow unbounded across a long uptime with many users.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of groupFetchCache) {
+    if (now - entry.fetchedAt > GROUP_FETCH_TTL * 3) groupFetchCache.delete(key);
+  }
+  for (const [key, entry] of groupMetaCache) {
+    if (now - entry.fetchedAt > GROUP_META_TTL * 3) groupMetaCache.delete(key);
+  }
+  if (disconnectNotifiedUsers.size > 300) {
+    console.log(`[WA][SWEEP] disconnectNotifiedUsers cap hit (${disconnectNotifiedUsers.size}), clearing`);
+    disconnectNotifiedUsers.clear();
+  }
+  if (suppressedDisconnectNotifications.size > 300) {
+    suppressedDisconnectNotifications.clear();
+  }
+}, 10 * 60 * 1000);
+
 
 // Periodic sweep — remove entries for users whose session no longer exists.
 // clearDisconnectNotified() handles the reconnect path, but users who never
@@ -2703,3 +2726,4 @@ export async function sendContactCard(
     return false;
   }
 }
+
