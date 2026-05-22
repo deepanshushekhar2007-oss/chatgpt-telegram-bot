@@ -1704,24 +1704,23 @@ async function ensureWhatsAppRestored(userId: number): Promise<void> {
     } catch {}
   }
 
-  // ── Bug fix: Restore autochat WA session too ──────────────────────────────
-  // If the user had an autochat (secondary) WA connected and it was evicted by
-  // the idle timer, restore it alongside the primary session. Without this fix,
-  // only the primary WA reconnects silently — the auto WA stays dead until the
-  // user manually navigates to Auto Chat and reconnects it.
-  const autoUid = `${uid}_auto`;
-  if (!isAutoConnected(uid)) {
+  // ── Restore ALL auto-chat WA sessions (multi-slot) ───────────────────────
+  // Loop through every possible auto slot (userId_auto, userId_auto_2, …) so
+  // ALL of the user's autochat WhatsApps are lazily restored on interaction,
+  // not just slot 1. Stops as soon as it finds a slot with no stored session.
+  for (let slot = 1; slot <= 10; slot++) {
+    const autoUid = getAutoSlotUserId(uid, slot);
+    if (isConnected(autoUid)) continue; // already live, skip
     try {
       let autoStored = hasSessionCache.get(autoUid);
       if (autoStored === undefined) {
         autoStored = await hasStoredWhatsAppSession(autoUid);
         hasSessionCache.set(autoUid, autoStored);
       }
-      if (autoStored) {
-        ensureSessionLoaded(autoUid).catch((err) => {
-          console.error(`[BOT] silent auto-WA restore failed for ${userId}:`, err?.message);
-        });
-      }
+      if (!autoStored) break; // no session stored for this slot, stop checking higher slots
+      ensureSessionLoaded(autoUid).catch((err) => {
+        console.error(`[BOT] silent auto-WA restore failed for ${userId} slot=${slot}:`, err?.message);
+      });
     } catch {}
   }
 }
@@ -5419,7 +5418,7 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   const preview = state.groupSettings.finalNames.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   await ctx.editMessageText(
     `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
-    "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
+    "📄 <b>Group Description</b>\n\nSend a description, or press the <b>⏭️ Skip</b> button to leave it blank:",
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").row().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
   );
 });
@@ -5572,20 +5571,22 @@ bot.callbackQuery("group_cancel_creation", async (ctx) => {
 });
 
 bot.callbackQuery("group_cancel_confirm", async (ctx) => {
-  ctx.answerCallbackQuery({ text: "🛑 Creation cancelled!" });
+  ctx.answerCallbackQuery({ text: "🛑 Stopping creation..." });
   const userId = ctx.from.id;
   const state = userStates.get(userId);
   if (state) {
     state.groupCreationCancel = true;
-    // Keep the pending flag set as well — we don't want the background
-    // loop to overwrite the "cancelled" message with a stale progress
-    // update from a group that was already mid-creation when the user
-    // confirmed. The background loop checks both flags before editing.
     state.groupCreationCancelPending = true;
   }
+  // Delete the MongoDB pending state NOW so that if the user navigates back
+  // and taps "Create Now" again it shows Session Expired — not a re-run.
+  void deletePendingGroupCreation(userId).catch(() => {});
+  // Show a brief stopping message — the background loop will overwrite this
+  // with the full results (including links of created groups) once it detects
+  // the cancel flag and finishes the current in-flight operation.
   await ctx.editMessageText(
-    "🛑 <b>Group creation cancelled.</b>\n\nGroups already created will remain.",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu") }
+    "⌛ <b>Stopping group creation...</b>\n\nPlease wait — links of already-created groups will appear here shortly.",
+    { parse_mode: "HTML" }
   );
 });
 
@@ -5625,6 +5626,24 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       // Pass friendNumbers at creation time — bypasses WhatsApp privacy restrictions on non-contacts
       const result = await createWhatsAppGroup(userId, groupName, gs.friendNumbers);
       if (result) {
+        // Check cancel immediately after group creation — if user cancelled
+        // during the createWhatsAppGroup call, skip settings/DP/friends for
+        // this group so the cancel takes effect as fast as possible.
+        const cancelNow = userStates.get(numericUserId)?.groupCreationCancel;
+        results.push({
+          name: groupName,
+          link: result.inviteCode,
+          friendsAdded: undefined,
+          friendsFailed: false,
+        });
+        if (cancelNow) {
+          for (let j = i + 1; j < total; j++) {
+            results.push({ name: gs.finalNames[j], link: null, error: "Cancelled by user" });
+          }
+          // Re-set i to total so the outer loop exits
+          i = total - 1;
+          break;
+        }
         await new Promise((r) => setTimeout(r, 1500));
         await applyGroupSettings(userId, result.id, perms, gs.description);
         if (gs.disappearingMessages > 0) {
@@ -5668,13 +5687,13 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           }
         }
 
-        results.push({
-          name: groupName,
-          link: result.inviteCode,
-          friendsAdded: gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined,
-          friendsFailed: finalFriendsFailed,
-          friendAdmin: gs.makeFriendAdmin && finalFriendsAdded > 0,
-        });
+        // Update the result entry with final friends data
+        const existingIdx = results.findIndex(r => r.name === groupName && r.link === result.inviteCode);
+        if (existingIdx >= 0) {
+          results[existingIdx].friendsAdded = gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined;
+          results[existingIdx].friendsFailed = finalFriendsFailed;
+          results[existingIdx].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
+        }
       } else {
         results.push({ name: groupName, link: null, error: "Failed to create" });
       }
@@ -17090,7 +17109,7 @@ bot.on("message:text", async (ctx, next) => {
     if (count === 1) {
       state.groupSettings.finalNames = [state.groupSettings.name];
       state.step = "group_enter_description";
-      await ctx.reply("📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").text("❌ Cancel", "main_menu") });
+      await ctx.reply("📄 <b>Group Description</b>\n\nSend a description, or press the <b>⏭️ Skip</b> button to leave it blank:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").text("❌ Cancel", "main_menu") });
     } else {
       state.step = "group_naming_mode";
       await ctx.reply(
@@ -17111,7 +17130,7 @@ bot.on("message:text", async (ctx, next) => {
     state.step = "group_enter_description";
     const preview = names.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
     await ctx.reply(
-      `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:`,
+      `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend a description, or press the <b>⏭️ Skip</b> button to leave it blank:`,
       { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").text("❌ Cancel", "main_menu") }
     );
     return;
