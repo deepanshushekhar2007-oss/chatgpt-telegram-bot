@@ -2252,6 +2252,26 @@ setInterval(() => {
   for (const [, st] of userStates) {
     if (st.ctcgData) st.ctcgData = undefined;
   }
+  // Sweep background-tracking sets — ghost entries accumulate when users
+  // abandon long-running flows (abrupt disconnect, phone switch, etc.).
+  // Safe: if the flow is still active the user IS in activeUserIds/userStates.
+  for (const uid of cancelDialogActiveFor) {
+    if (!activeUserIds.has(uid) && !userStates.has(uid)) cancelDialogActiveFor.delete(uid);
+  }
+  for (const uid of activeBackgroundUsers) {
+    if (!activeUserIds.has(uid) && !userStates.has(uid)) activeBackgroundUsers.delete(uid);
+  }
+  for (const uid of resetLinkActiveSessions) {
+    if (!activeUserIds.has(uid) && !userStates.has(uid)) resetLinkActiveSessions.delete(uid);
+  }
+  // These 4 cancel sets were being cleared only by runMemoryPurge (manual
+  // /cleanram), not by the routine 15-min sweep. Add them here so they drain
+  // automatically without waiting for a manual purge.
+  approvalCancelRequests.clear();
+  makeAdminCancelRequests.clear();
+  resetLinkCancelRequests.clear();
+  demoteAdminCancelRequests.clear();
+
   // Double-pass GC with a small wait between passes. A single gc() leaves
   // partially-promoted objects in the old generation; doing a second pass
   // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
@@ -4728,6 +4748,12 @@ function clearUserMemoryState(telegramUserId: number): void {
   // 7. New-session flag
   newSessionFlag.delete(telegramUserId);
 
+  // 10. Background tracking sets — only cleared by flow-completion handlers;
+  //     also delete here so abrupt disconnects don't leave ghost entries.
+  cancelDialogActiveFor.delete(telegramUserId);
+  activeBackgroundUsers.delete(telegramUserId);
+  resetLinkActiveSessions.delete(telegramUserId);
+
   // 8. Link-collect message ID maps (one entry per user per active flow —
   //    cleared on flow completion but missed on abrupt disconnect)
   rlLinkCollectMsgId.delete(telegramUserId);
@@ -4839,7 +4865,18 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
   for (const uid of lvLinkCollectMsgId.keys())  { if (!userStates.has(uid)) lvLinkCollectMsgId.delete(uid);  }
   for (const uid of ctcLinkCollectMsgId.keys()) { if (!userStates.has(uid)) ctcLinkCollectMsgId.delete(uid); }
 
-  // 10. Idle WhatsApp sockets (does not kick recently-active users)
+  // 10b. Background-tracking set ghost entries (same sets as periodic cleanup)
+  for (const uid of cancelDialogActiveFor) {
+    if (!userStates.has(uid)) cancelDialogActiveFor.delete(uid);
+  }
+  for (const uid of activeBackgroundUsers) {
+    if (!userStates.has(uid)) activeBackgroundUsers.delete(uid);
+  }
+  for (const uid of resetLinkActiveSessions) {
+    if (!userStates.has(uid)) resetLinkActiveSessions.delete(uid);
+  }
+
+  // 11. Idle WhatsApp sockets (does not kick recently-active users)
   let waEvicted = 0;
   let waTotal = 0;
   try {
@@ -19810,3 +19847,4 @@ bot.on("message:text", async (ctx, next) => {
 });
 
 export { bot };
+
