@@ -56,6 +56,7 @@ async function buildAll() {
       "jimp",
       "link-preview-js",
       "qrcode-terminal",
+      "grammy",
 
       "onnxruntime-node",
       "@tensorflow/*",
