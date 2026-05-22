@@ -2164,9 +2164,9 @@ interface QrPairingState {
 
 const qrPairings: Map<number, QrPairingState> = new Map();
 
-// Cleanup interval (15 min) — keeps RAM footprint tight on low-memory hosts
+// Cleanup interval (5 min) — keeps RAM footprint tight on low-memory hosts
 // (Render free 512MB) when 500-1000 concurrent users are connected.
-const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(15 * 60 * 1000));
+const MEMORY_CLEANUP_INTERVAL_MS = Number(process.env.MEMORY_CLEANUP_INTERVAL_MS || String(5 * 60 * 1000));
 
 // Snapshot of RSS at module load — used by /memory to show "growth since
 // startup" so admin can see at a glance whether RAM is creeping up over
@@ -4550,10 +4550,10 @@ bot.command("memory", async (ctx) => {
   const externalMB = mem.external / 1024 / 1024;
   const arrayBuffersMB = mem.arrayBuffers / 1024 / 1024;
 
-  // Compare heapUsed against the actual --max-old-space-size limit (380MB
+  // Compare heapUsed against the actual --max-old-space-size limit (256MB
   // in package.json), NOT against heapTotal — heapTotal is just whatever
   // Node has lazily allocated so far, which makes the % reading useless.
-  const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "380");
+  const HEAP_LIMIT_MB = Number(process.env.NODE_HEAP_LIMIT_MB || "256");
   const heapPct = Math.min(100, Math.round((heapUsedMB / HEAP_LIMIT_MB) * 100));
   const RENDER_LIMIT_MB = Number(process.env.RENDER_RAM_LIMIT_MB || "512");
   const rssPct = Math.min(100, Math.round((rssMB / RENDER_LIMIT_MB) * 100));
