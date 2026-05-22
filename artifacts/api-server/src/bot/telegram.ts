@@ -5343,6 +5343,18 @@ bot.callbackQuery("group_skip_friends", async (ctx) => {
   await showGroupSummary(ctx);
 });
 
+bot.callbackQuery("group_skip_description", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const state = await recoverGroupCreationState(ctx.from.id, "group_enter_description");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
+  state.groupSettings.description = "";
+  state.step = "group_settings";
+  try {
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+  } catch {}
+  await ctx.reply(settingsText(state.groupSettings), { parse_mode: "HTML", reply_markup: settingsKeyboard(state.groupSettings) });
+});
+
 bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
   ctx.answerCallbackQuery();
   const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
@@ -5371,7 +5383,7 @@ bot.callbackQuery("naming_auto", async (ctx) => {
   await ctx.editMessageText(
     `✅ <b>Names Preview:</b>\n${preview}${state.groupSettings.count > 5 ? `\n... +${state.groupSettings.count - 5} more` : ""}\n\n` +
     "📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:",
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").row().text("◀️ Back", "back_to_naming_mode").text("❌ Cancel", "main_menu") }
   );
 });
 
@@ -17041,7 +17053,7 @@ bot.on("message:text", async (ctx, next) => {
     if (count === 1) {
       state.groupSettings.finalNames = [state.groupSettings.name];
       state.step = "group_enter_description";
-      await ctx.reply("📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") });
+      await ctx.reply("📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").text("❌ Cancel", "main_menu") });
     } else {
       state.step = "group_naming_mode";
       await ctx.reply(
@@ -17063,7 +17075,7 @@ bot.on("message:text", async (ctx, next) => {
     const preview = names.slice(0, 5).map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
     await ctx.reply(
       `✅ <b>Names saved:</b>\n${preview}${names.length > 5 ? `\n... +${names.length - 5} more` : ""}\n\n📄 <b>Group Description</b>\n\nSend description or type <code>skip</code>:`,
-      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "main_menu") }
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⏭️ Skip", "group_skip_description").text("❌ Cancel", "main_menu") }
     );
     return;
   }
@@ -18826,15 +18838,17 @@ async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
     if (!allSessions.length) return;
-    // Reconnect ALL stored WhatsApp sessions — both primary (telegram IDs)
-    // and all auto slots (_auto, _auto_2, _auto_3, …) — so every user's WA
-    // is live before autochat/other features try to use them.
-    console.log(`[AUTO_WA] Reconnecting ${allSessions.length} WhatsApp session(s) on startup...`);
-    for (const s of allSessions) {
+    // Sirf _auto sessions (AutoChat ke liye) restore karo startup pe.
+    // Primary sessions lazy hain — user /start karne pe connect honge.
+    // Pehle ALL sessions restore hoti thi, jisse startup pe memory spike
+    // aata tha aur 30 min idle ke baad sab ek-ek disconnect ho jaati thi.
+    const autoSessions = allSessions.filter(s => s.userId.includes("_auto"));
+    if (!autoSessions.length) return;
+    console.log(`[AUTO_WA] Reconnecting ${autoSessions.length} auto-WA session(s) on startup (primary sessions are lazy)...`);
+    for (const s of autoSessions) {
       try {
         await ensureSessionLoaded(s.userId);
-        const kind = s.userId.includes("_auto") ? "auto" : "primary";
-        console.log(`[AUTO_WA] Loaded ${kind} session: ${s.userId} (${s.phoneNumber})`);
+        console.log(`[AUTO_WA] Loaded auto session: ${s.userId} (${s.phoneNumber})`);
       } catch (err: any) {
         console.error(`[AUTO_WA] Failed to load session ${s.userId}:`, err?.message);
       }

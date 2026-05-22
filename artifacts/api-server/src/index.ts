@@ -158,7 +158,18 @@ async function main() {
           `ext=${fmtMb(after.external)} freed=${fmtMb(Math.max(0, before.heapUsed - after.heapUsed))}`
         );
       }
-    }, 5 * 60 * 1000);
+    }, 2 * 60 * 1000);
+
+    // Har 30 minute mein translation cache clear karo — ye cache
+    // uptime ke saath badhta rehta hai aur no-WhatsApp scenario mein
+    // bhi RSS ko 40-50% tak push kar deta hai.
+    const { clearTranslationCaches } = await import("./bot/telegram").catch(() => ({clearTranslationCaches: null})) as any;
+    setInterval(() => {
+      try {
+        const cleared = typeof clearTranslationCaches === "function" ? clearTranslationCaches() : 0;
+        if (cleared > 0) console.log(`[MEM] Periodic i18n cache clear: ${cleared} entries freed`);
+      } catch {}
+    }, 30 * 60 * 1000);
 
     // ─── Memory watchdog ────────────────────────────────────────────────────
     // Render free tier is hard-capped at 512 MB RSS. Once we cross that the
