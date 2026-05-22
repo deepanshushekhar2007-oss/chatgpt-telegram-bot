@@ -77,7 +77,7 @@ async function getGroupMetaCached(userId: string, groupId: string, socket: Retur
   return meta;
 }
 
-export function clearGroupCaches(userId: string): void {
+function clearGroupCaches(userId: string): void {
   groupFetchCache.delete(userId);
   for (const key of groupMetaCache.keys()) {
     if (key.startsWith(`${userId}:`)) groupMetaCache.delete(key);
@@ -1063,15 +1063,11 @@ export async function restoreWhatsAppSessions(): Promise<void> {
   // the rest will be lazy-restored on demand when the user interacts with
   // the bot (see ensureSessionLoaded). All session creds stay in MongoDB —
   // lazy restore reuses them, no re-pairing needed.
-  // Default to 0: lazy-restore all sessions on demand (saves ~6 MB per
-  // stored session at startup). Set WA_STARTUP_RESTORE=N to proactively
-  // warm N sessions if you want faster first-interaction response time.
-  const STARTUP_RESTORE_LIMIT = Number(process.env["WA_STARTUP_RESTORE"] || 0);
-  const restoreLimit = Math.min(storedSessions.length, STARTUP_RESTORE_LIMIT);
-  if (storedSessions.length > 0) {
+  const restoreLimit = Math.min(storedSessions.length, MAX_LIVE_SESSIONS);
+  if (storedSessions.length > restoreLimit) {
     console.log(
-      `[WA][RESTORE] ${storedSessions.length} saved session(s); restoring ${restoreLimit} on startup ` +
-      `(rest lazy-restore on demand, WA_STARTUP_RESTORE=${STARTUP_RESTORE_LIMIT}).`
+      `[WA][RESTORE] Restoring first ${restoreLimit} of ${storedSessions.length} sessions on startup; ` +
+      `rest will lazy-restore on demand to keep memory under ${MEMORY_PRESSURE_RSS_MB}MB.`
     );
   }
 
@@ -1240,8 +1236,7 @@ export interface GroupResult {
 export async function createWhatsAppGroup(
   userId: string,
   groupName: string,
-  participants: string[] = [],
-  isCancelled?: () => boolean
+  participants: string[] = []
 ): Promise<GroupResult | null> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return null;
@@ -1266,16 +1261,14 @@ export async function createWhatsAppGroup(
       if (Array.isArray(checkResults)) {
         const verifiedJids = checkResults
           .filter((r: any) => r && r.exists && r.jid)
-          .map((r: any) => String(r.jid).replace(/:\d+@/, "@"));
+          .map((r: any) => String(r.jid));
         if (verifiedJids.length > 0) {
           validJids = verifiedJids;
+        } else {
+          // None of the supplied numbers exist on WhatsApp — create empty.
+          validJids = [];
         }
-        // If verifiedJids is empty: keep validJids = rawJids.
-        // Do NOT bail to an empty list here — the onWhatsApp check can return
-        // false negatives (rate-limited, format mismatch, privacy settings on
-        // the check itself). Better to try with raw JIDs and let groupCreate
-        // reject them individually than silently skip the add entirely.
-        console.log(`[WA][${userId}] onWhatsApp check: ${verifiedJids.length}/${cleanedNumbers.length} verified (using ${verifiedJids.length > 0 ? "verified" : "raw"} jids)`);
+        console.log(`[WA][${userId}] onWhatsApp check: ${verifiedJids.length}/${cleanedNumbers.length} valid`);
       }
     } catch (err: any) {
       console.error(`[WA][${userId}] onWhatsApp check failed, using raw jids:`, err?.message);
@@ -1283,41 +1276,14 @@ export async function createWhatsAppGroup(
     }
   }
 
-  async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string; addedCount: number } | null> {
+  async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string } | null> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // Check cancel before every attempt so the user isn't kept waiting
-      // through multiple retries after they confirmed cancellation.
-      if (isCancelled?.()) return null;
       try {
         const group = await session.socket!.groupCreate(groupName, participantList);
-        // Count which of the requested participants are actually in the group.
-        // WhatsApp may silently reject some (privacy settings, 403, etc.) even
-        // when groupCreate succeeds. Don't assume all participantList.length
-        // were added — check the actual membership list returned by Baileys.
-        //
-        // IMPORTANT — LID mode: In newer WhatsApp versions, group.participants
-        // returns JIDs in "@lid" format (e.g. "1234567890:0@lid") instead of
-        // "@s.whatsapp.net". The real phone-based JID is in p.phoneNumber / p.pn.
-        // We must index BOTH formats so the comparison hits regardless of which
-        // mode the WhatsApp server is currently using.
-        const memberSet = new Set<string>();
-        for (const p of (group.participants || [])) {
-          const rawId = String(p.id ?? p.jid ?? "").replace(/:\d+@/, "@");
-          if (rawId) memberSet.add(rawId);
-          // LID mode: phone JID in phoneNumber / pn field
-          const phoneJid = String(p.phoneNumber ?? (p as any).pn ?? "").replace(/:\d+@/, "@");
-          if (phoneJid && phoneJid.includes("@")) memberSet.add(phoneJid);
-        }
-        const addedCount = participantList
-          .map(jid => jid.replace(/:\d+@/, "@"))
-          .filter(jid => memberSet.has(jid)).length;
-        return { id: group.id, addedCount };
+        return { id: group.id };
       } catch (err: any) {
         console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
         if (attempt < maxAttempts) {
-          // Check cancel before sleeping so we abort immediately instead of
-          // waiting up to 5 s between retries when the user has cancelled.
-          if (isCancelled?.()) return null;
           await new Promise(r => setTimeout(r, attempt * 2500));
         }
       }
@@ -1333,50 +1299,24 @@ export async function createWhatsAppGroup(
   // usually means a bad participant, retrying with the same list won't help
   // and just burns rate-limit budget).
   if (validJids.length > 0) {
-    if (isCancelled?.()) return null;
     const res = await tryCreate(validJids, 1);
     if (res) {
       groupId = res.id;
-      addedAtCreation = res.addedCount; // actual count confirmed by Baileys
+      addedAtCreation = validJids.length;
     }
   }
 
   // Step 2: If we don't have a group yet (either no valid jids, or creation
   // with participants failed), create an empty group with up to 3 attempts.
   if (!groupId) {
-    if (isCancelled?.()) return null;
     if (validJids.length > 0 || rawJids.length > 0) {
       // Brief cool-off after a failed create attempt to avoid rate-limit.
       await new Promise(r => setTimeout(r, 2500));
     }
-    if (isCancelled?.()) return null;
     const res2 = await tryCreate([], 3);
     if (res2) {
       groupId = res2.id;
-      // Step 2b: Empty group created — now add participants separately.
-      // groupCreate threw (e.g. privacy settings blocked the whole call), so
-      // we fall back to groupParticipantsUpdate which tolerates per-participant
-      // rejections without failing the entire operation.
-      if (validJids.length > 0) {
-        try {
-          await new Promise(r => setTimeout(r, 2500));
-          if (!isCancelled?.() && session.socket && session.connected) {
-            const addResult = await session.socket.groupParticipantsUpdate(groupId, validJids, "add");
-            const added = Array.isArray(addResult)
-              ? addResult.filter((r: any) => String(r?.status) === "200" || r?.status === "success").length
-              : 0;
-            addedAtCreation = added;
-            participantsFailed = added < validJids.length;
-          } else {
-            participantsFailed = true;
-          }
-        } catch (err: any) {
-          console.error(`[WA][${userId}] post-create addParticipants error:`, err?.message);
-          participantsFailed = true;
-        }
-      } else if (rawJids.length > 0) {
-        participantsFailed = true;
-      }
+      if (rawJids.length > 0) participantsFailed = true;
     }
   }
 
@@ -1576,7 +1516,7 @@ export async function joinGroupWithLink(
   userId: string,
   link: string,
   signal?: AbortSignal
-): Promise<{ success: boolean; groupName?: string; error?: string; joinRequestSent?: boolean }> {
+): Promise<{ success: boolean; groupName?: string; error?: string }> {
   const session = useSession(userId);
   if (!session?.socket || !session.connected) {
     return { success: false, error: "WhatsApp not connected" };
@@ -1591,56 +1531,17 @@ export async function joinGroupWithLink(
     if (signal?.aborted) return { success: false, error: "Cancelled" };
     try {
       const code = extractInviteCode(link);
-
-      // ── Step 1: Fetch invite info BEFORE accepting ──────────────────────
-      // Newer WhatsApp Web protocol requires a groupGetInviteInfo call first
-      // to "preview" the group. Skipping this step causes WhatsApp to classify
-      // the join request as automated bot behavior and return
-      // account_reachout_restricted — even when the account is not banned.
-      // This mirrors what the official WhatsApp Web client does before showing
-      // the group preview screen and the "Join" button.
-      let inviteGroupName = "Group";
-      let inviteJoinApprovalMode: string | undefined;
-      try {
-        const inviteInfo = await Promise.race([
-          (session.socket as any).groupGetInviteInfo(code),
-          new Promise<never>((_, rej) =>
-            setTimeout(() => rej(new Error("timeout")), 10_000)
-          ),
-        ]);
-        if (inviteInfo?.subject) inviteGroupName = inviteInfo.subject;
-        inviteJoinApprovalMode = inviteInfo?.joinApprovalMode;
-      } catch (infoErr: any) {
-        const infoMsg = (infoErr?.message || String(infoErr || "")).toLowerCase();
-        // If the link itself is bad, groupGetInviteInfo fails first — bail early.
-        if (
-          infoMsg.includes("gone") ||
-          infoMsg.includes("not-found") ||
-          infoMsg.includes("invalid invite") ||
-          infoMsg.includes("bad request") ||
-          infoMsg.includes("forbidden") ||
-          infoMsg.includes("revoked")
-        ) {
-          return { success: false, error: "Link invalid or expired" };
-        }
-        // For transient info-fetch errors (network etc.) — proceed to accept anyway.
-        console.warn(`[WA][${userId}] groupGetInviteInfo failed (proceeding): ${infoErr?.message}`);
-      }
-
-      // ── Step 2: Accept the invite ────────────────────────────────────────
       // 15 s hard cap: without this, a stalled WA connection causes
       // groupAcceptInvite to hang indefinitely and accumulate zombie
-      // socket requests that block ALL subsequent joins.
+      // socket requests that block ALL subsequent joins (0% stuck).
       const result = await Promise.race([
         session.socket.groupAcceptInvite(code),
         new Promise<never>((_, rej) =>
           setTimeout(() => rej(new Error("timeout")), 15_000)
         ),
       ]);
-      // Use name from inviteInfo (already resolved above); fall back to
-      // fresh metadata fetch only when inviteInfo didn't return a subject.
-      let groupName = inviteGroupName;
-      if (groupName === "Group" && typeof result === "string" && result) {
+      let groupName = "Group";
+      if (typeof result === "string" && result) {
         try {
           const metadata = await Promise.race([
             getGroupMetaCached(userId, result, session.socket),
@@ -1648,12 +1549,12 @@ export async function joinGroupWithLink(
               setTimeout(() => rej(new Error("timeout")), 10_000)
             ),
           ]);
-          groupName = metadata?.subject || groupName;
+          groupName = metadata?.subject || result;
         } catch {
-          // keep inviteGroupName
+          groupName = result;
         }
       }
-      return { success: true, groupName, joinRequestSent: inviteJoinApprovalMode === "on" };
+      return { success: true, groupName };
     } catch (err: any) {
       const msg = (err?.message || String(err || "")).toLowerCase();
       console.error(`[WA][${userId}] Join group error (attempt ${attempt}/${MAX_RETRIES}):`, err?.message);
@@ -2545,7 +2446,7 @@ export async function addGroupParticipantsBulk(
     const checkResults = await (session.socket as any).onWhatsApp(...cleanedNumbers);
     if (Array.isArray(checkResults)) {
       const validJidSet = new Set(
-        checkResults.filter((r: any) => r && r.exists && r.jid).map((r: any) => String(r.jid).replace(/:\d+@/, "@"))
+        checkResults.filter((r: any) => r && r.exists && r.jid).map((r: any) => String(r.jid))
       );
       const next: typeof toAdd = [];
       for (const item of toAdd) {

@@ -83,6 +83,11 @@ async function main() {
   // Stale sessions startup pe delete karo
   await runSessionCleanup("STARTUP");
 
+  // Bot aur HTTP server pehle start karo — Telegram updates turant accept ho.
+  // WhatsApp sessions background mein restore hongi (har ek 5s stagger se).
+  // Iska matlab user button click karega to bot turant respond karega, beshak
+  // WhatsApp socket abhi restoring ho. Pehle yeh blocking await tha jiski wajah
+  // se 30+ seconds tak bot Telegram updates accept hi nahi karta tha.
   app.listen(port, (err) => {
     if (err) {
       logger.error({ err }, "Error listening on port");
@@ -111,7 +116,10 @@ async function main() {
       runSessionCleanup("DAILY-CLEANUP");
     }, 24 * 60 * 60 * 1000);
 
-    // Har 1 minute mein idle WhatsApp sockets close karo
+    // Har 1 minute mein idle WhatsApp sockets close karo (memory pressure
+    // kam karne ke liye). Ye 30 min se idle sessions ko evict karta hai aur
+    // RSS jab >380MB ho to LRU se aur close karta hai. User wapas aaye to
+    // session lazy-restore ho jayegi.
     setInterval(() => {
       try {
         const { evicted, total } = sweepIdleSessions();
@@ -124,6 +132,12 @@ async function main() {
     }, 60 * 1000);
 
     // Har 5 minute mein GC chalao memory free karne ke liye + heap usage log.
+    // Double-pass: first gc() catches dead old-gen objects, second pass after
+    // a 50ms gap catches anything promoted during the first sweep AND lets
+    // glibc malloc (capped to 2 arenas via MALLOC_ARENA_MAX=2 in the start
+    // script) actually return freed pages to the OS. Without these two pieces
+    // RSS climbs slowly with uptime even when the JS heap is flat — that's
+    // the textbook Linux Node.js "memory creep".
     const fmtMb = (n: number) => `${(n / 1024 / 1024).toFixed(0)}MB`;
     setInterval(() => {
       const before = process.memoryUsage();
@@ -146,7 +160,41 @@ async function main() {
       }
     }, 5 * 60 * 1000);
 
-    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "280");
+    // ─── Memory watchdog ────────────────────────────────────────────────────
+    // Render free tier is hard-capped at 512 MB RSS. Once we cross that the
+    // host kills the process and ALL connected WhatsApp sessions die at once
+    // (visible to users as a sudden mass disconnect). Until now the only
+    // proactive cleanup was the once-every-5-min GC interval and the once-
+    // every-1-min idle sweep — neither flushes the i18n translation cache,
+    // /help pagination, stale userActivity, etc., so a user could watch RSS
+    // climb to 380+ MB and stay there until the admin manually ran /cleanram.
+    //
+    // This watchdog fixes that by running the same routine /cleanram does
+    // (clearTranslationCaches + stale userStates/activity + cancel flags +
+    // newSessionFlag + idle-WA sweep + 3 GC passes), automatically, whenever
+    // RSS crosses MEM_WATCHDOG_HIGH_MB. Cooldown stops it from thrashing if
+    // the cleanup doesn't immediately bring RSS back under the line.
+    //
+    // Knobs (env-tunable so you can adjust without redeploying code):
+    //   MEM_WATCHDOG_HIGH_MB     — RSS in MB at which auto-purge fires
+    //                              (default 360, i.e. ~70% of 512 MB cap).
+    //                              Set lower for an earlier safety net,
+    //                              higher to give Baileys more buffer room.
+    //   MEM_WATCHDOG_COOLDOWN_MS — minimum gap between two purges in ms
+    //                              (default 120000 = 2 min). Prevents the
+    //                              watchdog from firing every 30 s when RSS
+    //                              stays flat above the threshold.
+    //   MEM_WATCHDOG_INTERVAL_MS — how often we sample RSS (default 30000
+    //                              = 30 s). Sampling is dirt cheap (one
+    //                              process.memoryUsage() call), so this
+    //                              can be tightened for faster response
+    //                              without measurable cost.
+    //
+    // SAFE: runMemoryPurge does NOT touch live users — see that function's
+    // header in telegram.ts. The worst case is: an idle WhatsApp socket
+    // gets evicted, and the user lazily-reconnects on next /start with no
+    // re-pairing required (creds are in MongoDB).
+    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "280"); // reduced from 360
     const MEM_WATCHDOG_COOLDOWN_MS = Number(process.env["MEM_WATCHDOG_COOLDOWN_MS"] || String(2 * 60 * 1000));
     const MEM_WATCHDOG_INTERVAL_MS = Number(process.env["MEM_WATCHDOG_INTERVAL_MS"] || String(30 * 1000));
     let lastWatchdogPurgeAt = 0;
@@ -156,6 +204,8 @@ async function main() {
       const now = Date.now();
       if (now - lastWatchdogPurgeAt < MEM_WATCHDOG_COOLDOWN_MS) return;
       lastWatchdogPurgeAt = now;
+      // Fire-and-forget; the purge itself logs a [MEM-PURGE] line with the
+      // before/after numbers so we don't need to await + log here.
       runMemoryPurge(`auto-watchdog rss=${rssMb.toFixed(0)}MB`).catch((err: any) => {
         console.error(`[MEM-WATCHDOG] purge failed:`, err?.message);
       });
@@ -169,6 +219,11 @@ async function main() {
 
   startBot();
 
+  // NOTE: Startup pe koi WhatsApp session restore NAHI karte. Sab lazy hai —
+  // user /start karega tab uska WhatsApp connect hoga (showWhatsAppConnectingProgress
+  // → ensureSessionLoaded). 30 min idle ke baad sweepIdleSessions usse phir
+  // disconnect kar dega memory bachane ke liye. Wapas /start karne pe phir
+  // se connect ho jayega — creds MongoDB me safe hain, re-pairing nahi chahiye.
   console.log(
     `[INIT] Lazy mode active: WhatsApp sessions will connect on user /start ` +
     `and auto-disconnect after ${Math.floor(30)} min idle.`
@@ -186,6 +241,11 @@ process.on("uncaughtException", (err: any) => {
     console.warn("[WA] Caught WhatsApp crypto error (corrupt session), ignoring:", msg);
     return;
   }
+  // Expected race: a stale Baileys socket is closed while still in CONNECTING
+  // state (e.g. a new socket replaced it before the old WS handshook). This
+  // throws synchronously inside ws.close() and escapes try/catch because it
+  // originates inside Baileys' event-buffer flush. It is harmless — the socket
+  // is discarded immediately after — so we suppress it instead of crashing.
   if (msg.includes("WebSocket was closed before the connection was established")) {
     console.warn("[WA] Suppressed stale-socket close race (harmless):", msg);
     return;
