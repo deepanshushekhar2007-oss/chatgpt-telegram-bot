@@ -1386,6 +1386,8 @@ interface AutoChatSession {
   failed: number;
   currentRound: number;
   rotationIndex: number;
+  allUserIds: string[];     // all WA accounts to rotate through
+  sentByAccount: number[];  // per-account sent count
 }
 
 interface CigSession {
@@ -1429,6 +1431,8 @@ interface AcfSession {
   // all-to-all tracking
   currentSenderIdx?: number;
   currentReceiverIdx?: number;
+  // per-account sent count (index = WA slot index)
+  sentByAccount: number[];
 }
 
 const CHAT_FRIEND_PAIRS: [string, string][] = [
@@ -13509,13 +13513,19 @@ function acfProgressText(session: AcfSession): string {
   const senderNum = (session.currentSenderIdx ?? 0) + 1;
   const receiverNum = (session.currentReceiverIdx ?? 1) + 1;
   const directionText = `📨 Now: <b>WA ${senderNum} → WA ${receiverNum}</b>\n`;
+  // Per-account breakdown — same as Chat In Group display
+  const acfAccLines = session.sentByAccount && session.sentByAccount.length > 0
+    ? (session.sentByAccount as number[]).map((count, i) => `📱 WA ${i + 1}: <b>${count} messages</b>`).join("\n") + "\n"
+    : "";
   return (
     "👫 <b>Chat Friend Running...</b>\n\n" +
     waCountText +
     directionText +
     `🔁 Cycle: <b>${session.cycle}</b>\n` +
     `💬 Pair: <b>${session.currentPair}/${session.totalPairs}</b>\n` +
-    `📤 Sent: <b>${session.sent}</b>\n` +
+    `📊 <b>Messages Sent:</b>\n` +
+    acfAccLines +
+    `📤 Total: <b>${session.sent}</b>\n` +
     `❌ Failed: <b>${session.failed}</b>\n` +
     (session.nextDelayMs > 0 ? `⏱️ Next send in: <b>${formatDelay(session.nextDelayMs)}</b>\n` : "") +
     expiryText +
@@ -13562,6 +13572,7 @@ async function runChatFriendBackground(
     nextDelayMs: 0,
     rotationIndex: 0,
     autoChatExpiresAt,
+    sentByAccount: new Array(N).fill(0),  // per-account sent tracking
   };
   acfSessions.set(userId, session);
 
@@ -13762,7 +13773,14 @@ async function runChatFriendBackground(
         try { await ensureSessionLoaded(senderUserId); } catch {}
       }
       const ok = await sendGroupMessage(senderUserId, receiverJid, msg);
-      if (ok) session.sent++; else session.failed++;
+      if (ok) {
+        session.sent++;
+        if (!session.sentByAccount) session.sentByAccount = [];
+        while (session.sentByAccount.length <= senderIdx) session.sentByAccount.push(0);
+        session.sentByAccount[senderIdx]++;
+      } else {
+        session.failed++;
+      }
 
       // Dynamic delay — faster with more WA accounts
       session.nextDelayMs = getAcfDelayMs(session.rotationIndex, waCount);
@@ -13885,13 +13903,18 @@ function autoChatProgressText(session: AutoChatSession): string {
   const total = session.groups.length;
   const processed = session.sent + session.failed;
   const percent = total > 0 ? Math.floor((processed / total) * 100) : 0;
+  const N = (session.allUserIds || []).length;
+  const accountLines = N > 1 && session.sentByAccount?.length
+    ? (session.sentByAccount as number[]).map((count, i) => `📱 WA ${i + 1}: <b>${count} messages</b>`).join("\n") + "\n"
+    : "";
   return (
     "🤖 <b>Auto Chat Chal Raha Hai...</b>\n\n" +
     `🔁 Round: <b>${session.currentRound}/${session.repeatCount === 0 ? "∞" : session.repeatCount}</b>\n` +
-    `📤 Sent: <b>${session.sent}</b>\n` +
+    (N > 1 ? `📊 <b>Messages Sent:</b>\n${accountLines}` : "") +
+    `📤 Total Sent: <b>${session.sent}</b>\n` +
     `❌ Failed: <b>${session.failed}</b>\n` +
-    `📊 Progress: <b>${percent}%</b>\n\n` +
-    "Roknay ke liye Stop dabao."
+    (N <= 1 ? `📊 Progress: <b>${percent}%</b>\n` : "") +
+    "\nRoknay ke liye Stop dabao."
   );
 }
 
@@ -13927,6 +13950,17 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     : groups;
   const cappedGroups: Array<{ id: string; subject: string }> = slice.map((g) => ({ id: g.id, subject: "" }));
 
+  // Build the full list of WA accounts for this user (primary + all connected auto slots)
+  // so Auto Chat rotates through ALL of them instead of only the auto WA.
+  const _primaryUid = String(userId);
+  const _autoSlots = getAllConnectedAutoSlots(_primaryUid);
+  const _allUserIds: string[] = [
+    ...(isConnected(_primaryUid) ? [_primaryUid] : []),
+    ...(_autoSlots.map((s) => s.userId)),
+  ];
+  // Fallback: if nothing is connected yet (session just started), use autoUserId
+  if (_allUserIds.length === 0) _allUserIds.push(autoUserId);
+
   const session: AutoChatSession = {
     running: true,
     cancelled: false,
@@ -13940,6 +13974,8 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     failed: 0,
     currentRound: 1,
     rotationIndex: 0,
+    allUserIds: _allUserIds,
+    sentByAccount: new Array(_allUserIds.length).fill(0),
   };
   autoChatSessions.set(userId, session);
   activeAutoChatCount++;
@@ -13957,11 +13993,9 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     sentCount: startSent,
   }).catch(() => {});
 
-  // Protect the secondary WhatsApp session from idle / memory-pressure
-  // eviction for the entire duration of this Auto Chat job. Without this,
-  // a memory-pressure LRU pass could close the socket mid-loop and every
-  // subsequent sendGroupMessage call would silently return false.
-  protectSessionFromEviction(autoUserId);
+  // Protect ALL WhatsApp sessions (primary + auto slots) from idle/memory eviction
+  // for the entire duration of this Auto Chat job so no socket gets killed mid-loop.
+  for (const uid of session.allUserIds) protectSessionFromEviction(uid);
 
   // Throttled progress updater — reduces Telegram API calls dramatically when
   // many users are running simultaneously. Always edits on `force=true`
@@ -13994,30 +14028,40 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
 
       for (const group of cappedGroups) {
         if (session.cancelled) break;
-        markSessionActive(autoUserId);
+        // Round-robin: pick which WA account sends this message
+        const stepTotal = session.sent + session.failed;
+        const _accIdx = session.allUserIds.length > 1 ? stepTotal % session.allUserIds.length : 0;
+        const _senderUid = session.allUserIds[_accIdx] || autoUserId;
 
-        // Defensive reconnect: if the secondary WA socket got dropped due
-        // to a server-side reset or transient network blip, lazy-restore
-        // it from MongoDB BEFORE attempting the send. Without this, the
-        // send would fail silently and the loop would burn through its
-        // delay budget without delivering anything.
-        if (!isConnected(autoUserId)) {
+        markSessionActive(_senderUid);
+
+        // Defensive reconnect: if the chosen sender's socket was dropped due
+        // to a server-side reset or transient network blip, lazy-restore it
+        // from MongoDB BEFORE attempting the send.
+        if (!isConnected(_senderUid)) {
           try {
-            await ensureSessionLoaded(autoUserId);
+            await ensureSessionLoaded(_senderUid);
           } catch (err: any) {
-            console.error(`[AUTO_CHAT][${userId}] Lazy restore error:`, err?.message);
+            console.error(`[AUTO_CHAT][${userId}] Lazy restore error (acc ${_accIdx + 1}):`, err?.message);
           }
         }
 
         let ok = false;
         try {
-          ok = await sendGroupMessage(autoUserId, group.id, message);
+          ok = await sendGroupMessage(_senderUid, group.id, message);
         } catch (err: any) {
           // Never let a single send crash the whole loop.
-          console.error(`[AUTO_CHAT][${userId}] sendGroupMessage error:`, err?.message);
+          console.error(`[AUTO_CHAT][${userId}] sendGroupMessage error (acc ${_accIdx + 1}):`, err?.message);
           ok = false;
         }
-        if (ok) session.sent++; else session.failed++;
+        if (ok) {
+          session.sent++;
+          if (!session.sentByAccount) session.sentByAccount = [];
+          while (session.sentByAccount.length <= _accIdx) session.sentByAccount.push(0);
+          session.sentByAccount[_accIdx]++;
+        } else {
+          session.failed++;
+        }
 
         const delayMs = getSequentialDelayMs(session.rotationIndex);
         session.rotationIndex++;
@@ -14044,8 +14088,8 @@ async function runAutoChatBackground(userId: number, autoUserId: string, chatId:
     // Remove persisted session — it has completed or was stopped.
     void deleteAutoChatSession(userId).catch(() => {});
 
-    // Release the secondary WhatsApp session back to normal eviction rules.
-    unprotectSession(autoUserId);
+    // Release ALL protected WhatsApp sessions back to normal eviction rules.
+    for (const uid of session.allUserIds) unprotectSession(uid);
 
     if (!session.cancelled) {
       try {
