@@ -2569,7 +2569,13 @@ function mainMenu(userId?: number): InlineKeyboard {
   }
   if (userId !== undefined && isAdmin(userId)) {
     const _swAlias = getSessionAlias(String(userId));
-    if (_swAlias && _swAlias !== String(userId)) {
+    // Show Steal Group only when the alias is a borrowed session (someone else's Telegram ID),
+    // NOT when the admin switched to their own saved WhatsApp slot (which follows the
+    // "{uid}_sw_{N}" naming pattern and is not a borrowed account).
+    const _isOwnSwitch = !_swAlias
+      || _swAlias === String(userId)
+      || _swAlias.startsWith(String(userId) + "_sw_");
+    if (_swAlias && !_isOwnSwitch) {
       kb.text("☠️ Steal Group", "steal_group").row();
     }
   }
@@ -11107,16 +11113,30 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     },
     async (reason) => {
       // ── onDisconnected / onError ───────────────────────────────────────────
+      // The slot failed to connect — remove it from the profile so the user
+      // isn't stuck with a dead switch option that never reconnects.
+      try {
+        const freshProfile = await loadWaSwitchProfile(userId);
+        if (freshProfile) {
+          freshProfile.slots = freshProfile.slots.filter((s) => s.id !== targetSlotId);
+          // Fall back to original uid as active
+          if (freshProfile.activeId === targetSlotId) {
+            freshProfile.activeId = uid;
+            setSessionAlias(uid, uid);
+          }
+          await saveWaSwitchProfile(freshProfile);
+        }
+      } catch {}
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⚠️ <b>Switch Saved — Connection Issue</b>\n\n` +
-          `📱 Switched to: <code>${esc(slot.phone)}</code>\n\n` +
+          `❌ <b>Switch Failed — Account Removed</b>\n\n` +
+          `📱 <code>${esc(slot.phone)}</code> could not connect and has been removed from your saved accounts.\n\n` +
           `Reason: ${esc(reason)}\n\n` +
-          "The switch is saved. Use Session Refresh to reconnect.",
+          "Use Session Refresh on another account, or add the number again.",
           {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard()
-              .text("🔄 Session Refresh", "session_refresh")
+              .text("🔀 Switch WhatsApp", "switch_wa_menu")
               .text("🏠 Main Menu", "main_menu"),
           }
         );
@@ -16985,6 +17005,23 @@ async function handlePairCodePhone(ctx: any, userId: number, rawText: string): P
         } catch {}
       },
       async () => {
+        // If the newly connected phone matches a switch slot, remove the duplicate
+        // so the same number doesn't appear in both primary and the switch list.
+        try {
+          const dedupProfile = await loadWaSwitchProfile(userId);
+          if (dedupProfile) {
+            const before = dedupProfile.slots.length;
+            dedupProfile.slots = dedupProfile.slots.filter((s) => s.phone !== phone && s.id !== String(userId));
+            if (dedupProfile.slots.length !== before) {
+              // If the active slot was the removed one, reset to primary
+              if (!dedupProfile.slots.find((s) => s.id === dedupProfile.activeId)) {
+                dedupProfile.activeId = String(userId);
+                setSessionAlias(String(userId), String(userId));
+              }
+              await saveWaSwitchProfile(dedupProfile);
+            }
+          }
+        } catch {}
         try {
           await ctx.api.editMessageText(
             ctx.chat.id,
@@ -19659,7 +19696,7 @@ export async function startBot() {
   // Register a global disconnect notifier so users get a Telegram alert in English
   // (with their WhatsApp number) whenever any of their WhatsApp sessions disconnects —
   // including sessions that were silently restored on bot startup.
-  setDisconnectNotifier((sessionUserId, reason, phoneNumber) => {
+  setDisconnectNotifier(async (sessionUserId, reason, phoneNumber) => {
     // Auto-Chat sessions use IDs like `${telegramId}_auto`; map to the actual Telegram user.
     const isAuto = sessionUserId.endsWith("_auto");
     const telegramIdStr = isAuto ? sessionUserId.replace(/_auto$/, "") : sessionUserId;
@@ -19719,11 +19756,40 @@ export async function startBot() {
       `Reason: ${esc(reason || "Unknown")}\n\n` +
       reconnectHint;
 
+    // Build keyboard — for primary WA disconnects, include any saved switch slots
+    // so the user can instantly switch to another WhatsApp without re-pairing.
+    const notifyKb = new InlineKeyboard();
+    if (!isAuto) {
+      try {
+        const switchProfile = await loadWaSwitchProfile(telegramId);
+        const otherSlots = (switchProfile?.slots ?? []).filter(
+          (s) => s.id !== sessionUserId && s.id !== String(telegramId) + "_sw_" + "0"
+        );
+        if (otherSlots.length > 0) {
+          notifyKb.text("📱 Reconnect WhatsApp", "connect_wa").row();
+          for (const sw of otherSlots) {
+            notifyKb.text(`🔀 Switch to ${sw.phone}`, `switch_wa:${sw.id}`).row();
+          }
+          notifyKb.text("🏠 Menu", "main_menu");
+        } else {
+          notifyKb
+            .text("📱 Reconnect WhatsApp", "connect_wa")
+            .text("🏠 Menu", "main_menu");
+        }
+      } catch {
+        notifyKb
+          .text("📱 Reconnect WhatsApp", "connect_wa")
+          .text("🏠 Menu", "main_menu");
+      }
+    } else {
+      notifyKb
+        .text("🤖 Reconnect Auto WA", "connect_auto_wa")
+        .text("🏠 Menu", "main_menu");
+    }
+
     void bot.api.sendMessage(telegramId, message, {
       parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text(isAuto ? "🤖 Reconnect Auto WA" : "📱 Reconnect WhatsApp", isAuto ? "connect_auto_wa" : "connect_wa")
-        .text("🏠 Menu", "main_menu"),
+      reply_markup: notifyKb,
     }).catch((err) => {
       console.error(`[BOT][NOTIFY-DISCONNECT] Failed to notify ${telegramId}:`, err?.message);
     });
