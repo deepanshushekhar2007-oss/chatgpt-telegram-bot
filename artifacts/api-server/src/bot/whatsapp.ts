@@ -863,7 +863,12 @@ export async function connectWhatsApp(
   onConnected: () => void,
   onDisconnected: (reason: string) => void
 ): Promise<void> {
-  const existing = sessions.get(userId);
+  // Resolve alias so session is stored under the same key that isConnected()
+  // looks up. Without this, if "manage sessions / switch WA" set an alias
+  // (uid → slotId), connectWhatsApp stored under uid but isConnected checked
+  // slotId — causing "WhatsApp: Not Connected" right after connecting.
+  const resolvedId = resolveSessionId(userId);
+  const existing = sessions.get(resolvedId);
 
   if (existing?.connectLock) {
     console.log(`[WA][${userId}] Connection already in progress, ignoring duplicate`);
@@ -877,8 +882,8 @@ export async function connectWhatsApp(
   }
   // Cancel any leftover timers from a previous failed attempt so they don't
   // fire after we've already started a fresh socket below.
-  clearAllSessionTimers(userId);
-  sessions.delete(userId);
+  clearAllSessionTimers(resolvedId);
+  sessions.delete(resolvedId);
 
   const session: WhatsAppSession = {
     socket: null,
@@ -896,12 +901,12 @@ export async function connectWhatsApp(
     connectLock: true,
     lastActivityAt: Date.now(),
   };
-  sessions.set(userId, session);
+  sessions.set(resolvedId, session);
 
   try {
     // Make room before opening a new socket if we're already at the cap.
     if (sessions.size > MAX_LIVE_SESSIONS) sweepIdleSessions();
-    await createSocket(userId, phoneNumber, "code", onCode, () => {}, onConnected, onDisconnected, session);
+    await createSocket(resolvedId, phoneNumber, "code", onCode, () => {}, onConnected, onDisconnected, session);
   } finally {
     session.connectLock = false;
   }
@@ -913,7 +918,10 @@ export async function connectWhatsAppQr(
   onConnected: () => void,
   onDisconnected: (reason: string) => void
 ): Promise<void> {
-  const existing = sessions.get(userId);
+  // Same alias-resolution fix as connectWhatsApp — store under resolvedId so
+  // isConnected() can find the session even when a switch-WA alias is active.
+  const resolvedId = resolveSessionId(userId);
+  const existing = sessions.get(resolvedId);
 
   if (existing?.connectLock) {
     console.log(`[WA][${userId}] QR connection already in progress, ignoring duplicate`);
@@ -926,8 +934,8 @@ export async function connectWhatsAppQr(
   }
   // Cancel any leftover timers from a previous failed attempt so they don't
   // step on the fresh QR socket we're about to create below.
-  clearAllSessionTimers(userId);
-  sessions.delete(userId);
+  clearAllSessionTimers(resolvedId);
+  sessions.delete(resolvedId);
 
   const session: WhatsAppSession = {
     socket: null,
@@ -945,11 +953,11 @@ export async function connectWhatsAppQr(
     connectLock: true,
     lastActivityAt: Date.now(),
   };
-  sessions.set(userId, session);
+  sessions.set(resolvedId, session);
 
   try {
     if (sessions.size > MAX_LIVE_SESSIONS) sweepIdleSessions();
-    await createSocket(userId, "", "qr", () => {}, onQr, onConnected, onDisconnected, session);
+    await createSocket(resolvedId, "", "qr", () => {}, onQr, onConnected, onDisconnected, session);
   } finally {
     session.connectLock = false;
   }
@@ -1154,7 +1162,10 @@ export async function refreshWhatsAppSession(
   onConnected: () => void,
   onError: (reason: string) => void
 ): Promise<void> {
-  const existing = sessions.get(userId);
+  // Resolve alias so we operate on the same session key that isConnected()
+  // checks. Needed when switch-WA aliases redirect uid → slotId.
+  const resolvedId = resolveSessionId(userId);
+  const existing = sessions.get(resolvedId);
   if (!existing) {
     onError("No active session found. Please connect WhatsApp first.");
     return;
@@ -1164,7 +1175,7 @@ export async function refreshWhatsAppSession(
     return;
   }
 
-  const { state } = await useMongoDBAuthState(userId);
+  const { state } = await useMongoDBAuthState(resolvedId);
   if (!state.creds.registered && !state.creds.me?.id) {
     onError("Saved credentials are missing — please use Connect WhatsApp instead.");
     return;
@@ -1178,7 +1189,7 @@ export async function refreshWhatsAppSession(
   }
   // Cancel any pending reconnect/pairing timers from the previous socket so
   // they don't fire and step on the fresh socket we're about to create.
-  clearAllSessionTimers(userId);
+  clearAllSessionTimers(resolvedId);
   existing.connected = false;
   existing.connecting = true;
   existing.connectLock = true;
@@ -1189,7 +1200,7 @@ export async function refreshWhatsAppSession(
 
   try {
     await createSocket(
-      userId,
+      resolvedId,
       phoneNumber,
       "code",
       () => {}, // no pairing code expected for already-registered session
