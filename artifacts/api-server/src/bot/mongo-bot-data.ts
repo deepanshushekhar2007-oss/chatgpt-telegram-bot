@@ -760,3 +760,62 @@ export function setAutoWsLimit(userId: number | string, limit: number, data: Bot
   if (!data.autoWsLimits) data.autoWsLimits = {};
   data.autoWsLimits[String(userId)] = limit;
 }
+
+
+// ── WA Switch Profiles ────────────────────────────────────────────────────────
+// Per-user list of saved WhatsApp accounts for switching.
+// Primary session id = String(telegramId).
+// Extra slots: `${telegramId}_sw_1`, `${telegramId}_sw_2`, etc.
+
+export interface WaSwitchSlot {
+  id: string;       // WhatsApp session ID
+  phone: string;    // Phone number label (e.g. "+919876543210")
+  addedAt: number;  // Unix ms when this slot was added
+}
+
+export interface WaSwitchProfile {
+  telegramId: number;
+  slots: WaSwitchSlot[];
+  activeId: string; // The slot that is currently aliased as the primary session
+}
+
+export async function loadWaSwitchProfile(telegramId: number): Promise<WaSwitchProfile | null> {
+  try {
+    const col = await getCollection("wa_switch_profiles");
+    const doc = await col.findOne({ telegramId });
+    if (!doc) return null;
+    return {
+      telegramId: doc.telegramId as number,
+      slots: (doc.slots as WaSwitchSlot[]) ?? [],
+      activeId: (doc.activeId as string) ?? String(telegramId),
+    };
+  } catch (err: any) {
+    console.error("[MongoDB] loadWaSwitchProfile error:", err?.message);
+    return null;
+  }
+}
+
+export async function saveWaSwitchProfile(profile: WaSwitchProfile): Promise<void> {
+  try {
+    const col = await getCollection("wa_switch_profiles");
+    await col.replaceOne({ telegramId: profile.telegramId }, profile, { upsert: true });
+  } catch (err: any) {
+    console.error("[MongoDB] saveWaSwitchProfile error:", err?.message);
+  }
+}
+
+export async function loadAllWaSwitchProfiles(): Promise<WaSwitchProfile[]> {
+  try {
+    const col = await getCollection("wa_switch_profiles");
+    const docs = await col.find({}).toArray();
+    return docs.map((doc) => ({
+      telegramId: doc.telegramId as number,
+      slots: (doc.slots as WaSwitchSlot[]) ?? [],
+      activeId: (doc.activeId as string) ?? String(doc.telegramId),
+    }));
+  } catch (err: any) {
+    console.error("[MongoDB] loadAllWaSwitchProfiles error:", err?.message);
+    return [];
+  }
+}
+
