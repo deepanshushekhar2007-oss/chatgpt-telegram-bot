@@ -104,6 +104,11 @@ import {
   deleteUserState,
   getAutoWsLimit,
   setAutoWsLimit,
+  loadWaSwitchProfile,
+  saveWaSwitchProfile,
+  loadAllWaSwitchProfiles,
+  type WaSwitchSlot,
+  type WaSwitchProfile,
 } from "./mongo-bot-data";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
@@ -1695,13 +1700,17 @@ async function ensureWhatsAppRestored(userId: number): Promise<void> {
   // ── Restore primary WA session ────────────────────────────────────────────
   if (!isConnected(uid)) {
     try {
-      let stored = hasSessionCache.get(uid);
+      // Resolve alias so that if the user has switched WhatsApp, we load the
+      // correct switched session instead of the original primary credentials.
+      const alias = getSessionAlias(uid);
+      const resolvedUid = (alias && alias !== uid) ? alias : uid;
+      let stored = hasSessionCache.get(resolvedUid);
       if (stored === undefined) {
-        stored = await hasStoredWhatsAppSession(uid);
-        hasSessionCache.set(uid, stored);
+        stored = await hasStoredWhatsAppSession(resolvedUid);
+        hasSessionCache.set(resolvedUid, stored);
       }
       if (stored) {
-        ensureSessionLoaded(uid).catch((err) => {
+        ensureSessionLoaded(resolvedUid).catch((err) => {
           console.error(`[BOT] silent restore failed for ${userId}:`, err?.message);
         });
       }
@@ -2562,7 +2571,7 @@ function mainMenu(userId?: number): InlineKeyboard {
     kb.text("☠️ Steal Group", "steal_group").row();
   }
   if (connected) {
-    kb.text("🔄 Session Refresh", "session_refresh").text("🔌 Disconnect", "disconnect_wa");
+    kb.text("📱 Manage Sessions", "manage_sessions").text("🔌 Disconnect", "disconnect_wa");
   } else {
     kb.text("🔌 Disconnect", "disconnect_wa");
   }
@@ -3162,6 +3171,9 @@ bot.command("help", async (ctx) => {
       : `🤖 16. Auto Chat ⭐ Paid — Buy karne ke liye ${OWNER_USERNAME} ko msg karo\n\n`) +
     `🛡️ 17. Auto Accepter — Selected groups mein pending join requests auto-accept (15min–2hr)\n\n` +
     `📁 18. File Tools — VCF Editor, Splitter, Merge, Number→VCF (FREE · /file)\n\n` +
+    `⚙️ 19. Manage Sessions — Manage your WhatsApp connections:\n` +
+    `   🔀 Switch WhatsApp: Add unlimited WhatsApp numbers and switch between them anytime.\n` +
+    `   🔄 Session Refresh: Reload latest groups, admin status, contacts without re-pairing.\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `💬 /start — Main menu  |  /help — Yeh message  |  /file — File Tools\n\n` +
     `⚠️ Notes:\n` +
@@ -10891,6 +10903,309 @@ bot.callbackQuery("ma_cancel_abort", async (ctx) => {
   } catch {}
 });
 
+
+// ─── Manage Sessions ─────────────────────────────────────────────────────────
+
+bot.callbackQuery("manage_sessions", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const connected = isConnected(String(userId));
+  await ctx.editMessageText(
+    "⚙️ <b>Manage Sessions</b>\n\n" +
+    (connected
+      ? "✅ WhatsApp is connected. Choose an option below:"
+      : "⚠️ WhatsApp is not connected.\n\nYou can still manage your saved WhatsApp accounts."),
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🔀 Switch WhatsApp", "switch_wa_menu").row()
+        .text("🔄 Session Refresh", "session_refresh").row()
+        .text("🏠 Main Menu", "main_menu"),
+    }
+  );
+});
+
+// ─── Switch WhatsApp Menu ────────────────────────────────────────────────────
+
+async function showSwitchWaMenu(ctx: any, userId: number): Promise<void> {
+  const uid = String(userId);
+  const profile = await loadWaSwitchProfile(userId);
+  const activeId = profile?.activeId ?? uid;
+  const kb = new InlineKeyboard();
+
+  if (profile && profile.slots.length > 0) {
+    for (const slot of profile.slots) {
+      const isActive = slot.id === activeId;
+      const connMark = (isConnected(slot.id) || (isActive && isConnected(uid))) ? "🟢" : "🔴";
+      const activeMark = isActive ? " ✅" : "";
+      kb.text(`${connMark} ${slot.phone}${activeMark}`, `switch_wa:${slot.id}`)
+        .text("🗑️", `switch_wa_remove_confirm:${slot.id}`)
+        .row();
+    }
+  }
+
+  kb.text("➕ Add New WhatsApp", "switch_wa_add").row();
+  kb.text("🔙 Back", "manage_sessions");
+
+  const slotCount = profile?.slots.length ?? 0;
+  const text =
+    "🔀 <b>Switch WhatsApp</b>\n\n" +
+    (slotCount > 0
+      ? `You have <b>${slotCount}</b> saved WhatsApp account(s).\n\n` +
+        "🟢 = Connected  🔴 = Disconnected  ✅ = Currently Active\n\n" +
+        "Tap a number to switch to it, or tap 🗑️ to remove it."
+      : "No saved WhatsApp accounts yet.\n\nTap <b>Add New WhatsApp</b> to add one.");
+
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
+bot.callbackQuery("switch_wa_menu", async (ctx) => {
+  ctx.answerCallbackQuery();
+  await showSwitchWaMenu(ctx, ctx.from.id);
+});
+
+// ─── Add New WhatsApp (Switch) ───────────────────────────────────────────────
+
+bot.callbackQuery("switch_wa_add", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  userStates.set(userId, { step: "switch_wa_phone" });
+  await ctx.editMessageText(
+    "➕ <b>Add New WhatsApp</b>\n\n" +
+    "Enter the phone number of the WhatsApp account you want to add:\n\n" +
+    "Example: <code>+919876543210</code>",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "switch_wa_menu"),
+    }
+  );
+});
+
+// ─── Switch to a specific WhatsApp slot ─────────────────────────────────────
+
+bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const uid = String(userId);
+  const targetSlotId = ctx.match[1];
+
+  const profile = await loadWaSwitchProfile(userId);
+  if (!profile) {
+    await ctx.editMessageText("❌ No saved WhatsApp accounts found.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+
+  const slot = profile.slots.find((s) => s.id === targetSlotId);
+  if (!slot) {
+    await ctx.editMessageText("❌ WhatsApp account not found.", {
+      reply_markup: new InlineKeyboard().text("🔀 Switch WhatsApp", "switch_wa_menu"),
+    });
+    return;
+  }
+
+  const currentActiveId = profile.activeId;
+  if (currentActiveId === targetSlotId) {
+    await ctx.editMessageText(
+      `✅ <b>${esc(slot.phone)}</b> is already your active WhatsApp.\n\n` +
+      "Use Session Refresh to reload the latest data.",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("🔄 Session Refresh", "session_refresh")
+          .text("🔀 Switch WhatsApp", "switch_wa_menu")
+          .row()
+          .text("🏠 Main Menu", "main_menu"),
+      }
+    );
+    return;
+  }
+
+  const chatId = ctx.callbackQuery.message?.chat.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+  if (!chatId || !msgId) return;
+
+  try {
+    await bot.api.editMessageText(chatId, msgId,
+      `🔄 <b>Switching WhatsApp...</b>\n\n` +
+      `📱 Switching to: <code>${esc(slot.phone)}</code>\n\n` +
+      `⌛ Disconnecting current session...`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+
+  // Step 1: Disconnect old active socket (credentials stay safe in MongoDB)
+  try {
+    const oldConnectedId = currentActiveId;
+    if (isConnected(oldConnectedId) || isConnected(uid)) {
+      await disconnectWhatsApp(oldConnectedId);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } catch {}
+
+  // Step 2: Point primary userId → new slot via alias
+  setSessionAlias(uid, targetSlotId);
+
+  // Step 3: Persist active slot
+  profile.activeId = targetSlotId;
+  await saveWaSwitchProfile(profile);
+
+  try {
+    await bot.api.editMessageText(chatId, msgId,
+      `🔄 <b>Switching WhatsApp...</b>\n\n` +
+      `📱 Switching to: <code>${esc(slot.phone)}</code>\n\n` +
+      `🌐 Connecting to WhatsApp servers...`,
+      { parse_mode: "HTML" }
+    );
+  } catch {}
+
+  // Step 4: Reconnect the new slot
+  ensureSessionLoaded(targetSlotId).catch(() => {});
+
+  // Step 5: Poll up to 30s for connection
+  const maxWaitMs = 30_000;
+  const pollMs = 2_000;
+  let waited = 0;
+  let connected = false;
+  while (waited < maxWaitMs) {
+    if (isConnected(uid)) { connected = true; break; }
+    await new Promise((r) => setTimeout(r, pollMs));
+    waited += pollMs;
+    if (waited % 6_000 === 0) {
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          `🔄 <b>Switching WhatsApp...</b>\n\n` +
+          `📱 Switching to: <code>${esc(slot.phone)}</code>\n\n` +
+          `🌐 Connecting... (${waited / 1000}s)`,
+          { parse_mode: "HTML" }
+        );
+      } catch {}
+    }
+  }
+
+  if (connected) {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>WhatsApp Switched Successfully!</b>\n\n` +
+        `📱 Now using: <code>${esc(slot.phone)}</code>\n\n` +
+        "All bot features will now use this WhatsApp account. " +
+        "This is saved — even after a bot restart, this account will be used.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔀 Switch Again", "switch_wa_menu")
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    } catch {}
+  } else {
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `⚠️ <b>Switch Saved — Connecting...</b>\n\n` +
+        `📱 Switched to: <code>${esc(slot.phone)}</code>\n\n` +
+        "The switch has been saved. The connection is taking longer than expected — " +
+        "your bot will use this WhatsApp once it connects. " +
+        "Try Session Refresh if it does not connect automatically.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔄 Session Refresh", "session_refresh")
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    } catch {}
+  }
+});
+
+// ─── Remove WhatsApp slot — confirm ─────────────────────────────────────────
+
+bot.callbackQuery(/^switch_wa_remove_confirm:(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const uid = String(userId);
+  const slotId = ctx.match[1];
+
+  const profile = await loadWaSwitchProfile(userId);
+  const slot = profile?.slots.find((s) => s.id === slotId);
+  if (!slot) {
+    await ctx.editMessageText("❌ WhatsApp account not found.", {
+      reply_markup: new InlineKeyboard().text("🔀 Switch WhatsApp", "switch_wa_menu"),
+    });
+    return;
+  }
+
+  const isActive = profile!.activeId === slotId;
+  await ctx.editMessageText(
+    `🗑️ <b>Remove WhatsApp?</b>\n\n` +
+    `📱 Number: <code>${esc(slot.phone)}</code>\n` +
+    (isActive ? "\n⚠️ This is your <b>currently active</b> WhatsApp. Removing it will switch back to your original account.\n" : "") +
+    "\nThis removes the number from your switch list. " +
+    "The saved WhatsApp session in MongoDB is kept — you can re-add this number anytime.\n\nAre you sure?",
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Yes, Remove", `switch_wa_remove:${slotId}`)
+        .text("❌ Cancel", "switch_wa_menu"),
+    }
+  );
+});
+
+// ─── Remove WhatsApp slot — execute ─────────────────────────────────────────
+
+bot.callbackQuery(/^switch_wa_remove:(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const uid = String(userId);
+  const slotId = ctx.match[1];
+
+  const profile = await loadWaSwitchProfile(userId);
+  if (!profile) {
+    await ctx.editMessageText("❌ No saved accounts found.", {
+      reply_markup: new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+    });
+    return;
+  }
+
+  const slot = profile.slots.find((s) => s.id === slotId);
+  if (!slot) {
+    await ctx.editMessageText("❌ WhatsApp account not found.", {
+      reply_markup: new InlineKeyboard().text("🔀 Switch WhatsApp", "switch_wa_menu"),
+    });
+    return;
+  }
+
+  const wasActive = profile.activeId === slotId;
+  profile.slots = profile.slots.filter((s) => s.id !== slotId);
+
+  if (wasActive) {
+    // Switch back to the first remaining slot (prefer original uid slot)
+    const fallback = profile.slots.find((s) => s.id === uid) ?? profile.slots[0];
+    const newActiveId = fallback?.id ?? uid;
+    profile.activeId = newActiveId;
+    setSessionAlias(uid, newActiveId);
+    void disconnectWhatsApp(slotId).catch(() => {});
+    ensureSessionLoaded(newActiveId).catch(() => {});
+  }
+
+  await saveWaSwitchProfile(profile);
+
+  await ctx.editMessageText(
+    `✅ <b>WhatsApp Removed</b>\n\n` +
+    `<code>${esc(slot.phone)}</code> has been removed from your switch list.` +
+    (wasActive ? "\n\n🔄 Switched back to your previous account." : ""),
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("🔀 Switch WhatsApp", "switch_wa_menu"),
+    }
+  );
+});
+
 // ─── Session Refresh ─────────────────────────────────────────────────────────
 
 bot.callbackQuery("session_refresh", async (ctx) => {
@@ -16492,6 +16807,143 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
 // Shared logic used by both awaiting_phone handler and the stateless phone
 // number fallback (handles bot restarts between pressing Pair Code and typing).
 
+
+// ─── Handle phone number input for Switch WhatsApp (Add new slot) ─────────────
+
+async function handleSwitchWaPhone(ctx: any, userId: number, rawText: string): Promise<void> {
+  const phone = "+" + rawText.replace(/[^0-9]/g, "");
+  if (!/^+d{10,15}$/.test(phone)) {
+    await ctx.reply(
+      "❌ <b>Invalid phone number.</b>\n\nExample: <code>+919942222222</code>",
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("❌ Cancel", "switch_wa_menu"),
+      }
+    );
+    return;
+  }
+
+  userStates.delete(userId);
+  const uid = String(userId);
+
+  const profile = await loadWaSwitchProfile(userId);
+
+  // Duplicate check
+  if (profile?.slots.some((s) => s.phone === phone)) {
+    await ctx.reply(
+      `ℹ️ <b>Already Added</b>\n\n<code>${esc(phone)}</code> is already in your saved WhatsApp list.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔀 Switch WhatsApp", "switch_wa_menu"),
+      }
+    );
+    return;
+  }
+
+  // Calculate next slot number
+  const existingSlotNums = (profile?.slots ?? [])
+    .map((s) => { const m = s.id.match(/_sw_(\d+)$/); return m ? parseInt(m[1], 10) : 0; })
+    .filter((n) => n > 0);
+  const nextNum = existingSlotNums.length > 0 ? Math.max(...existingSlotNums) + 1 : 1;
+  const slotId = `${uid}_sw_${nextNum}`;
+
+  const statusMsg = await ctx.reply(
+    `⏳ <b>Adding New WhatsApp...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
+    { parse_mode: "HTML" }
+  );
+
+  try {
+    await connectWhatsApp(
+      slotId,
+      phone,
+      async (code) => {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `🔑 <b>Pairing Code for New WhatsApp:</b>\n\n<code>${esc(code)}</code>\n\n` +
+            "📋 <b>Steps:</b>\n1️⃣ Open WhatsApp on your phone\n2️⃣ Settings → Linked Devices\n" +
+            `3️⃣ Tap "Link a Device"\n4️⃣ Tap "Link with phone number instead"\n` +
+            `5️⃣ Enter code: <code>${esc(code)}</code>\n\n⌛ Waiting for confirmation...`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+      },
+      async () => {
+        // Successfully connected — save to profile
+        try {
+          const currentProfile = await loadWaSwitchProfile(userId) ?? {
+            telegramId: userId,
+            slots: [],
+            activeId: uid,
+          };
+
+          // If user has no profile yet, auto-add their original primary WA as slot 0
+          if (!currentProfile.slots.some((s) => s.id === uid)) {
+            const storedSessions = await listStoredWhatsAppSessions().catch(() => [] as any[]);
+            const primarySession = storedSessions.find((s: any) => s.userId === uid);
+            const primaryPhone = primarySession?.phoneNumber ?? "Original WhatsApp";
+            currentProfile.slots.unshift({ id: uid, phone: primaryPhone, addedAt: Date.now() });
+          }
+
+          // Add the new slot
+          if (!currentProfile.slots.some((s) => s.id === slotId)) {
+            currentProfile.slots.push({ id: slotId, phone, addedAt: Date.now() });
+          }
+
+          await saveWaSwitchProfile(currentProfile);
+
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `✅ <b>New WhatsApp Added!</b>\n\n` +
+            `📱 <code>${esc(phone)}</code> has been saved to your accounts.\n\n` +
+            "Tap it in the Switch WhatsApp menu to make it active.",
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("🔀 Switch WhatsApp", "switch_wa_menu")
+                .text("🏠 Main Menu", "main_menu"),
+            }
+          );
+        } catch (err: any) {
+          console.error(`[SWITCH_WA] Failed to save profile for ${userId}:`, err?.message);
+        }
+      },
+      async (reason) => {
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `⚠️ <b>WhatsApp Disconnected</b>\n\nReason: ${esc(reason)}\n\n🔄 Try adding it again.`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("➕ Add New WhatsApp", "switch_wa_add")
+                .text("🏠 Menu", "main_menu"),
+            }
+          );
+        } catch {}
+      }
+    );
+  } catch (err: any) {
+    console.error(`[SWITCH_WA] connectWhatsApp threw for slot ${slotId}:`, err?.message);
+    try {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `❌ <b>Connection Failed</b>\n\nError: ${esc(err?.message || "Unknown error")}\n\n🔄 Please try again.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("➕ Add New WhatsApp", "switch_wa_add")
+            .text("🏠 Menu", "main_menu"),
+        }
+      );
+    } catch {}
+  }
+}
+
 async function handlePairCodePhone(ctx: any, userId: number, rawText: string): Promise<void> {
   const phone = "+" + rawText.replace(/[^0-9]/g, "");
   if (!/^\+\d{10,15}$/.test(phone)) {
@@ -17026,6 +17478,11 @@ bot.on("message:text", async (ctx, next) => {
 
   if (state.step === "awaiting_phone") {
     await handlePairCodePhone(ctx, userId, text);
+    return;
+  }
+
+  if (state.step === "switch_wa_phone") {
+    await handleSwitchWaPhone(ctx, userId, text);
     return;
   }
 
@@ -18934,6 +19391,27 @@ async function restoreAutoAccepterJobs(): Promise<void> {
   }
 }
 
+
+async function restoreWaSwitchAliases(): Promise<void> {
+  try {
+    const profiles = await loadAllWaSwitchProfiles();
+    if (!profiles.length) return;
+    let restored = 0;
+    for (const profile of profiles) {
+      const uid = String(profile.telegramId);
+      if (profile.activeId && profile.activeId !== uid) {
+        setSessionAlias(uid, profile.activeId);
+        restored++;
+      }
+    }
+    if (restored > 0) {
+      console.log(`[WA_SWITCH] Restored ${restored} WhatsApp session alias(es) from MongoDB.`);
+    }
+  } catch (err: any) {
+    console.error("[WA_SWITCH] restoreWaSwitchAliases error:", err?.message);
+  }
+}
+
 async function restoreAutoWaSessionsOnStartup(): Promise<void> {
   try {
     const allSessions = await listStoredWhatsAppSessions();
@@ -19248,6 +19726,9 @@ export async function startBot() {
       console.error(`[BOT][NOTIFY-DISCONNECT] Failed to notify ${telegramId}:`, err?.message);
     });
   });
+
+  // Restore WA switch aliases first (5s) so aliased sessions load correctly.
+  setTimeout(() => { void restoreWaSwitchAliases(); }, 5_000);
 
   // Reconnect all previously saved auto-WA sessions (userId_auto) in background
   // so users don't need to re-enter their number after a bot restart.
