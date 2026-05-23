@@ -16812,7 +16812,7 @@ async function startAddMembersCustom(ctx: any, userId: number, chatId: number) {
 
 async function handleSwitchWaPhone(ctx: any, userId: number, rawText: string): Promise<void> {
   const phone = "+" + rawText.replace(/[^0-9]/g, "");
-  if (!/^+d{10,15}$/.test(phone)) {
+  if (!/^\+\d{10,15}$/.test(phone)) {
     await ctx.reply(
       "❌ <b>Invalid phone number.</b>\n\nExample: <code>+919942222222</code>",
       {
