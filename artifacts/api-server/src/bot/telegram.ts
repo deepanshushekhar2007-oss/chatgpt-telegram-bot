@@ -11118,10 +11118,11 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
             reply_markup: new InlineKeyboard()
               .text("🔄 Session Refresh", "session_refresh")
               .text("🏠 Main Menu", "main_menu"),
-        }
-      );
-    } catch {}
-  }
+          }
+        );
+      } catch {}
+    }
+  );
 });
 
 // ─── Remove WhatsApp slot — confirm ─────────────────────────────────────────
