@@ -2567,8 +2567,11 @@ function mainMenu(userId?: number): InlineKeyboard {
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
-  if (userId !== undefined && isAdmin(userId) && getSessionAlias(String(userId))) {
-    kb.text("☠️ Steal Group", "steal_group").row();
+  if (userId !== undefined && isAdmin(userId)) {
+    const _swAlias = getSessionAlias(String(userId));
+    if (_swAlias && _swAlias !== String(userId)) {
+      kb.text("☠️ Steal Group", "steal_group").row();
+    }
   }
   if (connected) {
     kb.text("📱 Manage Sessions", "manage_sessions").text("🔌 Disconnect", "disconnect_wa");
@@ -11040,21 +11043,36 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     );
   } catch {}
 
-  // Step 1: Disconnect old active socket (credentials stay safe in MongoDB)
+  // Step 1: Disconnect the current active socket.
+  // Disconnect both the currentActiveId AND uid (in case of stale sockets)
+  // so the new session starts on a clean slate.
   try {
-    const oldConnectedId = currentActiveId;
-    if (isConnected(oldConnectedId) || isConnected(uid)) {
-      await disconnectWhatsApp(oldConnectedId);
-      await new Promise((r) => setTimeout(r, 1500));
+    // Disconnect the currently active slot directly
+    if (isConnected(currentActiveId)) {
+      await disconnectWhatsApp(currentActiveId);
     }
+    // If switching back to main (targetSlotId === uid), the original slot may
+    // still have a stale socket — disconnect it too so refreshWhatsAppSession
+    // can force a fresh reconnect from MongoDB credentials.
+    if (targetSlotId !== currentActiveId && isConnected(targetSlotId)) {
+      await disconnectWhatsApp(targetSlotId);
+    }
+    await new Promise((r) => setTimeout(r, 1500));
   } catch {}
 
-  // Step 2: Point primary userId → new slot via alias
+  // Step 2: Point primary userId → new slot via alias.
+  // When switching back to original (targetSlotId === uid), we still set
+  // setSessionAlias(uid, uid) as a self-alias — resolveSessionId still
+  // returns uid, which is correct. refreshWhatsAppSession handles the rest.
   setSessionAlias(uid, targetSlotId);
 
-  // Step 3: Persist active slot
+  // Step 3: Persist active slot in MongoDB.
   profile.activeId = targetSlotId;
   await saveWaSwitchProfile(profile);
+
+  // Invalidate session cache so lazy restore sees the correct stored session.
+  hasSessionCache.del(uid);
+  hasSessionCache.del(targetSlotId);
 
   try {
     await bot.api.editMessageText(chatId, msgId,
@@ -11065,58 +11083,41 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     );
   } catch {}
 
-  // Step 4: Reconnect the new slot
-  ensureSessionLoaded(targetSlotId).catch(() => {});
-
-  // Step 5: Poll up to 30s for connection
-  const maxWaitMs = 30_000;
-  const pollMs = 2_000;
-  let waited = 0;
-  let connected = false;
-  while (waited < maxWaitMs) {
-    if (isConnected(uid)) { connected = true; break; }
-    await new Promise((r) => setTimeout(r, pollMs));
-    waited += pollMs;
-    if (waited % 6_000 === 0) {
+  // Step 4: Use refreshWhatsAppSession — it forces a proper disconnect+reconnect
+  // cycle from MongoDB credentials, which is reliable for both new and main slots.
+  await refreshWhatsAppSession(
+    // refreshWhatsAppSession expects the primary uid; it resolves the alias internally.
+    uid,
+    async () => {
+      // ── onConnected ────────────────────────────────────────────────────────
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `🔄 <b>Switching WhatsApp...</b>\n\n` +
-          `📱 Switching to: <code>${esc(slot.phone)}</code>\n\n` +
-          `🌐 Connecting... (${waited / 1000}s)`,
-          { parse_mode: "HTML" }
+          `✅ <b>WhatsApp Switched Successfully!</b>\n\n` +
+          `📱 Now using: <code>${esc(slot.phone)}</code>\n\n` +
+          "All bot features will now use this WhatsApp account. " +
+          "This is saved — even after a bot restart, this account will be used.",
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🔀 Switch Again", "switch_wa_menu")
+              .text("🏠 Main Menu", "main_menu"),
+          }
         );
       } catch {}
-    }
-  }
-
-  if (connected) {
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `✅ <b>WhatsApp Switched Successfully!</b>\n\n` +
-        `📱 Now using: <code>${esc(slot.phone)}</code>\n\n` +
-        "All bot features will now use this WhatsApp account. " +
-        "This is saved — even after a bot restart, this account will be used.",
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔀 Switch Again", "switch_wa_menu")
-            .text("🏠 Main Menu", "main_menu"),
-        }
-      );
-    } catch {}
-  } else {
-    try {
-      await bot.api.editMessageText(chatId, msgId,
-        `⚠️ <b>Switch Saved — Connecting...</b>\n\n` +
-        `📱 Switched to: <code>${esc(slot.phone)}</code>\n\n` +
-        "The switch has been saved. The connection is taking longer than expected — " +
-        "your bot will use this WhatsApp once it connects. " +
-        "Try Session Refresh if it does not connect automatically.",
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Session Refresh", "session_refresh")
-            .text("🏠 Main Menu", "main_menu"),
+    },
+    async (reason) => {
+      // ── onDisconnected / onError ───────────────────────────────────────────
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          `⚠️ <b>Switch Saved — Connection Issue</b>\n\n` +
+          `📱 Switched to: <code>${esc(slot.phone)}</code>\n\n` +
+          `Reason: ${esc(reason)}\n\n` +
+          "The switch is saved. Use Session Refresh to reconnect.",
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🔄 Session Refresh", "session_refresh")
+              .text("🏠 Main Menu", "main_menu"),
         }
       );
     } catch {}
