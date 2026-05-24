@@ -11049,34 +11049,25 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     );
   } catch {}
 
-  // Step 1: Disconnect the current active socket.
-  // Disconnect both the currentActiveId AND uid (in case of stale sockets)
-  // so the new session starts on a clean slate.
+  // Step 1: Close socket only — do NOT call disconnectWhatsApp which deletes
+  // MongoDB creds. idleDisconnectWhatsApp frees RAM but keeps the saved session
+  // so ensureSessionLoaded can restore it from MongoDB in Step 4.
   try {
-    // Disconnect the currently active slot directly
-    if (isConnected(currentActiveId)) {
-      await disconnectWhatsApp(currentActiveId);
-    }
-    // If switching back to main (targetSlotId === uid), the original slot may
-    // still have a stale socket — disconnect it too so refreshWhatsAppSession
-    // can force a fresh reconnect from MongoDB credentials.
-    if (targetSlotId !== currentActiveId && isConnected(targetSlotId)) {
-      await disconnectWhatsApp(targetSlotId);
-    }
-    await new Promise((r) => setTimeout(r, 1500));
+    // Close the currently active slot's socket (memory-only, keeps Mongo creds)
+    await idleDisconnectWhatsApp(currentActiveId);
+    // Also evict any stale socket stored under the raw uid (pre-fix residue)
+    await idleDisconnectWhatsApp(uid);
+    await new Promise((r) => setTimeout(r, 500));
   } catch {}
 
   // Step 2: Point primary userId → new slot via alias.
-  // When switching back to original (targetSlotId === uid), we still set
-  // setSessionAlias(uid, uid) as a self-alias — resolveSessionId still
-  // returns uid, which is correct. refreshWhatsAppSession handles the rest.
   setSessionAlias(uid, targetSlotId);
 
   // Step 3: Persist active slot in MongoDB.
   profile.activeId = targetSlotId;
   await saveWaSwitchProfile(profile);
 
-  // Invalidate session cache so lazy restore sees the correct stored session.
+  // Invalidate session cache so ensureSessionLoaded sees the new slot.
   hasSessionCache.del(uid);
   hasSessionCache.del(targetSlotId);
 
@@ -11089,60 +11080,58 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     );
   } catch {}
 
-  // Step 4: Use refreshWhatsAppSession — it forces a proper disconnect+reconnect
-  // cycle from MongoDB credentials, which is reliable for both new and main slots.
-  await refreshWhatsAppSession(
-    // refreshWhatsAppSession expects the primary uid; it resolves the alias internally.
-    uid,
-    async () => {
-      // ── onConnected ────────────────────────────────────────────────────────
-      try {
-        await bot.api.editMessageText(chatId, msgId,
-          `✅ <b>WhatsApp Switched Successfully!</b>\n\n` +
-          `📱 Now using: <code>${esc(slot.phone)}</code>\n\n` +
-          "All bot features will now use this WhatsApp account. " +
-          "This is saved — even after a bot restart, this account will be used.",
-          {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("🔀 Switch Again", "switch_wa_menu")
-              .text("🏠 Main Menu", "main_menu"),
-          }
-        );
-      } catch {}
-    },
-    async (reason) => {
-      // ── onDisconnected / onError ───────────────────────────────────────────
-      // The slot failed to connect — remove it from the profile so the user
-      // isn't stuck with a dead switch option that never reconnects.
-      try {
-        const freshProfile = await loadWaSwitchProfile(userId);
-        if (freshProfile) {
-          freshProfile.slots = freshProfile.slots.filter((s) => s.id !== targetSlotId);
-          // Fall back to original uid as active
-          if (freshProfile.activeId === targetSlotId) {
-            freshProfile.activeId = uid;
-            setSessionAlias(uid, uid);
-          }
-          await saveWaSwitchProfile(freshProfile);
+  // Step 4: Load target session from MongoDB via ensureSessionLoaded.
+  // This is the correct approach — no in-memory session needed, it reads
+  // creds directly from MongoDB and opens a fresh Baileys socket.
+  let switchConnected = false;
+  try {
+    switchConnected = await ensureSessionLoaded(targetSlotId);
+  } catch {}
+
+  if (switchConnected) {
+    // ── onConnected ─────────────────────────────────────────────────────────
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `✅ <b>WhatsApp Switched Successfully!</b>\n\n` +
+        `📱 Now using: <code>${esc(slot.phone)}</code>\n\n` +
+        "All bot features will now use this WhatsApp account. " +
+        "This is saved — even after a bot restart, this account will be used.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔀 Switch Again", "switch_wa_menu")
+            .text("🏠 Main Menu", "main_menu"),
         }
-      } catch {}
-      try {
-        await bot.api.editMessageText(chatId, msgId,
-          `❌ <b>Switch Failed — Account Removed</b>\n\n` +
-          `📱 <code>${esc(slot.phone)}</code> could not connect and has been removed from your saved accounts.\n\n` +
-          `Reason: ${esc(reason)}\n\n` +
-          "Use Session Refresh on another account, or add the number again.",
-          {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("🔀 Switch WhatsApp", "switch_wa_menu")
-              .text("🏠 Main Menu", "main_menu"),
-          }
-        );
-      } catch {}
-    }
-  );
+      );
+    } catch {}
+  } else {
+    // ── onError ─────────────────────────────────────────────────────────────
+    // Connection failed — restore alias to the previous active slot so the
+    // user's primary WA keeps working. Do NOT remove the slot from the profile
+    // because the creds are still in MongoDB; user can retry by switching again.
+    try {
+      setSessionAlias(uid, currentActiveId ?? uid);
+      const freshProfile = await loadWaSwitchProfile(userId);
+      if (freshProfile) {
+        freshProfile.activeId = currentActiveId ?? uid;
+        await saveWaSwitchProfile(freshProfile);
+      }
+    } catch {}
+    try {
+      await bot.api.editMessageText(chatId, msgId,
+        `❌ <b>Switch Failed</b>\n\n` +
+        `📱 <code>${esc(slot.phone)}</code> could not connect right now.\n\n` +
+        "Your previous WhatsApp is still active. " +
+        "The account is saved — tap Switch WhatsApp to try again.",
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("🔀 Switch WhatsApp", "switch_wa_menu")
+            .text("🏠 Main Menu", "main_menu"),
+        }
+      );
+    } catch {}
+  }
 });
 
 // ─── Remove WhatsApp slot — confirm ─────────────────────────────────────────
