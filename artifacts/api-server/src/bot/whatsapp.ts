@@ -2609,6 +2609,30 @@ export async function sendGroupMessage(
   }
 }
 
+// Warms up WA2→WA1 personal-chat connection BEFORE the first sendGroupMessage call.
+// Calls onWhatsApp() to resolve the correct JID (handles LID protocol) and then
+// sends a "composing" presence update so WhatsApp pre-exchanges signal keys.
+// Must be called from EACH sender's session towards EACH receiver's JID.
+export async function warmupPersonalJid(
+  senderUserId: string,
+  targetPhone: string // digits only, no @domain
+): Promise<string | null> {
+  const session = useSession(senderUserId);
+  if (!session?.socket || !session.connected) return null;
+  const rawJid = `${targetPhone.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+  let resolvedJid = rawJid;
+  try {
+    const results = await (session.socket as any).onWhatsApp(rawJid);
+    const resolved = Array.isArray(results) ? results[0] : results;
+    if (resolved?.jid) resolvedJid = resolved.jid;
+  } catch {}
+  try {
+    await session.socket.sendPresenceUpdate("composing", resolvedJid);
+    await session.socket.sendPresenceUpdate("paused", resolvedJid);
+  } catch {}
+  return resolvedJid;
+}
+
 export function getAutoUserId(userId: string): string {
   return `${userId}_auto`;
 }
