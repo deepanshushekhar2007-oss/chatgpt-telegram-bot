@@ -17059,7 +17059,26 @@ async function handlePairCodePhone(ctx: any, userId: number, rawText: string): P
     `⏳ <b>Connecting...</b>\n\n📱 Phone: <code>${esc(phone)}</code>\n\n⌛ Getting pairing code, please wait 10-20 seconds...`,
     { parse_mode: "HTML" }
   );
-  try {
+  // ── Bug fix: clear switch-WA alias before reconnecting primary ──────────────
+    // If the user previously switched to a secondary WhatsApp (setting an alias
+    // uid → slotId), connectWhatsApp(uid) would resolve to the slot ID and store
+    // the session there. When onConnected then resets the alias, isConnected(uid)
+    // looks at uid directly — finds nothing — and shows "❌ WhatsApp: Not Connected"
+    // even though the socket IS connected. Clearing the alias first ensures the
+    // primary session is stored at uid so the status is always correct.
+    clearSessionAlias(String(userId));
+
+    // Sync the switch profile's activeId back to primary so the Switch WhatsApp
+    // menu reflects the correct active account after reconnecting primary.
+    try {
+      const switchProfile = await loadWaSwitchProfile(userId);
+      if (switchProfile && switchProfile.activeId !== String(userId)) {
+        switchProfile.activeId = String(userId);
+        await saveWaSwitchProfile(switchProfile);
+      }
+    } catch {}
+
+    try {
     await connectWhatsApp(
       String(userId),
       phone,
@@ -17088,7 +17107,7 @@ async function handlePairCodePhone(ctx: any, userId: number, rawText: string): P
               // If the active slot was the removed one, reset to primary
               if (!dedupProfile.slots.find((s) => s.id === dedupProfile.activeId)) {
                 dedupProfile.activeId = String(userId);
-                setSessionAlias(String(userId), String(userId));
+                clearSessionAlias(String(userId));
               }
               await saveWaSwitchProfile(dedupProfile);
             }
