@@ -2586,7 +2586,22 @@ export async function sendGroupMessage(
   const session = useSession(userId);
   if (!session?.socket || !session.connected) return false;
   try {
-    await session.socket.sendMessage(groupId, { text });
+    // For personal chat JIDs (@s.whatsapp.net), resolve the correct JID via
+    // onWhatsApp() before sending. This is critical for Baileys 7+ / LID protocol:
+    // WhatsApp silently drops messages sent to the raw phone JID if the recipient
+    // uses a LID-based account. onWhatsApp() returns the correct resolved JID and
+    // also pre-fetches signal keys so the first message doesn't fail silently.
+    let targetJid = groupId;
+    if (groupId.endsWith("@s.whatsapp.net")) {
+      try {
+        const results = await (session.socket as any).onWhatsApp(groupId);
+        const resolved = Array.isArray(results) ? results[0] : results;
+        if (resolved?.jid) targetJid = resolved.jid;
+      } catch {
+        // onWhatsApp failed — fall back to raw JID and attempt send anyway
+      }
+    }
+    await session.socket.sendMessage(targetJid, { text });
     return true;
   } catch (err: any) {
     console.error(`[WA][${userId}] sendGroupMessage error:`, err?.message);
