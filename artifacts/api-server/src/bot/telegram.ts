@@ -64,6 +64,7 @@ import {
   isDisconnectPending,
   isWhatsAppConnecting,
   suppressDisconnectNotification,
+  warmupPersonalJid,
 } from "./whatsapp";
 import { parseVCF, normalizePhone } from "./vcf-parser";
 import QRCode from "qrcode";
@@ -1436,6 +1437,9 @@ interface AcfSession {
   // all-to-all tracking
   currentSenderIdx?: number;
   currentReceiverIdx?: number;
+  // actual phone numbers for the current send direction (for status display)
+  currentSenderPhone?: string;
+  currentReceiverPhone?: string;
   // per-account sent count (index = WA slot index)
   sentByAccount: number[];
 }
@@ -13868,10 +13872,12 @@ function acfProgressText(session: AcfSession): string {
   const waCountText = N >= 2
     ? `📱 WA Accounts: <b>${N}</b>${N > 2 ? " · ⚡ All-to-All Mode" : ""}\n`
     : "";
-  // Show current direction: WA X → WA Y
+  // Show current direction: WA X → WA Y (with actual phone numbers for debugging)
   const senderNum = (session.currentSenderIdx ?? 0) + 1;
   const receiverNum = (session.currentReceiverIdx ?? 1) + 1;
-  const directionText = `📨 Now: <b>WA ${senderNum} → WA ${receiverNum}</b>\n`;
+  const sPhoneShort = session.currentSenderPhone ? ` <code>+${session.currentSenderPhone}</code>` : "";
+  const rPhoneShort = session.currentReceiverPhone ? ` <code>+${session.currentReceiverPhone}</code>` : "";
+  const directionText = `📨 Now: <b>WA ${senderNum}${sPhoneShort} → WA ${receiverNum}${rPhoneShort}</b>\n`;
   // Per-account breakdown — same as Chat In Group display
   const acfAccLines = session.sentByAccount && session.sentByAccount.length > 0
     ? (session.sentByAccount as number[]).map((count, i) => `📱 WA ${i + 1}: <b>${count} messages</b>`).join("\n") + "\n"
@@ -14030,10 +14036,15 @@ async function runChatFriendBackground(
       entry.done = saved;
       entry.failed = !saved;
 
+      // Warm up the personal JID: calls onWhatsApp() (resolves LID-protocol JID)
+      // + sends composing/paused presence update to pre-exchange Signal keys.
+      // This prevents silent send failures on the first message from this sender.
+      void warmupPersonalJid(senderUserId, entry.phone).catch(() => {});
+
       try {
         await bot.api.editMessageText(chatId, msgId, buildContactSaveMsg(false), { parse_mode: "HTML" });
       } catch {}
-      await sleep(400);
+      await sleep(500);
     }
 
     // Show completion message
@@ -14155,6 +14166,9 @@ async function runChatFriendBackground(
       session.cycle = Math.floor(sendStepIdx / (totalDirectedPairs * CHAT_FRIEND_PAIRS.length)) + 1;
       session.currentSenderIdx = senderIdx;
       session.currentReceiverIdx = receiverIdx;
+      // Store actual phone numbers for status display (helps debug JID issues)
+      session.currentSenderPhone = (activeJids[activeSenderIdx] ?? "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
+      session.currentReceiverPhone = (receiverJid ?? "").replace("@s.whatsapp.net", "").replace(/[^0-9]/g, "");
 
       // Advance message pair after a full round of all directed pairs (use sendStepIdx)
       if (sendStepIdx > 0 && sendStepIdx % totalDirectedPairs === 0) {
