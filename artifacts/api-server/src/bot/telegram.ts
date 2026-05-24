@@ -14035,8 +14035,9 @@ async function runChatFriendBackground(
   const totalDirectedPairs = allToAllPairs.length;
 
   try {
-    let stepCount = 0;   // total send steps taken
-    let pairMsgIdx = 0;  // current CHAT_FRIEND_PAIRS message index
+    let stepCount = 0;    // total loop iterations (including skips when WA disconnected)
+    let sendStepIdx = 0;  // counts ONLY actual send attempts — used for pair alternation
+    let pairMsgIdx = 0;   // current CHAT_FRIEND_PAIRS message index
 
     while (!session.cancelled && session.running) {
       if (session.cancelled) break;
@@ -14104,9 +14105,15 @@ async function runChatFriendBackground(
         stepCount++;
         continue;
       }
-      // Rebuild pairs from currently connected WAs
+      // Rebuild pairs from currently connected WAs.
+      // IMPORTANT: use sendStepIdx (not stepCount) for pair selection.
+      // stepCount includes skipped iterations (when WA2 is disconnected).
+      // If WA2 disconnects on every odd stepCount, stepCount is always even
+      // when both WAs are connected → stepCount%2 always 0 → WA1 always sends.
+      // sendStepIdx only increments on actual send attempts, so it always
+      // strictly alternates 0,1,0,1,… regardless of disconnection patterns.
       const activePairs = buildAllToAllPairs(activeJids.length);
-      const [activeSenderIdx, activeReceiverIdx] = activePairs[stepCount % activePairs.length];
+      const [activeSenderIdx, activeReceiverIdx] = activePairs[sendStepIdx % activePairs.length];
       const senderUserId = activeUids[activeSenderIdx];
       const receiverJid = activeJids[activeReceiverIdx];
       // Map back to original indices for progress display only
@@ -14115,18 +14122,16 @@ async function runChatFriendBackground(
 
       // Pick message text: use activeSenderIdx (direct from pairs, always 0 or 1)
       // so WA at slot 0 always sends msg1 (question) and WA at slot 1 always sends msg2 (reply).
-      // Using senderIdx (indexOf lookup) was buggy — indexOf can return -1 or wrong value
-      // when sessions reconnect mid-run, causing both WAs to send msg1 (one-sided chat bug).
       const [msg1, msg2] = CHAT_FRIEND_PAIRS[pairMsgIdx % CHAT_FRIEND_PAIRS.length];
       const msg = activeSenderIdx % 2 === 0 ? msg1 : msg2;
 
       session.currentPair = (pairMsgIdx % CHAT_FRIEND_PAIRS.length) + 1;
-      session.cycle = Math.floor(stepCount / (totalDirectedPairs * CHAT_FRIEND_PAIRS.length)) + 1;
+      session.cycle = Math.floor(sendStepIdx / (totalDirectedPairs * CHAT_FRIEND_PAIRS.length)) + 1;
       session.currentSenderIdx = senderIdx;
       session.currentReceiverIdx = receiverIdx;
 
-      // Advance message pair after a full round of all directed pairs
-      if (stepCount > 0 && stepCount % totalDirectedPairs === 0) {
+      // Advance message pair after a full round of all directed pairs (use sendStepIdx)
+      if (sendStepIdx > 0 && sendStepIdx % totalDirectedPairs === 0) {
         pairMsgIdx++;
       }
 
@@ -14176,6 +14181,7 @@ async function runChatFriendBackground(
         }).catch(() => {});
       }
 
+      sendStepIdx++;  // only increments on actual send attempts (not on WA-disconnected skips)
       stepCount++;
     }
   } catch (err: any) {
