@@ -5529,6 +5529,19 @@ bot.callbackQuery("group_create_start", async (ctx) => {
   const msgId = ctx.callbackQuery.message?.message_id;
   if (!chatId || !msgId) return;
 
+  // ── Guard: prevent double-start if creation is already running ────────────
+  // If the user double-taps "Create Now" (or taps it while a previous
+  // background loop is still running), a second concurrent loop would be
+  // spawned. Both share the same userState cancel flag, so cancelling one
+  // cancels both — but both loops would still finish and edit the message
+  // twice, making it appear as though creation restarted after stopping.
+  // This guard makes the second tap a no-op while the loop is in progress.
+  const existingState = userStates.get(userId);
+  if (existingState?.step === "group_creating") {
+    await ctx.answerCallbackQuery({ text: "⏳ Group creation already in progress..." });
+    return;
+  }
+
   // ── Try RAM state first ───────────────────────────────────────────────────
   let gs: GroupSettings | null = null;
   const state = userStates.get(userId);
@@ -8828,22 +8841,41 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
   void (async () => {
     const lines: string[] = [];
     let success = 0, failed = 0, cancelled = false;
-    for (let li = 0; li < groups.length; li++) {
+
+    // Process 20 groups at a time in parallel — no rate limit applies to
+    // leave/delete so running them concurrently makes this significantly faster.
+    const LV_CONCURRENT = 20;
+    for (let batchStart = 0; batchStart < groups.length; batchStart += LV_CONCURRENT) {
       if (leaveJobCancel.has(userId)) { cancelled = true; break; }
-      const g = groups[li];
-      const ok = await leaveGroup(String(userId), g.id);
-      if (ok) {
-        try { await deleteGroupChat(String(userId), g.id); } catch {}
-        lines.push(`✅ Left: ${esc(g.subject)}`); success++;
+
+      const batch = groups.slice(batchStart, batchStart + LV_CONCURRENT);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (g) => {
+          const ok = await leaveGroup(String(userId), g.id);
+          if (ok) {
+            try { await deleteGroupChat(String(userId), g.id); } catch {}
+          }
+          return { g, ok };
+        })
+      );
+
+      for (let bi = 0; bi < batchResults.length; bi++) {
+        const res = batchResults[bi];
+        const g = batch[bi];
+        if (res.status === "fulfilled" && res.value.ok) {
+          lines.push(`✅ Left: ${esc(g.subject)}`); success++;
+        } else {
+          lines.push(`❌ Failed: ${esc(g.subject)}`); failed++;
+        }
       }
-      else { lines.push(`❌ Failed: ${esc(g.subject)}`); failed++; }
+
+      const done = Math.min(batchStart + LV_CONCURRENT, groups.length);
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Leaving: ${li + 1}/${groups.length}</b>\n\n${lines.join("\n")}`,
+          `⏳ <b>Leaving: ${done}/${groups.length}</b>\n\n${lines.join("\n")}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
-      if (li < groups.length - 1) await new Promise((r) => setTimeout(r, 1000));
     }
     leaveJobCancel.delete(userId);
     const summary = cancelled
