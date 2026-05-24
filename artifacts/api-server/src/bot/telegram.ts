@@ -13908,8 +13908,34 @@ async function runChatFriendBackground(
   allUserIds: string[] = []
 ): Promise<void> {
   // Resolve full WA list (fall back to 2-WA mode if not provided)
-  const resolvedJids = allJids.length >= 2 ? allJids : [primaryJid, autoJid];
-  const resolvedUserIds = allUserIds.length >= 2 ? allUserIds : [primaryUserId, autoUserId];
+  let resolvedJids = allJids.length >= 2 ? allJids : [primaryJid, autoJid];
+  let resolvedUserIds = allUserIds.length >= 2 ? allUserIds : [primaryUserId, autoUserId];
+
+  // ── Deduplicate by actual phone number ────────────────────────────────────
+  // If the user used "Switch WA", sessionAliases can map two different userId
+  // strings to the SAME physical Baileys socket. In that case both entries
+  // would use the same WhatsApp account, so Chat Friend only has one real WA
+  // and the "second sender" would be sending to itself (silently dropped).
+  // Fix: keep only entries whose underlying phone number is unique.
+  {
+    const seenNumbers = new Set<string>();
+    const dedupJids: string[] = [];
+    const dedupUids: string[] = [];
+    for (let i = 0; i < resolvedUserIds.length; i++) {
+      const phone = (getConnectedWhatsAppNumber(resolvedUserIds[i]) ?? "").replace(/[^0-9]/g, "");
+      if (phone && !seenNumbers.has(phone)) {
+        seenNumbers.add(phone);
+        dedupJids.push(resolvedJids[i]);
+        dedupUids.push(resolvedUserIds[i]);
+      }
+    }
+    // Only replace if dedup gave us a valid list; fallback to original on empty
+    if (dedupUids.length >= 2) {
+      resolvedJids = dedupJids;
+      resolvedUserIds = dedupUids;
+    }
+  }
+
   const N = resolvedJids.length;
   const waCount = N;
 
