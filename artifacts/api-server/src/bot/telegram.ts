@@ -11080,12 +11080,13 @@ bot.callbackQuery(/^switch_wa:(.+)$/, async (ctx) => {
     );
   } catch {}
 
-  // Step 4: Load target session from MongoDB via ensureSessionLoaded.
-  // This is the correct approach — no in-memory session needed, it reads
-  // creds directly from MongoDB and opens a fresh Baileys socket.
+  // Step 4: Load target session from MongoDB and wait until WA handshake
+  // completes. ensureSessionLoaded only starts the socket; the actual
+  // authentication happens asynchronously, so we must poll with
+  // waitForWhatsAppConnected (up to 35s) to know if it really connected.
   let switchConnected = false;
   try {
-    switchConnected = await ensureSessionLoaded(targetSlotId);
+    switchConnected = await waitForWhatsAppConnected(targetSlotId, { timeoutMs: 35_000, pollMs: 500 });
   } catch {}
 
   if (switchConnected) {
