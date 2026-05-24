@@ -14109,13 +14109,16 @@ async function runChatFriendBackground(
       const [activeSenderIdx, activeReceiverIdx] = activePairs[stepCount % activePairs.length];
       const senderUserId = activeUids[activeSenderIdx];
       const receiverJid = activeJids[activeReceiverIdx];
-      // Map back to original indices for progress display
-      const senderIdx = resolvedUserIds.indexOf(senderUserId);
+      // Map back to original indices for progress display only
+      const senderIdx = Math.max(0, resolvedUserIds.indexOf(senderUserId));
       const receiverIdx = resolvedJids.indexOf(receiverJid);
 
-      // Pick message text: alternate msg1/msg2 from current CHAT_FRIEND_PAIRS entry
+      // Pick message text: use activeSenderIdx (direct from pairs, always 0 or 1)
+      // so WA at slot 0 always sends msg1 (question) and WA at slot 1 always sends msg2 (reply).
+      // Using senderIdx (indexOf lookup) was buggy — indexOf can return -1 or wrong value
+      // when sessions reconnect mid-run, causing both WAs to send msg1 (one-sided chat bug).
       const [msg1, msg2] = CHAT_FRIEND_PAIRS[pairMsgIdx % CHAT_FRIEND_PAIRS.length];
-      const msg = senderIdx % 2 === 0 ? msg1 : msg2;
+      const msg = activeSenderIdx % 2 === 0 ? msg1 : msg2;
 
       session.currentPair = (pairMsgIdx % CHAT_FRIEND_PAIRS.length) + 1;
       session.cycle = Math.floor(stepCount / (totalDirectedPairs * CHAT_FRIEND_PAIRS.length)) + 1;
@@ -14135,8 +14138,9 @@ async function runChatFriendBackground(
       if (ok) {
         session.sent++;
         if (!session.sentByAccount) session.sentByAccount = [];
-        while (session.sentByAccount.length <= senderIdx) session.sentByAccount.push(0);
-        session.sentByAccount[senderIdx]++;
+        // Use activeSenderIdx for sentByAccount tracking — safe, always 0..N-1
+        while (session.sentByAccount.length <= activeSenderIdx) session.sentByAccount.push(0);
+        session.sentByAccount[activeSenderIdx]++;
       } else {
         session.failed++;
       }
