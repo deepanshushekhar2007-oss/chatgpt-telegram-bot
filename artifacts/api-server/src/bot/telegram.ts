@@ -2288,18 +2288,25 @@ setInterval(() => {
   resetLinkCancelRequests.clear();
   demoteAdminCancelRequests.clear();
 
-  // Double-pass GC with a small wait between passes. A single gc() leaves
-  // partially-promoted objects in the old generation; doing a second pass
-  // after a 50ms gap lets V8 finish the sweep and gives glibc malloc (which
-  // we've capped to 2 arenas via MALLOC_ARENA_MAX=2) a chance to actually
+  // Triple-pass GC with increasing delays between passes. A single gc() leaves
+  // partially-promoted objects in the old generation; doing a third pass
+  // after a 500ms gap lets V8 fully sweep the old generation and gives glibc
+  // malloc (capped to 2 arenas via MALLOC_ARENA_MAX=2) a chance to actually
   // return freed pages to the OS — which is what makes RSS visibly drop
   // instead of climbing forever as uptime grows.
   if (typeof (global as any).gc === "function") {
     try { (global as any).gc(); } catch {}
     setTimeout(() => {
       try { (global as any).gc(); } catch {}
-    }, 50);
+      setTimeout(() => {
+        try { (global as any).gc(); } catch {}
+      }, 500);
+    }, 100);
   }
+  // Also sweep idle WhatsApp sessions every routine cycle (not just on
+  // /cleanram) — this prevents disconnected-but-not-evicted sockets from
+  // leaking ~5-10 MB each between manual purges.
+  sweepIdleSessions();
   const mem = process.memoryUsage();
   const rssMb = Math.round(mem.rss / 1024 / 1024);
   const heapMb = Math.round(mem.heapUsed / 1024 / 1024);
@@ -3560,6 +3567,7 @@ bot.command("admin", async (ctx) => {
     "📱 <code>/sessions</code> — WhatsApp sessions list\n" +
     "🧠 <code>/memory</code> — Server RAM usage\n" +
     "🧽 <code>/cleanram</code> — Force-clear all caches and free RAM now\n" +
+    "🔢 <code>/version</code> — Node.js, package versions, uptime & latest commit\n" +
     "🧹 <code>/cleansessions [num]</code> — Delete session by number\n\n" +
     "🎁 <b>Refer Mode:</b>\n" +
     "🟢 <code>/refermode on</code> — Enable refer mode (24h trial + referrals)\n" +
@@ -5004,6 +5012,80 @@ bot.command("cleanram", async (ctx) => {
   } catch {
     await ctx.reply(text, { parse_mode: "HTML" });
   }
+});
+
+// ─── /version — System version & latest commit info ─────────────────────────
+bot.command("version", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 You are not an admin."); return; }
+
+  const { execSync } = await import("child_process");
+  const fs = await import("fs");
+  const path = await import("path");
+
+  // ── Package versions ───────────────────────────────────────────────────────
+  let pkgVersions: Record<string, string> = {};
+  try {
+    const pkgPath = path.join(process.cwd(), "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+      const keys = ["grammy", "@whiskeysockets/baileys", "express", "mongoose", "mongodb", "zod", "pino"];
+      for (const k of keys) {
+        if (allDeps[k]) pkgVersions[k] = allDeps[k].replace(/^[\^~]/, "");
+      }
+    }
+  } catch {}
+
+  // ── Git latest commit ──────────────────────────────────────────────────────
+  let commitInfo = "N/A";
+  let commitHash = "N/A";
+  let commitDate = "N/A";
+  let commitAuthor = "N/A";
+  try {
+    commitHash = execSync("git log -1 --format=%h", { timeout: 3000 }).toString().trim();
+    commitInfo = execSync("git log -1 --format=%s", { timeout: 3000 }).toString().trim();
+    commitDate = execSync("git log -1 --format=%ci", { timeout: 3000 }).toString().trim().split(" ").slice(0, 2).join(" ");
+    commitAuthor = execSync("git log -1 --format=%an", { timeout: 3000 }).toString().trim();
+  } catch {}
+
+  // ── Uptime ─────────────────────────────────────────────────────────────────
+  const uptimeSec = Math.floor(process.uptime());
+  const d = Math.floor(uptimeSec / 86400);
+  const h = Math.floor((uptimeSec % 86400) / 3600);
+  const m = Math.floor((uptimeSec % 3600) / 60);
+  const s = uptimeSec % 60;
+  const uptimeStr = d > 0
+    ? `${d}d ${h}h ${m}m ${s}s`
+    : h > 0
+      ? `${h}h ${m}m ${s}s`
+      : `${m}m ${s}s`;
+
+  // ── Build package version lines ────────────────────────────────────────────
+  const pkgLines = Object.entries(pkgVersions)
+    .map(([k, v]) => `  • <code>${k}</code>: <b>${v}</b>`)
+    .join("\n");
+
+  const mem = process.memoryUsage();
+  const rssMb = (mem.rss / 1024 / 1024).toFixed(1);
+  const heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
+
+  const text =
+    `🔢 <b>System Version Info</b>\n` +
+    `─────────────────────────────\n\n` +
+    `🟢 <b>Runtime</b>\n` +
+    `  • Node.js: <b>${process.version}</b>\n` +
+    `  • Platform: <b>${process.platform} (${process.arch})</b>\n\n` +
+    `📦 <b>Key Packages</b>\n` +
+    (pkgLines || "  • (package.json not found)") + `\n\n` +
+    `⏱️ <b>Uptime:</b> <code>${uptimeStr}</code>\n` +
+    `🧠 <b>RAM:</b> RSS <code>${rssMb} MB</code> | Heap <code>${heapMb} MB</code>\n\n` +
+    `🔀 <b>Latest Git Commit</b>\n` +
+    `  • Hash: <code>${commitHash}</code>\n` +
+    `  • Message: ${commitInfo}\n` +
+    `  • Author: ${commitAuthor}\n` +
+    `  • Date: <code>${commitDate}</code>`;
+
+  await ctx.reply(text, { parse_mode: "HTML" });
 });
 
 bot.callbackQuery("broadcast_cancel", async (ctx) => {
@@ -8846,9 +8928,12 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     const lines: string[] = [];
     let success = 0, failed = 0, cancelled = false;
 
-    // Process 20 groups at a time in parallel — no rate limit applies to
-    // leave/delete so running them concurrently makes this significantly faster.
+    // ── Phase 1: Leave ALL groups in batches of 20 concurrently ──────────────
+    // We complete ALL leaves first, then do ALL deletes separately so both
+    // operations run in true batches of 20 (not interleaved per-group).
     const LV_CONCURRENT = 20;
+    const leftIds = new Set<string>();
+
     for (let batchStart = 0; batchStart < groups.length; batchStart += LV_CONCURRENT) {
       if (leaveJobCancel.has(userId)) { cancelled = true; break; }
 
@@ -8856,9 +8941,6 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       const batchResults = await Promise.allSettled(
         batch.map(async (g) => {
           const ok = await leaveGroup(String(userId), g.id);
-          if (ok) {
-            try { await deleteGroupChat(String(userId), g.id); } catch {}
-          }
           return { g, ok };
         })
       );
@@ -8867,20 +8949,54 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
         const res = batchResults[bi];
         const g = batch[bi];
         if (res.status === "fulfilled" && res.value.ok) {
-          lines.push(`✅ Left: ${esc(g.subject)}`); success++;
+          lines.push(`✅ Left: ${esc(g.subject)}`);
+          leftIds.add(g.id);
+          success++;
         } else {
-          lines.push(`❌ Failed: ${esc(g.subject)}`); failed++;
+          lines.push(`❌ Failed: ${esc(g.subject)}`);
+          failed++;
         }
       }
 
       const done = Math.min(batchStart + LV_CONCURRENT, groups.length);
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Leaving: ${done}/${groups.length}</b>\n\n${lines.join("\n")}`,
+          `⏳ <b>Phase 1/2 — Leaving: ${done}/${groups.length}</b>\n\n${lines.slice(-20).join("\n")}`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
     }
+
+    // ── Phase 2: Delete ALL successfully left groups in batches of 20 ─────────
+    if (!cancelled && leftIds.size > 0) {
+      const toDelete = groups.filter(g => leftIds.has(g.id));
+      try {
+        await bot.api.editMessageText(chatId, msgId,
+          `⏳ <b>Phase 2/2 — Deleting chats: 0/${toDelete.length}</b>\n\n🗑️ Removing group chats from account...`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
+        );
+      } catch {}
+
+      for (let batchStart = 0; batchStart < toDelete.length; batchStart += LV_CONCURRENT) {
+        if (leaveJobCancel.has(userId)) { cancelled = true; break; }
+
+        const batch = toDelete.slice(batchStart, batchStart + LV_CONCURRENT);
+        await Promise.allSettled(
+          batch.map(async (g) => {
+            try { await deleteGroupChat(String(userId), g.id); } catch {}
+          })
+        );
+
+        const done = Math.min(batchStart + LV_CONCURRENT, toDelete.length);
+        try {
+          await bot.api.editMessageText(chatId, msgId,
+            `⏳ <b>Phase 2/2 — Deleting: ${done}/${toDelete.length}</b>\n\n🗑️ Removing group chats...`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
+          );
+        } catch {}
+      }
+    }
+
     leaveJobCancel.delete(userId);
     const summary = cancelled
       ? `\n\n⛔ <b>Cancelled! ✅ ${success} left | ❌ ${failed} failed</b>`
