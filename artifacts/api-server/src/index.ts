@@ -4,6 +4,7 @@ import { startBot, runMemoryPurge } from "./bot/telegram";
 import { getActiveSessionUserIds, sweepIdleSessions } from "./bot/whatsapp";
 import { getMongoDb, closeMongoDb } from "./bot/mongodb";
 import { cleanupStaleSessions } from "./bot/mongo-auth-state";
+import { loadAllWaSwitchProfiles } from "./bot/mongo-bot-data";
 import https from "https";
 import http from "http";
 
@@ -62,6 +63,17 @@ const STALE_SESSION_DAYS = Number(process.env["STALE_SESSION_DAYS"] || "7");
 async function runSessionCleanup(label: string): Promise<void> {
   try {
     const active = getActiveSessionUserIds();
+    // Protect Switch WA profile slot sessions from being deleted on restart.
+    // Without this, secondary accounts saved in "Switch WhatsApp" are treated
+    // as stale (no in-memory session yet at startup) and wiped by the cleanup.
+    try {
+      const allProfiles = await loadAllWaSwitchProfiles();
+      for (const profile of allProfiles) {
+        for (const slot of (profile as any).slots ?? []) {
+          if (slot?.id) active.add(String(slot.id));
+        }
+      }
+    } catch {}
     const result = await cleanupStaleSessions(active, STALE_SESSION_DAYS);
     if (result.deletedSessions > 0 || result.deletedKeys > 0) {
       console.log(
