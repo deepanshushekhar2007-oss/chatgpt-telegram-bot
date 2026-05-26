@@ -1310,12 +1310,14 @@ export async function createWhatsAppGroup(
     }
   }
 
+  let lastGroupCreateError = "";
   async function tryCreate(participantList: string[], maxAttempts = 1): Promise<{ id: string } | null> {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const group = await session.socket!.groupCreate(groupName, participantList);
         return { id: group.id };
       } catch (err: any) {
+        lastGroupCreateError = err?.message || "Unknown error";
         console.error(`[WA][${userId}] groupCreate attempt ${attempt}/${maxAttempts} (with ${participantList.length} participants) failed:`, err?.message);
         if (attempt < maxAttempts) {
           await new Promise(r => setTimeout(r, attempt * 2500));
@@ -1354,7 +1356,14 @@ export async function createWhatsAppGroup(
     }
   }
 
-  if (!groupId) return null;
+  if (!groupId) {
+    // Throw so the caller's catch block receives an actionable reason instead
+    // of a silent null that shows "Failed to create" with no explanation.
+    const reason = lastGroupCreateError
+      ? lastGroupCreateError
+      : "WhatsApp rejected the group creation after all retries";
+    throw new Error(reason);
+  }
 
   try {
     const inviteCode = await session.socket.groupInviteCode(groupId);
