@@ -592,6 +592,7 @@ export interface PersistedGroupSettings {
   disappearingMessages: number;
   friendNumbers: string[];
   makeFriendAdmin: boolean;
+  creationSpeed?: "fast" | "normal" | "slow";
   // dpBuffers (photo Buffers) are NOT persisted — they must be re-uploaded
   // if the session is restored from MongoDB after a bot restart.
 }
