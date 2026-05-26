@@ -1167,6 +1167,7 @@ interface GroupSettings {
   disappearingMessages: number;
   friendNumbers: string[];
   makeFriendAdmin: boolean;
+  creationSpeed?: "fast" | "normal" | "slow";
 }
 
 interface CtcPair {
@@ -5292,7 +5293,7 @@ bot.callbackQuery("connect_pair_qr_cancel", async (ctx) => {
 // ─── Create Groups ───────────────────────────────────────────────────────────
 
 function defaultGroupSettings(): GroupSettings {
-  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false };
+  return { name: "", description: "", count: 1, finalNames: [], namingMode: "auto", dpBuffers: [], removeDp: false, removeDescription: false, editGroupInfo: true, sendMessages: true, addMembers: true, approveJoin: false, disappearingMessages: 0, friendNumbers: [], makeFriendAdmin: false, creationSpeed: "normal" };
 }
 
 function settingsKeyboard(gs: GroupSettings): InlineKeyboard {
@@ -5552,7 +5553,7 @@ bot.callbackQuery("group_skip_friends", async (ctx) => {
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.friendNumbers = [];
   state.groupSettings.makeFriendAdmin = false;
-  await showGroupSummary(ctx);
+  await showSpeedStep(ctx);
 });
 
 bot.callbackQuery("group_skip_description", async (ctx) => {
@@ -5572,7 +5573,7 @@ bot.callbackQuery("group_friend_admin_yes", async (ctx) => {
   const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = true;
-  await showGroupSummary(ctx);
+  await showSpeedStep(ctx);
 });
 
 bot.callbackQuery("group_friend_admin_no", async (ctx) => {
@@ -5580,6 +5581,48 @@ bot.callbackQuery("group_friend_admin_no", async (ctx) => {
   const state = await recoverGroupCreationState(ctx.from.id, "group_confirm_friend_admin");
   if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
   state.groupSettings.makeFriendAdmin = false;
+  await showSpeedStep(ctx);
+});
+
+// ── Creation Speed Step ───────────────────────────────────────────────────────
+async function showSpeedStep(ctx: any) {
+  const userId = ctx.from?.id ?? ctx.chat?.id;
+  const state = userStates.get(userId);
+  if (!state?.groupSettings) return;
+  state.step = "group_speed";
+  const text =
+    "⚡ <b>Group Creation Speed</b>\n\n" +
+    "How fast should groups be created?\n\n" +
+    "⚡ <b>FAST</b> — Groups created one after another with no delay. Settings (DP, permissions, disappearing messages) are applied in the background while the next group is already being created. Fastest option.\n\n" +
+    "🚶 <b>NORMAL</b> — Each group is fully set up before the next one starts. Balanced and reliable.\n\n" +
+    "🐢 <b>SLOW</b> — 1 minute gap between each group. Use this if WhatsApp is blocking or flagging your account.";
+  const markup = new InlineKeyboard()
+    .text("⚡ FAST", "group_speed_fast").text("🚶 NORMAL", "group_speed_normal").text("🐢 SLOW", "group_speed_slow");
+  try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: markup }); }
+  catch { await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup }); }
+}
+
+bot.callbackQuery("group_speed_fast", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const state = await recoverGroupCreationState(ctx.from.id, "group_speed");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
+  state.groupSettings.creationSpeed = "fast";
+  await showGroupSummary(ctx);
+});
+
+bot.callbackQuery("group_speed_normal", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const state = await recoverGroupCreationState(ctx.from.id, "group_speed");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
+  state.groupSettings.creationSpeed = "normal";
+  await showGroupSummary(ctx);
+});
+
+bot.callbackQuery("group_speed_slow", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const state = await recoverGroupCreationState(ctx.from.id, "group_speed");
+  if (!state?.groupSettings) { await replyGroupSessionExpired(ctx); return; }
+  state.groupSettings.creationSpeed = "slow";
   await showGroupSummary(ctx);
 });
 
@@ -5635,6 +5678,7 @@ async function showGroupSummary(ctx: any) {
   const namesList = gs.finalNames.map((n, i) => `${i + 1}. ${esc(n)}`).join("\n");
   state.step = "group_confirm";
   const dmText = gs.disappearingMessages === 86400 ? "24 Hours" : gs.disappearingMessages === 604800 ? "7 Days" : gs.disappearingMessages === 7776000 ? "90 Days" : "Off";
+  const speedLabel = gs.creationSpeed === "fast" ? "⚡ FAST" : gs.creationSpeed === "slow" ? "🐢 SLOW" : "🚶 NORMAL";
   const text =
     "📋 <b>Group Creation Summary</b>\n\n" +
     `📝 <b>Names (${gs.finalNames.length}):</b>\n${namesList}\n\n` +
@@ -5643,6 +5687,7 @@ async function showGroupSummary(ctx: any) {
     `⏳ <b>Disappearing Msgs:</b> ${dmText}\n` +
     `👫 <b>Friends to add:</b> ${gs.friendNumbers.length > 0 ? `${gs.friendNumbers.length} numbers` : "None"}\n` +
     (gs.friendNumbers.length > 0 ? `👑 <b>Make Friend Admin:</b> ${gs.makeFriendAdmin ? "✅ Yes" : "❌ No"}\n` : "") +
+    `⚡ <b>Creation Speed:</b> ${speedLabel}\n` +
     `\n` +
     "⚙️ <b>Permissions:</b>\n" +
     `${gs.editGroupInfo ? "✅" : "❌"} Edit Group Info | ${gs.sendMessages ? "✅" : "❌"} Send Messages\n` +
@@ -5667,6 +5712,7 @@ async function showGroupSummary(ctx: any) {
     disappearingMessages: gs.disappearingMessages,
     friendNumbers: gs.friendNumbers,
     makeFriendAdmin: gs.makeFriendAdmin,
+    creationSpeed: gs.creationSpeed,
   }).catch(() => {});
 
   try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: markup }); }
@@ -5815,6 +5861,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, approveJoin: gs.approveJoin };
   const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean; friendFailDetails?: string[] }> = [];
   const total = gs.finalNames.length;
+  const speed = gs.creationSpeed ?? "normal";
 
   for (let i = 0; i < total; i++) {
     const state = userStates.get(numericUserId);
@@ -5849,122 +5896,127 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           i = total - 1;
           break;
         }
-        await new Promise((r) => setTimeout(r, 1500));
-        await applyGroupSettings(userId, result.id, perms, gs.description);
-        if (gs.disappearingMessages > 0) {
-          await new Promise((r) => setTimeout(r, 1000));
-          await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
-        }
-        if (gs.dpBuffers.length > 0) {
-          const dpBuf = gs.dpBuffers[i % gs.dpBuffers.length];
-          await new Promise((r) => setTimeout(r, 2000));
-          await setGroupIcon(userId, result.id, dpBuf);
-          // Memory: when each DP is one-shot (i.e. dpBuffers.length >= total
-          // groups, so no rotation), free that buffer right after use so the
-          // heap doesn't carry hundreds of KB per user across the entire loop.
-          if (gs.dpBuffers.length >= total) {
-            gs.dpBuffers[i] = Buffer.alloc(0);
+        // ── Apply group settings (permissions, DP, disappearing, friends) ───────
+        // FAST: fire in background so next group is created immediately.
+        // NORMAL / SLOW: await so everything is done before next group.
+        const capturedI = i;
+        const capturedGroupName = groupName;
+        const capturedInviteCode = result.inviteCode;
+        const applyGroupConfig = async () => {
+          await new Promise((r) => setTimeout(r, speed === "fast" ? 500 : 1500));
+          await applyGroupSettings(userId, result.id, perms, gs.description);
+          if (gs.disappearingMessages > 0) {
+            await new Promise((r) => setTimeout(r, 1000));
+            await setGroupDisappearingMessages(userId, result.id, gs.disappearingMessages);
           }
-        }
-
-        let finalFriendsAdded = 0;
-        let finalFriendsFailed = false;
-        let finalFriendFailDetails: string[] = [];
-
-        if (gs.friendNumbers.length > 0) {
-          if (result.participantsFailed) {
-            // Creation with participants failed — try adding separately as fallback
-            await new Promise((r) => setTimeout(r, 3000));
-            const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
-            finalFriendsAdded = addResults.filter(r => r.success).length;
-            finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
-            if (finalFriendsFailed) {
-              finalFriendFailDetails = addResults
-                .filter(r => !r.success)
-                .map(r => `${r.phone}: ${r.error || "Unknown reason"}`);
-            }
-          } else {
-            finalFriendsAdded = result.addedParticipants ?? 0;
-            if (finalFriendsAdded < gs.friendNumbers.length) {
-              finalFriendsFailed = true;
-              const skipped = gs.friendNumbers.length - finalFriendsAdded;
-              finalFriendFailDetails = [`${skipped} member(s) filtered out — not on WhatsApp or invalid number`];
-            }
-          }
-
-          // Promote friends to admin if user chose Yes
-          if (gs.makeFriendAdmin && finalFriendsAdded > 0) {
+          if (gs.dpBuffers.length > 0) {
+            const dpBuf = gs.dpBuffers[capturedI % gs.dpBuffers.length];
             await new Promise((r) => setTimeout(r, 2000));
-            for (const num of gs.friendNumbers) {
-              const jid = `${num.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
-              try { await makeGroupAdmin(userId, result.id, jid); } catch {}
-              await new Promise((r) => setTimeout(r, 800));
+            await setGroupIcon(userId, result.id, dpBuf);
+            if (gs.dpBuffers.length >= total) { gs.dpBuffers[capturedI] = Buffer.alloc(0); }
+          }
+
+          let finalFriendsAdded = 0;
+          let finalFriendsFailed = false;
+          let finalFriendFailDetails: string[] = [];
+
+          if (gs.friendNumbers.length > 0) {
+            if (result.participantsFailed) {
+              await new Promise((r) => setTimeout(r, 3000));
+              const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
+              finalFriendsAdded = addResults.filter(r => r.success).length;
+              finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
+              if (finalFriendsFailed) {
+                finalFriendFailDetails = addResults
+                  .filter(r => !r.success)
+                  .map(r => `${r.phone}: ${r.error || "Unknown reason"}`);
+              }
+            } else {
+              finalFriendsAdded = result.addedParticipants ?? 0;
+              if (finalFriendsAdded < gs.friendNumbers.length) {
+                finalFriendsFailed = true;
+                const skipped = gs.friendNumbers.length - finalFriendsAdded;
+                finalFriendFailDetails = [`${skipped} member(s) filtered out — not on WhatsApp or invalid number`];
+              }
+            }
+
+            if (gs.makeFriendAdmin && finalFriendsAdded > 0) {
+              await new Promise((r) => setTimeout(r, 2000));
+              for (const num of gs.friendNumbers) {
+                const jid = `${num.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+                try { await makeGroupAdmin(userId, result.id, jid); } catch {}
+                await new Promise((r) => setTimeout(r, 800));
+              }
+            }
+
+            // Friends-failed pause dialog — NORMAL / SLOW only.
+            // Skipped in FAST mode because applyGroupConfig runs in background
+            // and cannot pause the outer creation loop.
+            if (finalFriendsFailed && speed !== "fast") {
+              const remaining = total - (capturedI + 1);
+              const detailLines = finalFriendFailDetails.length > 0
+                ? finalFriendFailDetails.map(d => `  • ${d}`).join("\n")
+                : "  • WhatsApp rejected the participants";
+              const pauseText =
+                `⚠️ <b>Members Not Added — "${esc(capturedGroupName)}"</b>\n\n` +
+                `❌ <b>${finalFriendsAdded}/${gs.friendNumbers.length} member(s) added</b>\n\n` +
+                `<b>Reason(s):</b>\n${detailLines}\n\n` +
+                (remaining > 0
+                  ? `<i>${remaining} group(s) still remaining. Continue or stop?</i>`
+                  : `<i>This was the last group.</i>`);
+              try {
+                const pauseMsg = await bot.api.sendMessage(chatId, pauseText, {
+                  parse_mode: "HTML",
+                  reply_markup: remaining > 0
+                    ? new InlineKeyboard()
+                      .text("▶️ Continue", `cg_fr_cont:${numericUserId}`)
+                      .text("⛔ Stop", `cg_fr_stop:${numericUserId}`)
+                    : new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+                });
+                if (remaining > 0) {
+                  const decision = await new Promise<"continue" | "stop">((resolve) => {
+                    cgFriendsPause.set(numericUserId, resolve);
+                    setTimeout(() => {
+                      if (cgFriendsPause.has(numericUserId)) {
+                        cgFriendsPause.delete(numericUserId);
+                        resolve("continue");
+                      }
+                    }, 90_000);
+                  });
+                  try { await bot.api.deleteMessage(chatId, pauseMsg.message_id); } catch {}
+                  if (decision === "stop") {
+                    for (let j = capturedI + 1; j < total; j++) {
+                      results.push({ name: gs.finalNames[j], link: null, error: "Stopped by user" });
+                    }
+                    const existingIdx2 = results.findIndex(r => r.name === capturedGroupName && r.link === capturedInviteCode);
+                    if (existingIdx2 >= 0) {
+                      results[existingIdx2].friendsAdded = finalFriendsAdded;
+                      results[existingIdx2].friendsFailed = true;
+                      results[existingIdx2].friendFailDetails = finalFriendFailDetails;
+                      results[existingIdx2].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
+                    }
+                    // Signal outer loop to stop
+                    const st = userStates.get(numericUserId);
+                    if (st) st.groupCreationCancel = true;
+                  }
+                }
+              } catch { /* non-fatal */ }
             }
           }
 
-          // ── Pause when members fail to add ──────────────────────────────────
-          // Show the user exactly which members failed and why,
-          // then ask whether to continue to the remaining groups or stop.
-          if (finalFriendsFailed) {
-            const remaining = total - (i + 1);
-            const detailLines = finalFriendFailDetails.length > 0
-              ? finalFriendFailDetails.map(d => `  • ${d}`).join("\n")
-              : "  • WhatsApp rejected the participants";
-            const pauseText =
-              `⚠️ <b>Members Not Added — "${esc(groupName)}"</b>\n\n` +
-              `❌ <b>${finalFriendsAdded}/${gs.friendNumbers.length} member(s) added</b>\n\n` +
-              `<b>Reason(s):</b>\n${detailLines}\n\n` +
-              (remaining > 0
-                ? `<i>${remaining} group(s) still remaining. Continue or stop?</i>`
-                : `<i>This was the last group.</i>`);
-            try {
-              const pauseMsg = await bot.api.sendMessage(chatId, pauseText, {
-                parse_mode: "HTML",
-                reply_markup: remaining > 0
-                  ? new InlineKeyboard()
-                    .text("▶️ Continue", `cg_fr_cont:${numericUserId}`)
-                    .text("⛔ Stop", `cg_fr_stop:${numericUserId}`)
-                  : new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
-              });
-              if (remaining > 0) {
-                const decision = await new Promise<"continue" | "stop">((resolve) => {
-                  cgFriendsPause.set(numericUserId, resolve);
-                  // Auto-continue after 90 seconds if user doesn't respond
-                  setTimeout(() => {
-                    if (cgFriendsPause.has(numericUserId)) {
-                      cgFriendsPause.delete(numericUserId);
-                      resolve("continue");
-                    }
-                  }, 90_000);
-                });
-                try { await bot.api.deleteMessage(chatId, pauseMsg.message_id); } catch {}
-                if (decision === "stop") {
-                  for (let j = i + 1; j < total; j++) {
-                    results.push({ name: gs.finalNames[j], link: null, error: "Stopped by user" });
-                  }
-                  // Update result before breaking
-                  const existingIdx2 = results.findIndex(r => r.name === groupName && r.link === result.inviteCode);
-                  if (existingIdx2 >= 0) {
-                    results[existingIdx2].friendsAdded = finalFriendsAdded;
-                    results[existingIdx2].friendsFailed = true;
-                    results[existingIdx2].friendFailDetails = finalFriendFailDetails;
-                    results[existingIdx2].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
-                  }
-                  i = total; // exit outer loop
-                  break;
-                }
-              }
-            } catch { /* non-fatal — loop continues */ }
+          const existingIdx = results.findIndex(r => r.name === capturedGroupName && r.link === capturedInviteCode);
+          if (existingIdx >= 0) {
+            results[existingIdx].friendsAdded = gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined;
+            results[existingIdx].friendsFailed = finalFriendsFailed;
+            results[existingIdx].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
+            results[existingIdx].friendFailDetails = finalFriendsFailed ? finalFriendFailDetails : undefined;
           }
-        }
+        };
 
-        // Update the result entry with final friends data
-        const existingIdx = results.findIndex(r => r.name === groupName && r.link === result.inviteCode);
-        if (existingIdx >= 0) {
-          results[existingIdx].friendsAdded = gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined;
-          results[existingIdx].friendsFailed = finalFriendsFailed;
-          results[existingIdx].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
-          results[existingIdx].friendFailDetails = finalFriendsFailed ? finalFriendFailDetails : undefined;
+        if (speed === "fast") {
+          void applyGroupConfig();
+        } else {
+          await applyGroupConfig();
         }
       } else {
         results.push({ name: groupName, link: null, error: "Failed to create" });
@@ -6003,7 +6055,28 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
       break;
     }
 
-    if (i < total - 1) await new Promise((r) => setTimeout(r, 4000));
+    // ── Inter-group delay based on speed ──────────────────────────────────────
+    if (i < total - 1 && !userStates.get(numericUserId)?.groupCreationCancel) {
+      if (speed === "slow") {
+        // 1 minute between groups — show live countdown
+        const linesNow = results.map((r) => r.link ? `✅ ${esc(r.name)}` : `❌ ${esc(r.name)}`).join("\n");
+        for (let sec = 55; sec >= 0; sec -= 5) {
+          if (userStates.get(numericUserId)?.groupCreationCancel) break;
+          await new Promise((r) => setTimeout(r, 5000));
+          const stN = userStates.get(numericUserId);
+          if (stN?.groupCreationCancel || stN?.groupCreationCancelPending) break;
+          try {
+            await bot.api.editMessageText(chatId, msgId,
+              `⏳ <b>Creating Groups: ${i + 1}/${total}</b>\n\n${linesNow}\n\n🐢 <b>Slow mode</b> — next group in ${Math.max(0, sec)}s...`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Creation", "group_cancel_creation") }
+            );
+          } catch {}
+        }
+      } else if (speed !== "fast") {
+        await new Promise((r) => setTimeout(r, 4000)); // NORMAL: 4s between groups
+      }
+      // FAST: no delay between groups
+    }
   }
 
   // Memory: drop all DP buffers as soon as the whole creation flow is done.
@@ -9153,7 +9226,9 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
         );
       } catch {}
 
-      await Promise.allSettled(
+      // Fire deletes in background — do NOT await. WhatsApp processes them
+      // server-side; waiting adds unnecessary latency before showing results.
+      void Promise.allSettled(
         toDelete.map(async (g) => {
           try { await deleteGroupChat(String(userId), g.id); } catch {}
         })
