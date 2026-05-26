@@ -1365,23 +1365,24 @@ export async function createWhatsAppGroup(
     throw new Error(reason);
   }
 
-  try {
-    const inviteCode = await session.socket.groupInviteCode(groupId);
-    return {
-      id: groupId,
-      inviteCode: `https://chat.whatsapp.com/${inviteCode}`,
-      addedParticipants: addedAtCreation,
-      participantsFailed,
-    };
-  } catch (err: any) {
-    console.error(`[WA][${userId}] groupInviteCode error:`, err?.message);
-    return {
-      id: groupId,
-      inviteCode: "",
-      addedParticipants: addedAtCreation,
-      participantsFailed,
-    };
+  // Retry groupInviteCode up to 4 times — the group IS created at this point,
+  // a transient WA socket hiccup should not cause the bot to show ❌.
+  let inviteCode = "";
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const code = await session.socket.groupInviteCode(groupId);
+      if (code) { inviteCode = `https://chat.whatsapp.com/${code}`; break; }
+    } catch (err: any) {
+      console.error(`[WA][${userId}] groupInviteCode attempt ${attempt}/4 error:`, err?.message);
+      if (attempt < 4) await new Promise(r => setTimeout(r, attempt * 1500));
+    }
   }
+  return {
+    id: groupId,
+    inviteCode,
+    addedParticipants: addedAtCreation,
+    participantsFailed,
+  };
 }
 
 export interface GroupPermissions {
@@ -1618,6 +1619,28 @@ export async function joinGroupWithLink(
         msg.includes("revoked")
       ) {
         return { success: false, error: "Link invalid or expired" };
+      }
+
+      // account_reachout_restricted: WhatsApp bot-detection; user can join manually
+      // but automated join is throttled. Retry with a longer backoff — it usually
+      // clears within 60-90 seconds.
+      const isReachoutRestricted = msg.includes("account_reachout_restricted") || msg.includes("reachout_restricted");
+      if (isReachoutRestricted && attempt < MAX_RETRIES) {
+        const delay = Math.max(BACKOFF[attempt - 1] ?? 60000, 30000);
+        console.log(`[WA][${userId}] account_reachout_restricted — waiting ${delay}ms before retry ${attempt + 1}/${MAX_RETRIES}...`);
+        await new Promise<void>((r) => {
+          const t = setTimeout(r, delay);
+          signal?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+        });
+        if (signal?.aborted) return { success: false, error: "Cancelled" };
+        const freshSession = useSession(userId);
+        if (!freshSession?.socket || !freshSession.connected) {
+          return { success: false, error: "WhatsApp not connected" };
+        }
+        continue;
+      }
+      if (isReachoutRestricted) {
+        return { success: false, error: "account_reachout_restricted" };
       }
 
       // Transient / server-side throttling — retry silently, never surface to user
