@@ -6072,10 +6072,12 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
             );
           } catch {}
         }
-      } else if (speed !== "fast") {
+      } else if (speed === "fast") {
+        // Small breathing room so WhatsApp doesn't rate-limit back-to-back creates
+        await new Promise((r) => setTimeout(r, 800));
+      } else {
         await new Promise((r) => setTimeout(r, 4000)); // NORMAL: 4s between groups
       }
-      // FAST: no delay between groups
     }
   }
 
