@@ -9093,8 +9093,8 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     // flooded. Failed groups get one automatic retry after a 3 s pause —
     // this resolves transient "connection busy" failures that cause the
     // tail of a large list to fail while the first 20 succeed.
-    const LV_CONCURRENT = 5;
-    const LV_BATCH_DELAY_MS = 1500;   // wait between batches
+    const LV_CONCURRENT = 15;
+    const LV_BATCH_DELAY_MS = 1800;   // wait between batches
     const LV_RETRY_DELAY_MS = 3000;   // wait before retrying a failed group
     const leftIds = new Set<string>();
 
@@ -9141,39 +9141,23 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       }
     }
 
-    // ── Phase 2: Delete ALL successfully left groups in batches of 5 ─────────
+    // ── Phase 2: Delete ALL successfully left groups at once ──────────────────
+    // WhatsApp does not rate-limit chatModify(delete) calls, so we fire all
+    // deletes simultaneously in a single Promise.allSettled — no batching needed.
     if (!cancelled && leftIds.size > 0) {
       const toDelete = groups.filter(g => leftIds.has(g.id));
       try {
         await bot.api.editMessageText(chatId, msgId,
-          `⏳ <b>Phase 2/2 — Deleting chats: 0/${toDelete.length}</b>\n\n🗑️ Removing group chats from account...`,
+          `⏳ <b>Phase 2/2 — Deleting ${toDelete.length} chats...</b>\n\n🗑️ Removing all group chats at once...`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
 
-      for (let batchStart = 0; batchStart < toDelete.length; batchStart += LV_CONCURRENT) {
-        if (leaveJobCancel.has(userId)) { cancelled = true; break; }
-
-        const batch = toDelete.slice(batchStart, batchStart + LV_CONCURRENT);
-        await Promise.allSettled(
-          batch.map(async (g) => {
-            try { await deleteGroupChat(String(userId), g.id); } catch {}
-          })
-        );
-
-        const done = Math.min(batchStart + LV_CONCURRENT, toDelete.length);
-        try {
-          await bot.api.editMessageText(chatId, msgId,
-            `⏳ <b>Phase 2/2 — Deleting: ${done}/${toDelete.length}</b>\n\n🗑️ Removing group chats...`,
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
-          );
-        } catch {}
-
-        // Rate-limit guard between delete batches
-        if (batchStart + LV_CONCURRENT < toDelete.length && !leaveJobCancel.has(userId)) {
-          await new Promise((r) => setTimeout(r, LV_BATCH_DELAY_MS));
-        }
-      }
+      await Promise.allSettled(
+        toDelete.map(async (g) => {
+          try { await deleteGroupChat(String(userId), g.id); } catch {}
+        })
+      );
     }
 
     leaveJobCancel.delete(userId);
