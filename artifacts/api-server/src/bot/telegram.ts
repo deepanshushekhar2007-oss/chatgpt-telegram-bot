@@ -9163,11 +9163,11 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     let success = 0, failed = 0, cancelled = false;
 
     // ── Leave ALL groups in batches concurrently — delete each immediately after leaving ──
-    // Concurrency reduced to 5 to avoid WhatsApp rate-limiting on large lists.
-    // Each group gets up to 3 retries with increasing backoff (2s → 4s → 6s).
+    // 10 groups at a time — fast enough to be quick, safe enough to avoid WA throttle.
+    // Each group gets up to 3 retries with increasing backoff (1.5s → 3s → 5s).
     // Delete is fired immediately after each successful leave — no separate phase.
-    const LV_CONCURRENT = 5;
-    const LV_BATCH_DELAY_MS = 1200;   // wait between batches
+    const LV_CONCURRENT = 10;
+    const LV_BATCH_DELAY_MS = 800;    // wait between batches
 
     for (let batchStart = 0; batchStart < groups.length; batchStart += LV_CONCURRENT) {
       if (leaveJobCancel.has(userId)) { cancelled = true; break; }
@@ -9176,7 +9176,7 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       const batchResults = await Promise.allSettled(
         batch.map(async (g) => {
           let ok = false;
-          const retryDelays = [2000, 4000, 6000];
+          const retryDelays = [1500, 3000, 5000];
           for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
             ok = await leaveGroup(String(userId), g.id);
             if (ok) break;
