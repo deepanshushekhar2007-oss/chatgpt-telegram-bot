@@ -1211,6 +1211,15 @@ interface UserState {
     selectedIndices: Set<number>;
     page: number;
   };
+  unbanData?: {
+    allGroups: Array<{ id: string; subject: string }>;
+    patterns: SimilarGroup[];
+    selectedIndices: Set<number>;
+    page: number;
+    selectedGroups?: Array<{ id: string; subject: string }>;
+    reviewType?: "custom" | "recommended";
+    customReview?: string;
+  };
   removeData?: {
     allGroups: Array<{ id: string; subject: string }>;
     selectedIndices: Set<number>;
@@ -1956,10 +1965,10 @@ async function runJoinBackground(userId: number): Promise<void> {
       let res: { success: boolean; groupName?: string; error?: string };
       try {
         const abort = new AbortController();
-        // 45 s outer cap (inner cap is 15 s per socket call, so this allows
-        // up to 3 socket attempts before the link is marked as timed out).
+        // 5 min outer cap — allows the full internal retry backoff schedule
+        // (8s, 15s, 25s, 35s, 45s...) to complete before giving up.
         const timeout = new Promise<{ success: false; error: string }>((r) =>
-          setTimeout(() => { abort.abort(); r({ success: false, error: "Timeout" }); }, 45000)
+          setTimeout(() => { abort.abort(); r({ success: false, error: "Timeout" }); }, 300000)
         );
         res = await Promise.race([joinGroupWithLink(String(userId), link, abort.signal), timeout]);
       } catch (e: any) {
@@ -2604,7 +2613,7 @@ function mainMenu(userId?: number, hasSwitchSessions = false): InlineKeyboard {
     .text("📋 Get Pending List", "pending_list").text("➕ Add Members", "add_members").row()
     .text("⚙️ Edit Settings", "edit_settings").text("🏷️ Change Name", "change_group_name").row()
     .text("🔗 Reset Link", "reset_link").text("👤 Demote Admin", "demote_admin").row()
-    .text("🛡️ Auto Accepter", "auto_accepter").row();
+    .text("🛡️ Auto Accepter", "auto_accepter").text("🔓 Unban Groups", "unban_groups").row();
   if (userId !== undefined && canUserSeeAutoChat(userId)) {
     kb.text("🤖 Auto Chat", "auto_chat_menu").row();
   }
@@ -3220,8 +3229,9 @@ bot.command("help", async (ctx) => {
       ? `🤖 16. Auto Chat ⭐ — 2nd WhatsApp se friends/groups ko auto messages bhejo\n\n`
       : `🤖 16. Auto Chat ⭐ Paid — Buy karne ke liye ${OWNER_USERNAME} ko msg karo\n\n`) +
     `🛡️ 17. Auto Accepter — Selected groups mein pending join requests auto-accept (15min–2hr)\n\n` +
-    `📁 18. File Tools — VCF Editor, Splitter, Merge, Number→VCF (FREE · /file)\n\n` +
-    `⚙️ 19. Manage Sessions — Manage your WhatsApp connections:\n` +
+    `🔓 18. Unban Groups — Banned groups select karo → bot WhatsApp Support ko review message bhejta hai 1-by-1\n\n` +
+    `📁 19. File Tools — VCF Editor, Splitter, Merge, Number→VCF (FREE · /file)\n\n` +
+    `⚙️ 20. Manage Sessions — Manage your WhatsApp connections:\n` +
     `   🔀 Switch WhatsApp: Add unlimited WhatsApp numbers and switch between them anytime.\n` +
     `   🔄 Session Refresh: Reload latest groups, admin status, contacts without re-pairing.\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -8482,6 +8492,382 @@ bot.callbackQuery("ar_stop_job", async (ctx) => {
   }
   await stopAutoAccepterJob(userId, "cancelled");
 });
+
+// ─── Unban Groups ─────────────────────────────────────────────────────────────
+
+const UB_PAGE_SIZE = 6;
+const unbanJobCancels = new Set<number>();
+const WA_SUPPORT_JID = "0@s.whatsapp.net";
+
+function buildRecommendedReview(groupName: string): string {
+  return (
+    `Hi WhatsApp Support,\n\n` +
+    `I am writing to request a review for my group "${groupName}" which currently shows "This group is no longer available."\n\n` +
+    `I believe this restriction was applied in error. Our group strictly follows WhatsApp's Terms of Service and Community Guidelines and is used exclusively for legitimate communication among its members.\n\n` +
+    `I kindly request a thorough review and removal of this restriction so our group can resume normal operations.\n\n` +
+    `Group Name: ${groupName}\n\n` +
+    `Thank you for your time and assistance.`
+  );
+}
+
+function buildUnbanGroupKeyboard(state: UserState): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const d = state.unbanData!;
+  const page = d.page || 0;
+  const start = page * UB_PAGE_SIZE;
+  const slice = d.allGroups.slice(start, start + UB_PAGE_SIZE);
+  const totalPages = Math.max(1, Math.ceil(d.allGroups.length / UB_PAGE_SIZE));
+
+  for (let i = 0; i < slice.length; i++) {
+    const idx = start + i;
+    const label = d.selectedIndices.has(idx) ? `✅ ${slice[i].subject}` : `☐ ${slice[i].subject}`;
+    kb.text(label, `ub_tog_${idx}`).row();
+  }
+
+  const prev = page > 0 ? "⬅️ Prev" : " ";
+  const next = page < totalPages - 1 ? "Next ➡️" : " ";
+  kb.text(prev, "ub_prev").text(`📄 ${page + 1}/${totalPages}`, "ub_page_info").text(next, "ub_next").row();
+
+  if (d.allGroups.length > 1) {
+    kb.text("☑️ Select All", "ub_select_all").text("🧹 Clear All", "ub_clear_all").row();
+  }
+  if (d.selectedIndices.size > 0) {
+    kb.text(`▶️ Continue (${d.selectedIndices.size} selected)`, "ub_proceed").row();
+  }
+  kb.text("🔙 Back", "unban_groups").text("🏠 Menu", "main_menu");
+  return kb;
+}
+
+bot.callbackQuery("unban_groups", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  if (!(await checkAccessMiddleware(ctx))) return;
+  if (!isConnected(String(userId))) {
+    await ctx.editMessageText(
+      `❌ <b>WhatsApp not connected!</b>\n\nPlease connect WhatsApp first.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📱 Connect", "connect_wa").text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
+
+  await ctx.editMessageText("🔍 <b>Scanning your WhatsApp groups...</b>\n\n⌛ Please wait...", { parse_mode: "HTML" });
+
+  const groups = await getAllGroups(String(userId));
+  if (!groups.length) {
+    await ctx.editMessageText(
+      "📭 No groups found.",
+      { reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu") }
+    );
+    return;
+  }
+
+  const allGroupsSimple = groups
+    .map(g => ({ id: g.id, subject: g.subject }))
+    .sort((a, b) => a.subject.localeCompare(b.subject, undefined, { numeric: true, sensitivity: "base" }));
+
+  const patterns = detectSimilarGroups(allGroupsSimple);
+
+  userStates.set(userId, {
+    step: "ub_menu",
+    unbanData: { patterns, allGroups: allGroupsSimple, selectedIndices: new Set(), page: 0 },
+  });
+
+  const kb = new InlineKeyboard();
+  if (patterns.length > 0) kb.text("🔍 Similar Groups", "ub_similar").text("📋 All Groups", "ub_show_all").row();
+  else kb.text("📋 All Groups", "ub_show_all").row();
+  kb.text("🏠 Menu", "main_menu");
+
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups</b>\n\n` +
+    `📱 <b>Total Groups: ${allGroupsSimple.length}</b>\n` +
+    (patterns.length > 0 ? `🔍 <b>Similar Patterns: ${patterns.length}</b>\n` : ``) +
+    `\n📌 Select the groups you want to send an unban review for.\n\n` +
+    `<i>Bot will send a review message to WhatsApp Support for each selected group, one by one.</i>`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery("ub_similar", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  const { patterns } = state.unbanData;
+  if (!patterns.length) {
+    try {
+      await ctx.editMessageText("⚠️ No similar patterns found.", {
+        reply_markup: new InlineKeyboard().text("📋 All Groups", "ub_show_all").text("🏠 Menu", "main_menu"),
+      });
+    } catch {}
+    return;
+  }
+  const kb = new InlineKeyboard();
+  patterns.forEach((p, i) => kb.text(p.base, `ub_pat_${i}`).row());
+  kb.text("📋 All Groups", "ub_show_all").text("🔙 Back", "unban_groups");
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — Similar Patterns</b>\n\nSelect a pattern:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^ub_pat_(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  const idx = Number(ctx.match![1]);
+  const pattern = state.unbanData.patterns[idx];
+  if (!pattern) return;
+  const patternIds = new Set(pattern.groupIds);
+  const pool = state.unbanData.allGroups.filter(g => patternIds.has(g.id));
+  const selected = new Set<number>();
+  for (const g of pool) {
+    const i = state.unbanData.allGroups.indexOf(g);
+    if (i >= 0) selected.add(i);
+  }
+  state.unbanData.selectedIndices = selected;
+  state.unbanData.page = 0;
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — ${esc(pattern.base)}</b>\n\n<b>${pool.length} group(s) pre-selected.</b>\n\nAdjust or confirm selection:`,
+    { parse_mode: "HTML", reply_markup: buildUnbanGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery("ub_show_all", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  state.unbanData.page = 0;
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — Select Groups</b>\n\n<i>Select the banned groups to send a review for:</i>`,
+    { parse_mode: "HTML", reply_markup: buildUnbanGroupKeyboard(state) }
+  );
+});
+
+bot.callbackQuery(/^ub_tog_(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  const idx = Number(ctx.match![1]);
+  if (state.unbanData.selectedIndices.has(idx)) state.unbanData.selectedIndices.delete(idx);
+  else state.unbanData.selectedIndices.add(idx);
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildUnbanGroupKeyboard(state) }); } catch {}
+});
+
+bot.callbackQuery("ub_select_all", async (ctx) => {
+  ctx.answerCallbackQuery({ text: "All groups selected!" });
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  state.unbanData.selectedIndices = new Set(state.unbanData.allGroups.map((_, i) => i));
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildUnbanGroupKeyboard(state) }); } catch {}
+});
+
+bot.callbackQuery("ub_clear_all", async (ctx) => {
+  ctx.answerCallbackQuery({ text: "Selection cleared!" });
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  state.unbanData.selectedIndices = new Set();
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildUnbanGroupKeyboard(state) }); } catch {}
+});
+
+bot.callbackQuery("ub_prev", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData || state.unbanData.page <= 0) return;
+  state.unbanData.page--;
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildUnbanGroupKeyboard(state) }); } catch {}
+});
+
+bot.callbackQuery("ub_next", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData) return;
+  const totalPages = Math.ceil(state.unbanData.allGroups.length / UB_PAGE_SIZE);
+  if (state.unbanData.page >= totalPages - 1) return;
+  state.unbanData.page++;
+  try { await ctx.editMessageReplyMarkup({ reply_markup: buildUnbanGroupKeyboard(state) }); } catch {}
+});
+
+bot.callbackQuery("ub_page_info", async (ctx) => { ctx.answerCallbackQuery(); });
+
+bot.callbackQuery("ub_proceed", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData || !state.unbanData.selectedIndices.size) return;
+
+  const selected = Array.from(state.unbanData.selectedIndices)
+    .map(i => state.unbanData!.allGroups[i])
+    .filter(Boolean);
+  state.unbanData.selectedGroups = selected;
+
+  const preview = selected.slice(0, 10).map(g => `• ${esc(g.subject)}`).join("\n");
+  const more = selected.length > 10 ? `\n... +${selected.length - 10} more` : "";
+
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — Choose Review Type</b>\n\n` +
+    `<b>${selected.length} group(s) selected:</b>\n${preview}${more}\n\n` +
+    `How do you want to send the review to WhatsApp Support?`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✍️ Write My Own Review", "ub_review_custom").row()
+        .text("🤖 Recommended Review", "ub_review_recommended").row()
+        .text("🔙 Back", "ub_show_all").text("🏠 Menu", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("ub_review_recommended", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData?.selectedGroups?.length) return;
+  state.unbanData.reviewType = "recommended";
+  const total = state.unbanData.selectedGroups.length;
+  const sampleReview = buildRecommendedReview(state.unbanData.selectedGroups[0].subject);
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — Confirm</b>\n\n` +
+    `📤 <b>${total} review(s)</b> will be sent to WhatsApp Support.\n\n` +
+    `<b>Sample review (for "${esc(state.unbanData.selectedGroups[0].subject)}"):</b>\n` +
+    `<blockquote>${esc(sampleReview)}</blockquote>\n\n` +
+    `<i>Each group gets its own personalised review with its name.</i>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✅ Send Reviews", "ub_confirm").row()
+        .text("🔙 Back", "ub_proceed").text("🏠 Menu", "main_menu"),
+    }
+  );
+});
+
+bot.callbackQuery("ub_review_custom", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData?.selectedGroups?.length) return;
+  state.step = "ub_awaiting_review";
+  await ctx.editMessageText(
+    `🔓 <b>Unban Groups — Write Your Review</b>\n\n` +
+    `✍️ <b>Type your review message</b> and send it below.\n\n` +
+    `This message will be sent to WhatsApp Support for each selected group. You can mention the group name manually in your message.\n\n` +
+    `<i>Tip: Be polite and explain that your group follows WhatsApp's guidelines.</i>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("❌ Cancel", "unban_groups"),
+    }
+  );
+});
+
+bot.callbackQuery("ub_confirm", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const state = userStates.get(userId);
+  if (!state?.unbanData?.selectedGroups?.length || !state.unbanData.reviewType) return;
+  const chatId = ctx.callbackQuery.message!.chat.id;
+  const msgId = ctx.callbackQuery.message!.message_id;
+  const groups = state.unbanData.selectedGroups;
+  const reviewType = state.unbanData.reviewType;
+  const customReview = state.unbanData.customReview;
+  userStates.delete(userId);
+  unbanJobCancels.delete(userId);
+
+  try {
+    await bot.api.editMessageText(
+      chatId, msgId,
+      `🔓 <b>Sending Unban Reviews...</b>\n\n⏳ 0/${groups.length} sent\n\n<i>Do not close Telegram.</i>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ub_cancel_job") }
+    );
+  } catch {}
+
+  void runUnbanBackground(userId, groups, reviewType, customReview, chatId, msgId);
+});
+
+bot.callbackQuery("ub_cancel_job", async (ctx) => {
+  ctx.answerCallbackQuery({ text: "Cancelling..." });
+  unbanJobCancels.add(ctx.from.id);
+});
+
+async function runUnbanBackground(
+  userId: number,
+  groups: Array<{ id: string; subject: string }>,
+  reviewType: "custom" | "recommended",
+  customReview: string | undefined,
+  chatId: number,
+  msgId: number
+): Promise<void> {
+  const lines: string[] = [];
+  let sent = 0, failed = 0, cancelled = false;
+
+  for (let i = 0; i < groups.length; i++) {
+    if (unbanJobCancels.has(userId)) { cancelled = true; break; }
+
+    const g = groups[i];
+    const message = reviewType === "recommended"
+      ? buildRecommendedReview(g.subject)
+      : (customReview || "I request a review for my group which has been restricted.");
+
+    try {
+      const ok = await sendGroupMessage(String(userId), WA_SUPPORT_JID, message);
+      if (ok) {
+        lines.push(`✅ ${esc(g.subject)}`);
+        sent++;
+      } else {
+        lines.push(`❌ ${esc(g.subject)} — Failed`);
+        failed++;
+      }
+    } catch (err: any) {
+      lines.push(`❌ ${esc(g.subject)} — ${esc(err?.message || "Error")}`);
+      failed++;
+    }
+
+    try {
+      await bot.api.editMessageText(
+        chatId, msgId,
+        `🔓 <b>Sending Unban Reviews: ${i + 1}/${groups.length}</b>\n\n${lines.slice(-15).join("\n")}`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "ub_cancel_job") }
+      );
+    } catch {}
+
+    if (i < groups.length - 1 && !unbanJobCancels.has(userId)) {
+      await new Promise<void>(r => setTimeout(r, 3000));
+    }
+  }
+
+  unbanJobCancels.delete(userId);
+  schedulePostFeatureGC();
+
+  const status = cancelled
+    ? `⛔ <b>Cancelled!</b>  ✅ ${sent} sent  |  ❌ ${failed} failed`
+    : `✅ <b>All done!</b>  ✅ ${sent} sent  |  ❌ ${failed} failed`;
+
+  const body = `🔓 <b>Unban Groups — Result</b>\n\n${lines.join("\n")}\n\n${status}`;
+  const chunks = splitMessage(body, 4000);
+  try {
+    await bot.api.editMessageText(chatId, msgId, chunks[0], {
+      parse_mode: "HTML",
+      reply_markup: chunks.length === 1
+        ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+        : undefined,
+    });
+  } catch {}
+  for (let i = 1; i < chunks.length; i++) {
+    try {
+      await bot.api.sendMessage(chatId, chunks[i], {
+        parse_mode: "HTML",
+        reply_markup: i === chunks.length - 1
+          ? new InlineKeyboard().text("🏠 Main Menu", "main_menu")
+          : undefined,
+      });
+    } catch {}
+  }
+}
 
 // ─── Steal Group ─────────────────────────────────────────────────────────────
 
@@ -17501,6 +17887,27 @@ bot.on("message:text", async (ctx, next) => {
 
   // ── By-link accumulation steps — must be handled before other state checks ──
   if (state) {
+    if (state.step === "ub_awaiting_review") {
+      if (!state.unbanData?.selectedGroups?.length) return;
+      state.unbanData.customReview = text;
+      state.unbanData.reviewType = "custom";
+      const total = state.unbanData.selectedGroups.length;
+      const preview = state.unbanData.selectedGroups.slice(0, 5).map(g => `• ${esc(g.subject)}`).join("\n");
+      const more = total > 5 ? `\n... +${total - 5} more` : "";
+      await ctx.reply(
+        `✅ <b>Review saved!</b>\n\n` +
+        `<b>Your message:</b>\n<blockquote>${esc(text)}</blockquote>\n\n` +
+        `📤 This will be sent to WhatsApp Support for <b>${total} group(s)</b>:\n${preview}${more}`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("✅ Send Reviews", "ub_confirm").row()
+            .text("✍️ Rewrite", "ub_review_custom").text("🏠 Menu", "main_menu"),
+        }
+      );
+      return;
+    }
+
     if (state.step === "lv_enter_links_bl") {
       const links = extractLinksFromText(text);
       if (!links.length) return;
