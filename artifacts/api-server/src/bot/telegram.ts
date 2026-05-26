@@ -2008,6 +2008,7 @@ async function runJoinBackground(userId: number): Promise<void> {
   } finally {
     session.running = false;
     activeBackgroundUsers.delete(userId);
+    schedulePostFeatureGC();
   }
 }
 
@@ -4921,14 +4922,19 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
     waTotal = sweep.total;
   } catch {}
 
-  // 9. Force GC multiple times. V8 collects in regions; one pass often
-  //    leaves freshly-orphaned objects un-reclaimed. 3 passes with a tiny
-  //    yield in between gives the collector time to compact.
+  // 9. Force GC with staged delays.
+  //    Pass 1 → 200ms → Pass 2 → 500ms → Pass 3 → 1500ms → measure.
+  //    The 1500ms final wait is critical: glibc malloc batches its munmap()
+  //    calls and may not return freed pages to the OS until ~1s after gc().
+  //    Without this wait the RSS reading is taken before the OS page-table
+  //    update and always shows "0 MB freed" even when the heap shrank by 50MB.
   if (typeof (global as any).gc === "function") {
-    for (let i = 0; i < 3; i++) {
-      (global as any).gc();
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    try { (global as any).gc(); } catch {}
+    await new Promise((r) => setTimeout(r, 200));
+    try { (global as any).gc(); } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+    try { (global as any).gc(); } catch {}
+    await new Promise((r) => setTimeout(r, 1500)); // wait for OS page reclaim
   }
 
   const memAfter = process.memoryUsage();
@@ -4952,6 +4958,32 @@ export async function runMemoryPurge(reason: string): Promise<MemoryPurgeResult>
     helpPagesCleared, qrCleared, userStatesCleared, activityCleared,
     cancelCleared, newSessionCleared, waEvicted, waTotal,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// schedulePostFeatureGC — fire-and-forget lightweight GC trigger.
+//
+// Call this at the END of any heavy background job (create groups, join groups,
+// leave groups, remove friends, approve members, etc.) so the objects that were
+// alive during the job are reclaimed promptly rather than waiting up to 15 min
+// for the routine cleanup interval.
+//
+// Fires 2 s after the call so all local variables in the calling function have
+// gone out of scope before the collector runs. Three passes with staged delays
+// mirror the routine-cleanup pattern and give glibc time to return pages to the
+// OS (which is what makes RSS visibly drop between features).
+// ─────────────────────────────────────────────────────────────────────────────
+function schedulePostFeatureGC(): void {
+  if (typeof (global as any).gc !== "function") return;
+  setTimeout(() => {
+    try { (global as any).gc(); } catch {}
+    setTimeout(() => {
+      try { (global as any).gc(); } catch {}
+      setTimeout(() => {
+        try { (global as any).gc(); } catch {}
+      }, 500);
+    }, 200);
+  }, 2000);
 }
 
 // /cleanram — admin-only manual trigger for runMemoryPurge.
@@ -5864,6 +5896,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   gs.dpBuffers = [];
 
   userStates.delete(numericUserId);
+  schedulePostFeatureGC();
 
   // Clean up the MongoDB-persisted pending state — creation is complete.
   void deletePendingGroupCreation(numericUserId).catch(() => {});
@@ -8998,6 +9031,7 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     }
 
     leaveJobCancel.delete(userId);
+    schedulePostFeatureGC();
     const summary = cancelled
       ? `\n\n⛔ <b>Cancelled! ✅ ${success} left | ❌ ${failed} failed</b>`
       : `\n\n📊 <b>Done! ✅ ${success} left | ❌ ${failed} failed</b>`;
@@ -9617,6 +9651,7 @@ async function removeFriendBackground(
   removeFriendCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
   activeBackgroundUsers.delete(userIdNum);
+  schedulePostFeatureGC();
 
   if (wasCancelled) fullResult += `⛔ <b>Stopped by user.</b>\n\n`;
   fullResult += `━━━━━━━━━━━━━━━━━━\n✅ <b>Done!</b>`;
@@ -10766,6 +10801,7 @@ async function approveOneByOneBackground(
   approvalCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
   activeBackgroundUsers.delete(userIdNum);
+  schedulePostFeatureGC();
 
   if (cancelled) {
     fullResult = `🛑 <b>Approve 1 by 1 — Cancelled</b>\n\n`;
@@ -10905,6 +10941,7 @@ async function approveTogetherBackground(
   approvalCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
   activeBackgroundUsers.delete(userIdNum);
+  schedulePostFeatureGC();
 
   if (cancelled) {
     fullResult = `🛑 <b>Approve Together — Cancelled</b>\n\n`;
@@ -11006,6 +11043,7 @@ async function makeAdminBackground(
 
   makeAdminCancelRequests.delete(userIdNum);
   cancelDialogActiveFor.delete(userIdNum);
+  schedulePostFeatureGC();
 
   fullResult += lines.join("\n\n");
   if (wasCancelled) {
