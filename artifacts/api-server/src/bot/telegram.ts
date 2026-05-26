@@ -5884,7 +5884,9 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
         const cancelNow = userStates.get(numericUserId)?.groupCreationCancel;
         results.push({
           name: groupName,
-          link: result.inviteCode,
+          // Group was created even if invite link fetch failed — use id as fallback
+          // so the caller shows ✅ instead of ❌ for a group that actually exists.
+          link: result.inviteCode || result.id,
           friendsAdded: undefined,
           friendsFailed: false,
         });
