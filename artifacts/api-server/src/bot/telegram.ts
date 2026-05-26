@@ -9087,10 +9087,15 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
     const lines: string[] = [];
     let success = 0, failed = 0, cancelled = false;
 
-    // ── Phase 1: Leave ALL groups in batches of 20 concurrently ──────────────
-    // We complete ALL leaves first, then do ALL deletes separately so both
-    // operations run in true batches of 20 (not interleaved per-group).
-    const LV_CONCURRENT = 20;
+    // ── Phase 1: Leave ALL groups in batches of 5 concurrently ──────────────
+    // Batch size reduced from 20 → 5 to avoid WhatsApp rate-limiting.
+    // A 1.5 s delay is inserted between batches so the WA socket is not
+    // flooded. Failed groups get one automatic retry after a 3 s pause —
+    // this resolves transient "connection busy" failures that cause the
+    // tail of a large list to fail while the first 20 succeed.
+    const LV_CONCURRENT = 5;
+    const LV_BATCH_DELAY_MS = 1500;   // wait between batches
+    const LV_RETRY_DELAY_MS = 3000;   // wait before retrying a failed group
     const leftIds = new Set<string>();
 
     for (let batchStart = 0; batchStart < groups.length; batchStart += LV_CONCURRENT) {
@@ -9099,7 +9104,12 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
       const batch = groups.slice(batchStart, batchStart + LV_CONCURRENT);
       const batchResults = await Promise.allSettled(
         batch.map(async (g) => {
-          const ok = await leaveGroup(String(userId), g.id);
+          let ok = await leaveGroup(String(userId), g.id);
+          // Retry once on failure after a short delay
+          if (!ok) {
+            await new Promise((r) => setTimeout(r, LV_RETRY_DELAY_MS));
+            ok = await leaveGroup(String(userId), g.id);
+          }
           return { g, ok };
         })
       );
@@ -9124,9 +9134,14 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
         );
       } catch {}
+
+      // Rate-limit guard: pause between batches (skip after last batch)
+      if (batchStart + LV_CONCURRENT < groups.length && !leaveJobCancel.has(userId)) {
+        await new Promise((r) => setTimeout(r, LV_BATCH_DELAY_MS));
+      }
     }
 
-    // ── Phase 2: Delete ALL successfully left groups in batches of 20 ─────────
+    // ── Phase 2: Delete ALL successfully left groups in batches of 5 ─────────
     if (!cancelled && leftIds.size > 0) {
       const toDelete = groups.filter(g => leftIds.has(g.id));
       try {
@@ -9153,6 +9168,11 @@ bot.callbackQuery("lv_confirm", async (ctx) => {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⛔ Cancel", "lv_cancel") }
           );
         } catch {}
+
+        // Rate-limit guard between delete batches
+        if (batchStart + LV_CONCURRENT < toDelete.length && !leaveJobCancel.has(userId)) {
+          await new Promise((r) => setTimeout(r, LV_BATCH_DELAY_MS));
+        }
       }
     }
 
