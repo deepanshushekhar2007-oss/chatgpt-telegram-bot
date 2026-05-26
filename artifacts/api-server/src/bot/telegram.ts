@@ -563,15 +563,33 @@ bot.use(async (ctx, next) => {
           clearInterval(rcTicker);
 
           if (!connected) {
-            const failText =
-              `❌ <b>WhatsApp disconnected</b>\n\n` +
-              `${renderProgressBar(0)}\n\n` +
-              `Your WhatsApp session has been disconnected.\n\n` +
-              `Please connect a fresh session from the menu:\n` +
-              `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`;
-            const failKb = new InlineKeyboard()
-              .text("📱 Connect WhatsApp", "connect_wa").row()
-              .text("🏠 Main Menu", "main_menu");
+            // Check if the user has saved Switch WA accounts they can switch to
+            const swProfile = await loadWaSwitchProfile(userId).catch(() => null);
+            const hasSwitchSessions = (swProfile?.slots?.length ?? 0) > 0;
+            let failText: string;
+            let failKb: InlineKeyboard;
+            if (hasSwitchSessions) {
+              failText =
+                `⚠️ <b>WhatsApp Disconnected</b>\n\n` +
+                `${renderProgressBar(0)}\n\n` +
+                `Your primary WhatsApp account has been disconnected.\n\n` +
+                `You have <b>${swProfile!.slots.length}</b> saved account(s) you can switch to.\n` +
+                `Tap <b>Manage Sessions</b> to switch or reconnect.`;
+              failKb = new InlineKeyboard()
+                .text("📱 Manage Sessions", "manage_sessions").row()
+                .text("📱 Connect New", "connect_wa").row()
+                .text("🏠 Main Menu", "main_menu");
+            } else {
+              failText =
+                `❌ <b>WhatsApp disconnected</b>\n\n` +
+                `${renderProgressBar(0)}\n\n` +
+                `Your WhatsApp session has been disconnected.\n\n` +
+                `Please connect a fresh session from the menu:\n` +
+                `📱 Menu → <b>Connect WhatsApp</b> → QR or Pairing Code`;
+              failKb = new InlineKeyboard()
+                .text("📱 Connect WhatsApp", "connect_wa").row()
+                .text("🏠 Main Menu", "main_menu");
+            }
             try {
               if (rcChatId && rcMsgId) {
                 await ctx.api.editMessageText(rcChatId, rcMsgId, failText, { parse_mode: "HTML", reply_markup: failKb });
@@ -775,14 +793,19 @@ function esc(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function connectedStatusText(userId: number): string {
+function connectedStatusText(userId: number, hasSwitchSessions = false): string {
   const mainConnected = isConnected(String(userId));
   const autoConnected = isAutoConnected(String(userId));
 
   const lines: string[] = [];
 
   if (!mainConnected) {
-    lines.push("│ ❌  WhatsApp: Not Connected");
+    if (hasSwitchSessions) {
+      lines.push("│ ⚠️  WhatsApp: Disconnected");
+      lines.push("│ 💡  You have saved accounts — switch below");
+    } else {
+      lines.push("│ ❌  WhatsApp: Not Connected");
+    }
   } else {
     const number = getConnectedWhatsAppNumber(String(userId));
     lines.push(`│ ✅  WhatsApp: ${number ? `<code>${esc(number)}</code>` : "Connected"}`);
@@ -800,7 +823,7 @@ function connectedStatusText(userId: number): string {
   );
 }
 
-function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu", name?: string): string {
+function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu", name?: string, hasSwitchSessions = false): string {
   const safeName = name ? esc(name) : "";
   const greeting = mode === "welcome"
     ? `👋 Hey ${safeName}, Welcome!`
@@ -809,7 +832,7 @@ function mainMenuText(userId: number, mode: "welcome" | "menu" = "menu", name?: 
     `🤖 <b>${BOT_DISPLAY_NAME}</b> 🤖\n` +
     `▰▰▰▰▰▰▰▰▰▰▰▰▰\n\n` +
     `${greeting}\n\n` +
-    connectedStatusText(userId) +
+    connectedStatusText(userId, hasSwitchSessions) +
     `\n\n› Choose an option:`
   );
 }
@@ -2013,6 +2036,11 @@ async function runJoinBackground(userId: number): Promise<void> {
 }
 
 const joinCancelRequests: Set<number> = new Set();
+
+// Pause‐and‐decide map for "Create Groups" member‐add failures.
+// When members fail to add to a group the background loop pauses
+// and awaits user's choice: continue to next group or stop entirely.
+const cgFriendsPause = new Map<number, (action: "continue" | "stop") => void>();
 const getLinkCancelRequests: Set<number> = new Set();
 const addMembersCancelRequests: Set<number> = new Set();
 const removeMembersCancelRequests: Set<number> = new Set();
@@ -2561,7 +2589,7 @@ async function startQrPairing(ctx: any, userId: number): Promise<void> {
   );
 }
 
-function mainMenu(userId?: number): InlineKeyboard {
+function mainMenu(userId?: number, hasSwitchSessions = false): InlineKeyboard {
   const connected = userId !== undefined && isConnected(String(userId));
   const kb = new InlineKeyboard();
   if (!connected) {
@@ -2591,7 +2619,7 @@ function mainMenu(userId?: number): InlineKeyboard {
       kb.text("☠️ Steal Group", "steal_group").row();
     }
   }
-  if (connected) {
+  if (connected || hasSwitchSessions) {
     kb.text("📱 Manage Sessions", "manage_sessions").text("🔌 Disconnect", "disconnect_wa");
   } else {
     kb.text("🔌 Disconnect", "disconnect_wa");
@@ -3322,9 +3350,14 @@ bot.callbackQuery("main_menu", async (ctx) => {
   const userId = ctx.from.id;
   if (!(await checkAccessMiddleware(ctx))) return;
   userStates.delete(userId);
+  let hasSwitchSessions = false;
+  if (!isConnected(String(userId))) {
+    const swProfile = await loadWaSwitchProfile(userId).catch(() => null);
+    hasSwitchSessions = (swProfile?.slots?.length ?? 0) > 0;
+  }
   await ctx.editMessageText(
-    mainMenuText(userId, "menu", ctx.from?.first_name),
-    { parse_mode: "HTML", reply_markup: mainMenu(userId) }
+    mainMenuText(userId, "menu", ctx.from?.first_name, hasSwitchSessions),
+    { parse_mode: "HTML", reply_markup: mainMenu(userId, hasSwitchSessions) }
   );
 });
 
@@ -5762,9 +5795,25 @@ bot.callbackQuery("group_cancel_dismiss", async (ctx) => {
   } catch {}
 });
 
+// ─── Create Groups: Member-add pause – Continue / Stop ───────────────────────
+
+bot.callbackQuery(/^cg_fr_cont:(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery({ text: "▶️ Continuing..." });
+  const uid = Number(ctx.match![1]);
+  const resolve = cgFriendsPause.get(uid);
+  if (resolve) { cgFriendsPause.delete(uid); resolve("continue"); }
+});
+
+bot.callbackQuery(/^cg_fr_stop:(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery({ text: "⛔ Stopping..." });
+  const uid = Number(ctx.match![1]);
+  const resolve = cgFriendsPause.get(uid);
+  if (resolve) { cgFriendsPause.delete(uid); resolve("stop"); }
+});
+
 async function createGroupsBackground(userId: string, numericUserId: number, gs: GroupSettings, chatId: number, msgId: number) {
   const perms: GroupPermissions = { editGroupInfo: gs.editGroupInfo, sendMessages: gs.sendMessages, addMembers: gs.addMembers, approveJoin: gs.approveJoin };
-  const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean }> = [];
+  const results: Array<{ name: string; link: string | null; error?: string; friendsAdded?: number; friendsFailed?: boolean; friendAdmin?: boolean; friendFailDetails?: string[] }> = [];
   const total = gs.finalNames.length;
 
   for (let i = 0; i < total; i++) {
@@ -5820,6 +5869,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
 
         let finalFriendsAdded = 0;
         let finalFriendsFailed = false;
+        let finalFriendFailDetails: string[] = [];
 
         if (gs.friendNumbers.length > 0) {
           if (result.participantsFailed) {
@@ -5828,8 +5878,18 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
             const addResults = await addGroupParticipantsBulk(userId, result.id, gs.friendNumbers);
             finalFriendsAdded = addResults.filter(r => r.success).length;
             finalFriendsFailed = finalFriendsAdded < gs.friendNumbers.length;
+            if (finalFriendsFailed) {
+              finalFriendFailDetails = addResults
+                .filter(r => !r.success)
+                .map(r => `${r.phone}: ${r.error || "Unknown reason"}`);
+            }
           } else {
             finalFriendsAdded = result.addedParticipants ?? 0;
+            if (finalFriendsAdded < gs.friendNumbers.length) {
+              finalFriendsFailed = true;
+              const skipped = gs.friendNumbers.length - finalFriendsAdded;
+              finalFriendFailDetails = [`${skipped} member(s) filtered out — not on WhatsApp or invalid number`];
+            }
           }
 
           // Promote friends to admin if user chose Yes
@@ -5841,6 +5901,61 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
               await new Promise((r) => setTimeout(r, 800));
             }
           }
+
+          // ── Pause when members fail to add ──────────────────────────────────
+          // Show the user exactly which members failed and why,
+          // then ask whether to continue to the remaining groups or stop.
+          if (finalFriendsFailed) {
+            const remaining = total - (i + 1);
+            const detailLines = finalFriendFailDetails.length > 0
+              ? finalFriendFailDetails.map(d => `  • ${d}`).join("\n")
+              : "  • WhatsApp rejected the participants";
+            const pauseText =
+              `⚠️ <b>Members Not Added — "${esc(groupName)}"</b>\n\n` +
+              `❌ <b>${finalFriendsAdded}/${gs.friendNumbers.length} member(s) added</b>\n\n` +
+              `<b>Reason(s):</b>\n${detailLines}\n\n` +
+              (remaining > 0
+                ? `<i>${remaining} group(s) still remaining. Continue or stop?</i>`
+                : `<i>This was the last group.</i>`);
+            try {
+              const pauseMsg = await bot.api.sendMessage(chatId, pauseText, {
+                parse_mode: "HTML",
+                reply_markup: remaining > 0
+                  ? new InlineKeyboard()
+                    .text("▶️ Continue", `cg_fr_cont:${numericUserId}`)
+                    .text("⛔ Stop", `cg_fr_stop:${numericUserId}`)
+                  : new InlineKeyboard().text("🏠 Main Menu", "main_menu"),
+              });
+              if (remaining > 0) {
+                const decision = await new Promise<"continue" | "stop">((resolve) => {
+                  cgFriendsPause.set(numericUserId, resolve);
+                  // Auto-continue after 90 seconds if user doesn't respond
+                  setTimeout(() => {
+                    if (cgFriendsPause.has(numericUserId)) {
+                      cgFriendsPause.delete(numericUserId);
+                      resolve("continue");
+                    }
+                  }, 90_000);
+                });
+                try { await bot.api.deleteMessage(chatId, pauseMsg.message_id); } catch {}
+                if (decision === "stop") {
+                  for (let j = i + 1; j < total; j++) {
+                    results.push({ name: gs.finalNames[j], link: null, error: "Stopped by user" });
+                  }
+                  // Update result before breaking
+                  const existingIdx2 = results.findIndex(r => r.name === groupName && r.link === result.inviteCode);
+                  if (existingIdx2 >= 0) {
+                    results[existingIdx2].friendsAdded = finalFriendsAdded;
+                    results[existingIdx2].friendsFailed = true;
+                    results[existingIdx2].friendFailDetails = finalFriendFailDetails;
+                    results[existingIdx2].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
+                  }
+                  i = total; // exit outer loop
+                  break;
+                }
+              }
+            } catch { /* non-fatal — loop continues */ }
+          }
         }
 
         // Update the result entry with final friends data
@@ -5849,6 +5964,7 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
           results[existingIdx].friendsAdded = gs.friendNumbers.length > 0 ? finalFriendsAdded : undefined;
           results[existingIdx].friendsFailed = finalFriendsFailed;
           results[existingIdx].friendAdmin = gs.makeFriendAdmin && finalFriendsAdded > 0;
+          results[existingIdx].friendFailDetails = finalFriendsFailed ? finalFriendFailDetails : undefined;
         }
       } else {
         results.push({ name: groupName, link: null, error: "Failed to create" });
@@ -5901,21 +6017,31 @@ async function createGroupsBackground(userId: string, numericUserId: number, gs:
   // Clean up the MongoDB-persisted pending state — creation is complete.
   void deletePendingGroupCreation(numericUserId).catch(() => {});
 
-  const cancelled = results.some((r) => r.error === "Cancelled by user");
+  const cancelled = results.some((r) => r.error === "Cancelled by user" || r.error === "Stopped by user");
   const created = results.filter((r) => r.link).length;
   let message = cancelled
-    ? `🛑 <b>Cancelled! (${created}/${total} created before cancel)</b>\n\n`
+    ? `🛑 <b>Stopped! (${created}/${total} created)</b>\n\n`
     : `🎉 <b>Done! (${created}/${total} created)</b>\n\n`;
   for (const r of results) {
-    if (r.error === "Cancelled by user") {
-      message += `🛑 <b>${esc(r.name)}</b>\n⚠️ Cancelled\n\n`;
+    if (r.error === "Cancelled by user" || r.error === "Stopped by user") {
+      const icon = r.error === "Stopped by user" ? "⛔" : "🛑";
+      message += `${icon} <b>${esc(r.name)}</b>\n⚠️ ${r.error}\n\n`;
     } else if (r.link) {
       let line = `✅ <b>${esc(r.name)}</b>\n🔗 ${r.link}`;
       if (r.friendsAdded !== undefined) {
         if (r.friendsFailed) {
-          line += `\n👫 Friends: ${r.friendsAdded} added (some were not added — rejected by WhatsApp)`;
+          line += `\n👫 Members: ${r.friendsAdded}/${gs.friendNumbers.length} added`;
+          if (r.friendFailDetails && r.friendFailDetails.length > 0) {
+            const show = r.friendFailDetails.slice(0, 3);
+            line += `\n⚠️ Failed:\n` + show.map(d => `  • ${esc(d)}`).join("\n");
+            if (r.friendFailDetails.length > 3) {
+              line += `\n  • …and ${r.friendFailDetails.length - 3} more`;
+            }
+          } else {
+            line += ` (rejected by WhatsApp)`;
+          }
         } else if (r.friendsAdded > 0) {
-          line += `\n👫 Friends: ${r.friendsAdded} added ✅`;
+          line += `\n👫 Members: ${r.friendsAdded} added ✅`;
         }
         if (r.friendAdmin) {
           line += ` 👑 Made Admin`;
