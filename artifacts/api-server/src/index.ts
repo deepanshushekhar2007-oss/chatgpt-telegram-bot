@@ -184,7 +184,7 @@ async function main() {
     }, 30 * 60 * 1000);
 
     // ─── Memory watchdog ────────────────────────────────────────────────────
-    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "280");
+    const MEM_WATCHDOG_HIGH_MB = Number(process.env["MEM_WATCHDOG_HIGH_MB"] || "450");
     const MEM_WATCHDOG_COOLDOWN_MS = Number(process.env["MEM_WATCHDOG_COOLDOWN_MS"] || String(2 * 60 * 1000));
     const MEM_WATCHDOG_INTERVAL_MS = Number(process.env["MEM_WATCHDOG_INTERVAL_MS"] || String(30 * 1000));
     let lastWatchdogPurgeAt = 0;
