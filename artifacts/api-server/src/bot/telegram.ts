@@ -5220,10 +5220,8 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
   const binanceStatus = settings.binanceUid
     ? `✅ Binance UID: <code>${esc(settings.binanceUid)}</code>`
     : `❌ Binance UID not set`;
-  const apiStatus = settings.binanceApiKey ? `✅ API Key set` : `❌ API Key not set`;
-  const secretStatus = settings.binanceApiSecret ? `✅ Secret set` : `❌ Secret not set`;
   const bep20Status = settings.bep20Address
-    ? `✅ BEP20 Address: <code>${esc(settings.bep20Address)}</code>`
+    ? `✅ BEP20: <code>${esc(settings.bep20Address.slice(0, 10))}...${settings.bep20Address.slice(-6)}</code>`
     : `❌ BEP20 Address not set`;
 
   let planLines = plans.length > 0
@@ -5235,8 +5233,7 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
   const text =
     `💰 <b>Payment Management</b>\n\n` +
     `<b>Plans:</b>\n${planLines}\n\n` +
-    `<b>Binance Pay:</b>\n${binanceStatus}\n${apiStatus}\n${secretStatus}\n\n` +
-    `<b>USDT BEP20:</b>\n${bep20Status}\n\n` +
+    `<b>Payment Methods:</b>\n${binanceStatus}\n${bep20Status}\n\n` +
     `<b>Stats:</b>\n💵 Total Income: <b>${totalIncome.toFixed(2)} USDT</b>\n📋 Total Transactions: <b>${txCount}</b>`;
 
   const kb = new InlineKeyboard();
@@ -5250,8 +5247,7 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
     kb.text(`✏️ Edit — ${plan.name}`, `price_edit_${plan._id}`).row();
   }
 
-  kb.text("⚙️ Binance Pay Settings", "price_binance").row();
-  kb.text("🔐 USDT BEP20 Settings", "price_bep20").row();
+  kb.text("⚙️ Payment Settings", "price_binance").row();
   kb.text("📋 View Transactions", "price_txns").row();
 
   try {
@@ -5288,19 +5284,19 @@ bot.callbackQuery("price_binance", async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const settings = await getPaymentSettings();
   const text =
-    `⚙️ <b>Binance Pay Settings</b>\n\n` +
-    `<b>Binance UID:</b> ${settings.binanceUid ? `<code>${esc(settings.binanceUid)}</code>` : "<i>Not set</i>"}\n` +
+    `⚙️ <b>Payment Settings</b>\n\n` +
+    `━━━ 💳 Binance Pay ━━━\n` +
+    `<b>UID:</b> ${settings.binanceUid ? `<code>${esc(settings.binanceUid)}</code>` : "<i>Not set</i>"}\n` +
     `<b>API Key:</b> ${settings.binanceApiKey ? `<code>${settings.binanceApiKey.slice(0, 6)}...${settings.binanceApiKey.slice(-4)}</code>` : "<i>Not set</i>"}\n` +
     `<b>API Secret:</b> ${settings.binanceApiSecret ? "✅ Set (hidden)" : "<i>Not set</i>"}\n\n` +
-    `<b>How to get API Key:</b>\n` +
-    `1. Go to Binance → Profile → API Management\n` +
-    `2. Create API Key → Label: TelegramBot\n` +
-    `3. Enable only <b>Read Info</b> permission\n` +
-    `4. Copy API Key + Secret Key here`;
+    `━━━ 🔐 USDT BEP20 ━━━\n` +
+    `<b>Wallet Address (BSC):</b>\n${settings.bep20Address ? `<code>${esc(settings.bep20Address)}</code>` : "<i>Not set</i>"}\n\n` +
+    `<i>ℹ️ Both methods can be active together. Users will see a choice if both are configured.</i>`;
   const kb = new InlineKeyboard()
     .text("🔑 Set Binance UID", "price_set_uid").row()
     .text("🔐 Set API Key", "price_set_apikey").row()
     .text("🔏 Set API Secret", "price_set_apisecret").row()
+    .text("📝 Set BEP20 Wallet Address", "price_set_bep20").row()
     .text("🔙 Back", "price_menu");
   await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
 });
@@ -5363,7 +5359,7 @@ bot.callbackQuery("price_set_bep20", async (ctx) => {
   userStates.set(userId, { step: "price_set_bep20" });
   await ctx.editMessageText(
     `📝 <b>Set USDT BEP20 Wallet Address</b>\n\nEnter your BNB Smart Chain (BSC) wallet address where users will send USDT:\n\n<i>Example: 0xABC123...DEF456</i>\n\n<i>⚠️ Double-check this address — any typo means lost funds.</i>`,
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_bep20") }
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_binance") }
   );
 });
 
@@ -5400,7 +5396,15 @@ bot.callbackQuery(/^price_toggle_(.+)$/, async (ctx) => {
   await sendPriceAdminMenu(ctx);
 });
 
-bot.callbackQuery(/^price_del_(.+)$/, async (ctx) => {
+bot.callbackQuery(/^price_del_confirm_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  await deletePlan(planId);
+  await sendPriceAdminMenu(ctx);
+});
+
+bot.callbackQuery(/^price_del_(?!confirm_)(.+)$/, async (ctx) => {
   ctx.answerCallbackQuery();
   if (!isAdmin(ctx.from.id)) return;
   const planId = ctx.match[1];
@@ -5410,35 +5414,6 @@ bot.callbackQuery(/^price_del_(.+)$/, async (ctx) => {
     `🗑️ <b>Delete Plan</b>\n\nAre you sure you want to delete <b>${esc(plan.name)}</b>?\nThis cannot be undone.`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Yes, Delete", `price_del_confirm_${planId}`).text("❌ Cancel", "price_menu") }
   );
-});
-
-bot.callbackQuery(/^price_del_confirm_(.+)$/, async (ctx) => {
-  ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  const planId = ctx.match[1];
-  await deletePlan(planId);
-  await sendPriceAdminMenu(ctx);
-});
-
-bot.callbackQuery(/^price_edit_(.+)$/, async (ctx) => {
-  ctx.answerCallbackQuery();
-  if (!isAdmin(ctx.from.id)) return;
-  const planId = ctx.match[1];
-  const plan = await getPlan(planId);
-  if (!plan) { await ctx.answerCallbackQuery({ text: "Plan not found.", show_alert: true }); return; }
-  const text =
-    `✏️ <b>Edit Plan: ${esc(plan.name)}</b>\n\n` +
-    `Current values:\n` +
-    `• Name: <b>${esc(plan.name)}</b>\n` +
-    `• Duration: <b>${plan.days} days</b>\n` +
-    `• Price: <b>${plan.priceUsdt} USDT</b>\n\n` +
-    `What would you like to edit?`;
-  const kb = new InlineKeyboard()
-    .text("✏️ Name", `price_edit_name_${planId}`)
-    .text("📅 Days", `price_edit_days_${planId}`)
-    .text("💵 Price", `price_edit_price_${planId}`).row()
-    .text("🔙 Back", "price_menu");
-  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
 });
 
 bot.callbackQuery(/^price_edit_name_(.+)$/, async (ctx) => {
@@ -5475,6 +5450,27 @@ bot.callbackQuery(/^price_edit_price_(.+)$/, async (ctx) => {
     `💵 <b>Edit Plan Price</b>\n\nEnter the new price in USDT (e.g. <code>5.00</code>):`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
   );
+});
+
+bot.callbackQuery(/^price_edit_(?!name_|days_|price_)(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const plan = await getPlan(planId);
+  if (!plan) { await ctx.answerCallbackQuery({ text: "Plan not found.", show_alert: true }); return; }
+  const text =
+    `✏️ <b>Edit Plan: ${esc(plan.name)}</b>\n\n` +
+    `Current values:\n` +
+    `• Name: <b>${esc(plan.name)}</b>\n` +
+    `• Duration: <b>${plan.days} days</b>\n` +
+    `• Price: <b>${plan.priceUsdt} USDT</b>\n\n` +
+    `What would you like to edit?`;
+  const kb = new InlineKeyboard()
+    .text("✏️ Name", `price_edit_name_${planId}`)
+    .text("📅 Days", `price_edit_days_${planId}`)
+    .text("💵 Price", `price_edit_price_${planId}`).row()
+    .text("🔙 Back", "price_menu");
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
 });
 
 // ─── Buy Plan flow ────────────────────────────────────────────────────────────
@@ -18088,11 +18084,29 @@ bot.on("message:text", async (ctx, next) => {
         );
         const result = await verifyBinanceTxId(settings.binanceApiKey, settings.binanceApiSecret, txId, pData.priceUsdt);
         if (!result.valid) {
-          await ctx.api.editMessageText(
-            ctx.chat.id, verifyMsg.message_id,
-            `❌ <b>Verification Failed</b>\n\n${esc(result.error ?? "Unknown error")}\n\nCheck your TxID and try again, or contact ${OWNER_USERNAME}.`,
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
-          ).catch(() => {});
+          if (result.error === "GEO_RESTRICTED") {
+            // Server IP is geo-restricted by Binance — notify admin for manual review
+            await ctx.api.editMessageText(
+              ctx.chat.id, verifyMsg.message_id,
+              `⏳ <b>Manual Review Required</b>\n\nYour payment has been submitted for manual review by admin.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will be notified once verified. Usually within a few minutes.`,
+              { parse_mode: "HTML" }
+            ).catch(() => {});
+            userStates.delete(userId);
+            const uname = ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`;
+            try {
+              await bot.api.sendMessage(
+                ADMIN_USER_ID,
+                `💳 <b>Binance Pay — Manual Review</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n⚠️ Auto-verification unavailable (server geo-restricted). Please verify manually in Binance Pay app and grant access with:\n<code>/grantaccess ${userId} ${pData.days}</code>`,
+                { parse_mode: "HTML" }
+              );
+            } catch {}
+          } else {
+            await ctx.api.editMessageText(
+              ctx.chat.id, verifyMsg.message_id,
+              `❌ <b>Verification Failed</b>\n\n${esc(result.error ?? "Unknown error")}\n\nCheck your TxID and try again, or contact ${OWNER_USERNAME}.`,
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+            ).catch(() => {});
+          }
           return;
         }
         const now = Date.now();
@@ -18207,7 +18221,7 @@ bot.on("message:text", async (ctx, next) => {
       userStates.delete(userId);
       await ctx.reply(
         `✅ <b>BEP20 Wallet Address saved!</b>\n\nAddress: <code>${esc(addr)}</code>\n\nUsers can now pay via USDT BEP20. You'll receive approval requests for each payment.`,
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back to BEP20 Settings", "price_bep20") }
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back to Payment Settings", "price_binance") }
       );
       return;
     }
@@ -21754,6 +21768,23 @@ bot.on("message:text", async (ctx, next) => {
     );
 
     if (!result.valid) {
+      if (result.error === "GEO_RESTRICTED") {
+        await ctx.api.editMessageText(
+          ctx.chat.id, verifyMsg.message_id,
+          `⏳ <b>Manual Review Required</b>\n\nYour payment has been submitted for manual review by admin.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will be notified once verified. Usually within a few minutes.`,
+          { parse_mode: "HTML" }
+        ).catch(() => {});
+        userStates.delete(userId);
+        const uname = ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`;
+        try {
+          await bot.api.sendMessage(
+            ADMIN_USER_ID,
+            `💳 <b>Binance Pay — Manual Review</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n⚠️ Auto-verification unavailable (server geo-restricted). Please verify manually in Binance Pay app and grant access with:\n<code>/grantaccess ${userId} ${pData.days}</code>`,
+            { parse_mode: "HTML" }
+          );
+        } catch {}
+        return;
+      }
       await ctx.api.editMessageText(
         ctx.chat.id,
         verifyMsg.message_id,
