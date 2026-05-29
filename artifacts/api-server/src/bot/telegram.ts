@@ -17859,6 +17859,192 @@ bot.on("message:text", async (ctx, next) => {
   const state = userStates.get(userId);
   const text = ctx.message.text.trim();
 
+  // ── Payment TxID & Price Admin steps ────────────────────────────────────────
+  if (state) {
+
+    // ── Payment TxID verification ───────────────────────────────────────────
+    if (state.step === "payment_awaiting_txid") {
+      const pData = state.paymentData;
+      if (!pData) { userStates.delete(userId); }
+      else {
+        const txId = text.trim().replace(/\s+/g, "");
+        if (txId.length < 5) {
+          await ctx.reply(
+            `❌ <b>Invalid Transaction ID</b>\n\nPlease enter the correct TxID from your Binance Pay history.`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+          );
+          return;
+        }
+        if (await isTxIdUsed(txId)) {
+          await ctx.reply(
+            `❌ <b>Transaction Already Used</b>\n\nThis TxID has already been used. Each TxID can only be used once.\n\nContact ${OWNER_USERNAME} if you think this is an error.`,
+            { parse_mode: "HTML" }
+          );
+          return;
+        }
+        const settings = await getPaymentSettings();
+        if (!settings.binanceApiKey || !settings.binanceApiSecret) {
+          await ctx.reply(
+            `⚠️ <b>Verification Unavailable</b>\n\nPayment system not fully configured. Contact ${OWNER_USERNAME} with your TxID: <code>${esc(txId)}</code>`,
+            { parse_mode: "HTML" }
+          );
+          return;
+        }
+        const verifyMsg = await ctx.reply(
+          `⏳ <b>Verifying your payment...</b>\n\nChecking Binance Pay for TxID: <code>${esc(txId.slice(0, 20))}...</code>`,
+          { parse_mode: "HTML" }
+        );
+        const result = await verifyBinanceTxId(settings.binanceApiKey, settings.binanceApiSecret, txId, pData.priceUsdt);
+        if (!result.valid) {
+          await ctx.api.editMessageText(
+            ctx.chat.id, verifyMsg.message_id,
+            `❌ <b>Verification Failed</b>\n\n${esc(result.error ?? "Unknown error")}\n\nCheck your TxID and try again, or contact ${OWNER_USERNAME}.`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+          ).catch(() => {});
+          return;
+        }
+        const now = Date.now();
+        const botData = await loadBotData();
+        const existing = botData.accessList[String(userId)];
+        const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+        const accessExpiresAt = baseFrom + pData.days * 86400000;
+        botData.accessList[String(userId)] = { expiresAt: accessExpiresAt, grantedBy: 0 };
+        await saveBotData(botData);
+        accessCache.del(userId);
+        await saveTransaction({ userId, planId: pData.planId, planName: pData.planName, days: pData.days, priceUsdt: pData.priceUsdt, txId, status: "verified", createdAt: now, accessGrantedUntil: accessExpiresAt });
+        userStates.delete(userId);
+        const expiryDate = new Date(accessExpiresAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+        await ctx.api.editMessageText(
+          ctx.chat.id, verifyMsg.message_id,
+          `✅ <b>Payment Verified! Access Granted.</b>\n\n🎉 Thank you for purchasing <b>${esc(pData.planName)}</b>!\n\n📅 <b>Access valid until:</b> ${expiryDate}\n💵 <b>Amount:</b> ${result.amount} ${result.currency ?? "USDT"}\n\nTap below to use the bot.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Go to Main Menu", "main_menu") }
+        ).catch(() => {});
+        return;
+      }
+    }
+
+    // ── Price Admin text steps ─────────────────────────────────────────────
+    if (state.step === "price_add_name" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (!d) { userStates.delete(userId); }
+      else {
+        const name = text.trim().slice(0, 50);
+        if (!name) { await ctx.reply("❌ Plan name cannot be empty. Enter a valid name:"); return; }
+        d.partialPlan = { ...d.partialPlan, name };
+        state.step = "price_add_days";
+        await ctx.reply(
+          `✅ Name: <b>${esc(name)}</b>\n\nStep 2/3: Enter the <b>number of days</b>:\n\n<i>Example:</i> <code>30</code>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+        );
+        return;
+      }
+    }
+
+    if (state.step === "price_add_days" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (!d) { userStates.delete(userId); }
+      else {
+        const days = parseInt(text.trim(), 10);
+        if (!days || days < 1 || days > 3650) { await ctx.reply("❌ Enter a valid number of days (1–3650):"); return; }
+        d.partialPlan = { ...d.partialPlan, days };
+        state.step = "price_add_price";
+        await ctx.reply(
+          `✅ Duration: <b>${days} days</b>\n\nStep 3/3: Enter the <b>price in USDT</b>:\n\n<i>Example:</i> <code>5.00</code>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+        );
+        return;
+      }
+    }
+
+    if (state.step === "price_add_price" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (!d?.partialPlan?.name || !d?.partialPlan?.days) { userStates.delete(userId); }
+      else {
+        const priceUsdt = parseFloat(text.trim());
+        if (!priceUsdt || priceUsdt <= 0 || priceUsdt > 100000) { await ctx.reply("❌ Enter a valid USDT price (e.g. 5.00):"); return; }
+        const plan = await createPlan(d.partialPlan.name, d.partialPlan.days, priceUsdt);
+        userStates.delete(userId);
+        await ctx.reply(
+          `✅ <b>Plan Created!</b>\n\n📦 <b>${esc(plan.name)}</b>\n📅 ${plan.days} days\n💵 ${plan.priceUsdt} USDT\n\nUse /price to manage plans.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Payment Menu", "price_menu") }
+        );
+        return;
+      }
+    }
+
+    if (state.step === "price_set_uid" && isAdmin(userId)) {
+      const uid = text.trim();
+      if (!uid) { await ctx.reply("❌ Enter a valid Binance Pay UID:"); return; }
+      await savePaymentSettings({ binanceUid: uid });
+      userStates.delete(userId);
+      await ctx.reply(
+        `✅ <b>Binance Pay UID saved!</b>\n\nUID: <code>${esc(uid)}</code>\n\nUsers will see this ID when buying plans.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Settings", "price_binance") }
+      );
+      return;
+    }
+
+    if (state.step === "price_set_apikey" && isAdmin(userId)) {
+      const apiKey = text.trim();
+      if (!apiKey) { await ctx.reply("❌ Enter a valid API Key:"); return; }
+      await savePaymentSettings({ binanceApiKey: apiKey });
+      userStates.delete(userId);
+      await ctx.reply(
+        `✅ <b>API Key saved!</b>\n\nKey: <code>${apiKey.slice(0, 6)}...${apiKey.slice(-4)}</code>\n\nNow set the API Secret.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Settings", "price_binance") }
+      );
+      return;
+    }
+
+    if (state.step === "price_set_apisecret" && isAdmin(userId)) {
+      const secret = text.trim();
+      if (!secret) { await ctx.reply("❌ Enter a valid API Secret:"); return; }
+      await savePaymentSettings({ binanceApiSecret: secret });
+      userStates.delete(userId);
+      await ctx.reply(
+        `✅ <b>API Secret saved!</b>\n\nStored securely. Will never be shown again.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Settings", "price_binance") }
+      );
+      return;
+    }
+
+    if (state.step === "price_edit_name" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (d?.editPlanId) {
+        const name = text.trim().slice(0, 50);
+        if (!name) { await ctx.reply("❌ Name cannot be empty:"); return; }
+        await updatePlan(d.editPlanId, { name });
+        userStates.delete(userId);
+        await ctx.reply(`✅ <b>Plan name updated to: ${esc(name)}</b>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Payment Menu", "price_menu") });
+        return;
+      }
+    }
+
+    if (state.step === "price_edit_days" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (d?.editPlanId) {
+        const days = parseInt(text.trim(), 10);
+        if (!days || days < 1 || days > 3650) { await ctx.reply("❌ Enter valid days (1–3650):"); return; }
+        await updatePlan(d.editPlanId, { days });
+        userStates.delete(userId);
+        await ctx.reply(`✅ <b>Duration updated to: ${days} days</b>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Payment Menu", "price_menu") });
+        return;
+      }
+    }
+
+    if (state.step === "price_edit_price" && isAdmin(userId)) {
+      const d = state.priceAdminData;
+      if (d?.editPlanId) {
+        const priceUsdt = parseFloat(text.trim());
+        if (!priceUsdt || priceUsdt <= 0) { await ctx.reply("❌ Enter valid USDT price (e.g. 5.00):"); return; }
+        await updatePlan(d.editPlanId, { priceUsdt });
+        userStates.delete(userId);
+        await ctx.reply(`✅ <b>Price updated to: ${priceUsdt} USDT</b>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Payment Menu", "price_menu") });
+        return;
+      }
+    }
+  }
+
   // ── By-link accumulation steps — must be handled before other state checks ──
   if (state) {
     if (state.step === "lv_enter_links_bl") {
