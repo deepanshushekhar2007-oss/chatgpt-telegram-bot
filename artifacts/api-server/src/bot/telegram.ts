@@ -668,6 +668,8 @@ const REFER_GATE_EXEMPT_PREFIXES = [
   "fm_",   // Merge steps
   "fc_",   // Convert Files steps
   "fn_",   // Number → VCF steps (fn_confirm, fn_step1, fn_step2, etc.)
+  // ── Binance Pay purchase flow — must be accessible without active access ────
+  "buy_",  // buy_plan, buy_select_*, buy_cancel
 ];
 const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
 function isReferGateExempt(cbData: string): boolean {
