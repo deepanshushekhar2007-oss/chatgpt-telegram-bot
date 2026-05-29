@@ -178,6 +178,97 @@ export async function getTransactionCount(): Promise<number> {
   } catch { return 0; }
 }
 
+// ─── USDT BEP20 Verification (BSC RPC — no API key needed) ───────────────────
+
+const BSC_RPC_URLS = [
+  "https://bsc-dataseed.binance.org/",
+  "https://bsc-dataseed1.binance.org/",
+  "https://bsc-dataseed2.binance.org/",
+];
+
+// USDT contract on BSC (18 decimals)
+const USDT_BEP20_CONTRACT = "0x55d398326f99059ff775485246999027b3197955";
+// ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+export interface Bep20VerifyResult {
+  valid: boolean;
+  amount?: number;
+  error?: string;
+}
+
+async function rpcCall(method: string, params: any[]): Promise<any> {
+  let lastErr: any;
+  for (const url of BSC_RPC_URLS) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+      const json = await res.json() as any;
+      if (json.error) { lastErr = new Error(json.error.message ?? "RPC error"); continue; }
+      return json.result;
+    } catch (err: any) {
+      lastErr = err;
+    }
+  }
+  throw lastErr ?? new Error("All BSC RPC nodes failed");
+}
+
+export async function verifyBep20TxHash(
+  txHash: string,
+  expectedToAddress: string,
+  expectedUsdt: number
+): Promise<Bep20VerifyResult> {
+  try {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      return { valid: false, error: "Invalid transaction hash format. It must start with 0x and be 66 characters long." };
+    }
+
+    const receipt = await rpcCall("eth_getTransactionReceipt", [txHash]);
+    if (!receipt) {
+      return { valid: false, error: "Transaction not found on BSC. Make sure you used the BNB Smart Chain (BEP20) network and the hash is correct." };
+    }
+    if (receipt.status !== "0x1") {
+      return { valid: false, error: "Transaction failed on blockchain (status not successful). Please check your transaction on BSCScan." };
+    }
+
+    const toLower = expectedToAddress.toLowerCase();
+    const logs: any[] = receipt.logs ?? [];
+
+    // Find a Transfer log from USDT contract to our wallet
+    const transferLog = logs.find((log: any) => {
+      if (!log.address || log.address.toLowerCase() !== USDT_BEP20_CONTRACT) return false;
+      if (!Array.isArray(log.topics) || log.topics.length < 3) return false;
+      if (log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) return false;
+      // topics[2] = to address padded to 32 bytes → last 40 hex chars = address
+      const toAddr = "0x" + log.topics[2].slice(-40).toLowerCase();
+      return toAddr === toLower;
+    });
+
+    if (!transferLog) {
+      return { valid: false, error: `No USDT (BEP20) transfer to your wallet address found in this transaction. Make sure you sent to the correct address on BNB Smart Chain.` };
+    }
+
+    // Decode amount: data field is uint256 in hex (18 decimals)
+    const rawAmount = BigInt(transferLog.data);
+    const divisor = BigInt("1000000000000000000"); // 10^18
+    const amount = Number(rawAmount * 10000n / divisor) / 10000;
+
+    const tolerance = 0.011;
+    if (Math.abs(amount - expectedUsdt) > tolerance) {
+      return { valid: false, error: `Wrong amount: received ${amount.toFixed(4)} USDT but plan requires ${expectedUsdt} USDT. Send the exact amount.` };
+    }
+
+    return { valid: true, amount };
+  } catch (err: any) {
+    return { valid: false, error: `Verification error: ${err?.message ?? "BSC network unreachable, please try again."}` };
+  }
+}
+
 // ─── Binance Pay Verification ─────────────────────────────────────────────────
 
 export interface BinanceVerifyResult {
