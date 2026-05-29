@@ -258,9 +258,9 @@ export async function verifyBep20TxHash(
     const divisor = BigInt("1000000000000000000"); // 10^18
     const amount = Number(rawAmount * 10000n / divisor) / 10000;
 
-    const tolerance = 0.011;
+    const tolerance = Math.max(0.5, expectedUsdt * 0.05); // 5% or 0.5 USDT — covers network fees/tax
     if (Math.abs(amount - expectedUsdt) > tolerance) {
-      return { valid: false, error: `Wrong amount: received ${amount.toFixed(4)} USDT but plan requires ${expectedUsdt} USDT. Send the exact amount.` };
+      return { valid: false, error: `Wrong amount: received ${amount.toFixed(4)} USDT but plan requires ${expectedUsdt} USDT (allowed difference: ±${tolerance.toFixed(2)} USDT).` };
     }
 
     return { valid: true, amount };
@@ -322,9 +322,9 @@ export async function verifyBinanceTxId(
     }
 
     const amount = parseFloat(tx.amount ?? "0");
-    const tolerance = 0.01;
+    const tolerance = Math.max(0.5, expectedUsdt * 0.05); // 5% or 0.5 USDT — covers fees/tax
     if (Math.abs(amount - expectedUsdt) > tolerance) {
-      return { valid: false, error: `Wrong amount: you sent ${amount} USDT but the plan requires ${expectedUsdt} USDT.` };
+      return { valid: false, error: `Wrong amount: you sent ${amount} USDT but the plan requires ${expectedUsdt} USDT (allowed difference: ±${tolerance.toFixed(2)} USDT).` };
     }
 
     return { valid: true, amount, currency: tx.currency ?? "USDT" };
