@@ -297,6 +297,9 @@ export async function verifyBinanceTxId(
     const res = await fetch(url, { headers: { "X-MBX-APIKEY": apiKey } });
 
     if (!res.ok) {
+      if (res.status === 451) {
+        return { valid: false, error: "GEO_RESTRICTED" };
+      }
       const errBody = await res.text().catch(() => "");
       return { valid: false, error: `Binance API error ${res.status}: ${errBody.slice(0, 100)}` };
     }
