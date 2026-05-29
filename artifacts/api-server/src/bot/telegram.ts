@@ -285,6 +285,13 @@ async function processReferralAward(newUserId: number, referrerId: number): Prom
     const result = await recordReferral(
       newUserId, referrerId, REFERRAL_REWARD_MS, ADMIN_USER_ID
     );
+    if (result.success) {
+      // Clear the referrer's access cache so the new referral days take
+      // effect immediately — without this the 300s TTL cache keeps serving
+      // the old "no access" result and the referrer sees "Subscription
+      // Required!" even though they just earned a free day.
+      accessCache.del(referrerId);
+    }
     if (result.success && referrerId !== ADMIN_USER_ID) {
       const totalText = result.totalReferred
         ? `\n👥 <b>Total people you've referred:</b> ${result.totalReferred}`
@@ -3673,7 +3680,9 @@ bot.command("admin", async (ctx) => {
     "📱 <b>Session Control (WS Sharing):</b>\n" +
     "📋 <code>/ws</code> — List all WhatsApp sessions (live + offline)\n" +
     "🔗 <code>/ws &lt;user_id&gt;</code> — Borrow a user's WA session (shared access)\n" +
-    "🔓 <code>/ws off</code> — Release borrowed session, return to your own",
+    "🔓 <code>/ws off</code> — Release borrowed session, return to your own\n\n" +
+    "💰 <b>Payment Management:</b>\n" +
+    "💳 <code>/price</code> — Manage plans, Binance Pay settings & view transactions",
 
     { parse_mode: "HTML" }
   );
