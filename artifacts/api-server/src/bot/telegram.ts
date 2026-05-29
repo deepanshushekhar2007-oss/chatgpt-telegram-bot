@@ -5445,10 +5445,13 @@ bot.callbackQuery("buy_plan", async (ctx) => {
   ctx.answerCallbackQuery();
   const plans = await getActivePlans();
   if (plans.length === 0) {
-    await ctx.reply(
+    await ctx.editMessageText(
       `😔 <b>No Plans Available</b>\n\nThere are no active plans right now. Please contact ${OWNER_USERNAME}.`,
       { parse_mode: "HTML" }
-    );
+    ).catch(() => ctx.reply(
+      `😔 <b>No Plans Available</b>\n\nThere are no active plans right now. Please contact ${OWNER_USERNAME}.`,
+      { parse_mode: "HTML" }
+    ));
     return;
   }
   const kb = new InlineKeyboard();
@@ -5456,11 +5459,15 @@ bot.callbackQuery("buy_plan", async (ctx) => {
     kb.text(`${plan.name} — ${plan.days} days — ${plan.priceUsdt} USDT`, `buy_select_${plan._id}`).row();
   }
   kb.url(`💬 Contact Owner (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
-  await ctx.reply(
+  await ctx.editMessageText(
     `💳 <b>Choose a Plan</b>\n\nSelect a plan to purchase via Binance Pay:\n\n` +
     plans.map(p => `• <b>${esc(p.name)}</b> — ${p.days} days — <b>${p.priceUsdt} USDT</b>`).join("\n"),
     { parse_mode: "HTML", reply_markup: kb }
-  );
+  ).catch(() => ctx.reply(
+    `💳 <b>Choose a Plan</b>\n\nSelect a plan to purchase via Binance Pay:\n\n` +
+    plans.map(p => `• <b>${esc(p.name)}</b> — ${p.days} days — <b>${p.priceUsdt} USDT</b>`).join("\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  ));
 });
 
 bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
@@ -5469,14 +5476,18 @@ bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
   const planId = ctx.match[1];
   const [plan, settings] = await Promise.all([getPlan(planId), getPaymentSettings()]);
   if (!plan || !plan.active) {
-    await ctx.reply("❌ This plan is no longer available. Please choose another plan.", { parse_mode: "HTML" });
+    await ctx.editMessageText("❌ This plan is no longer available. Please choose another plan.", { parse_mode: "HTML" })
+      .catch(() => ctx.reply("❌ This plan is no longer available. Please choose another plan.", { parse_mode: "HTML" }));
     return;
   }
   if (!settings.binanceUid) {
-    await ctx.reply(
+    await ctx.editMessageText(
       `⚠️ <b>Payment not available right now.</b>\n\nBinance Pay is not configured yet. Contact ${OWNER_USERNAME}.`,
       { parse_mode: "HTML" }
-    );
+    ).catch(() => ctx.reply(
+      `⚠️ <b>Payment not available right now.</b>\n\nBinance Pay is not configured yet. Contact ${OWNER_USERNAME}.`,
+      { parse_mode: "HTML" }
+    ));
     return;
   }
 
@@ -5500,10 +5511,13 @@ bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
     `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `⏳ <i>After paying, send your Transaction ID (TxID) in this chat to activate your plan.</i>`;
 
-  await ctx.reply(text, {
+  await ctx.editMessageText(text, {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
-  });
+  }).catch(() => ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
+  }));
 });
 
 bot.callbackQuery("buy_cancel", async (ctx) => {
