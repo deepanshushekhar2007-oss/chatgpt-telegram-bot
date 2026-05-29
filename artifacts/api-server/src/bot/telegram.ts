@@ -1672,6 +1672,8 @@ const autoChatSessions: Map<number, AutoChatSession> = new Map();
 const cigSessions: Map<number, CigSession> = new Map();
 const acfSessions: Map<number, AcfSession> = new Map();
 const userStates: Map<number, UserState> = new Map();
+// Pending Binance Pay manual reviews (when server is geo-restricted from Binance API)
+const pendingBinanceReviews: Map<number, { pData: { planId: string; planName: string; days: number; priceUsdt: number }; txId: string }> = new Map();
 
 // Cross-instance state helper — checks in-memory first, then MongoDB fallback.
 // Use this in message handlers where a different Render instance may have set the state.
@@ -5640,6 +5642,62 @@ bot.callbackQuery(/^buy_method_bep20_(.+)$/, async (ctx) => {
 });
 
 // ─── BEP20 Admin approval buttons ────────────────────────────────────────────
+
+// ─── Binance Pay Manual Review (geo-restriction fallback) ─────────────────────
+bot.callbackQuery(/^binance_approve_(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const targetUserId = parseInt(ctx.match[1], 10);
+  const review = pendingBinanceReviews.get(targetUserId);
+  if (!review) {
+    await ctx.editMessageText(
+      `⚠️ <b>Review Expired</b>\n\nThis review request is no longer active (bot may have restarted). Please grant access manually.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return;
+  }
+  const { pData, txId } = review;
+  pendingBinanceReviews.delete(targetUserId);
+  const now = Date.now();
+  const botData = await loadBotData();
+  const existing = botData.accessList[String(targetUserId)];
+  const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+  const accessExpiresAt = baseFrom + pData.days * 86400000;
+  botData.accessList[String(targetUserId)] = { expiresAt: accessExpiresAt, grantedBy: ctx.from.id };
+  await saveBotData(botData);
+  accessCache.del(targetUserId);
+  await saveTransaction({ userId: targetUserId, planId: pData.planId, planName: pData.planName, days: pData.days, priceUsdt: pData.priceUsdt, txId, status: "verified", createdAt: now, accessGrantedUntil: accessExpiresAt });
+  const expiryDate = new Date(accessExpiresAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  await ctx.editMessageText(
+    `✅ <b>Binance Pay Approved</b>\n\nUser <code>${targetUserId}</code> granted access for <b>${esc(pData.planName)}</b>.\nExpires: <b>${expiryDate}</b>\nTxID: <code>${esc(txId.slice(0, 30))}...</code>`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+  try {
+    await bot.api.sendMessage(
+      targetUserId,
+      `✅ <b>Payment Verified! Access Granted.</b>\n\n🎉 Thank you for purchasing <b>${esc(pData.planName)}</b>!\n\n📅 <b>Access valid until:</b> ${expiryDate}\n\nTap below to use the bot.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Go to Main Menu", "main_menu") }
+    );
+  } catch {}
+});
+
+bot.callbackQuery(/^binance_reject_(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const targetUserId = parseInt(ctx.match[1], 10);
+  pendingBinanceReviews.delete(targetUserId);
+  await ctx.editMessageText(
+    `❌ <b>Binance Pay Rejected</b>\n\nUser <code>${targetUserId}</code> payment was rejected.`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+  try {
+    await bot.api.sendMessage(
+      targetUserId,
+      `❌ <b>Payment Not Verified</b>\n\nYour Binance Pay payment could not be verified. Please make sure you:\n• Sent from Binance Pay (not bank transfer)\n• Used the correct TxID from Binance Pay history\n• Sent the correct amount\n\nContact ${OWNER_USERNAME} for help.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().url("💬 Contact Owner", `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`) }
+    );
+  } catch {}
+});
 
 bot.callbackQuery(/^bep20_approve_(\d+)_(.+)$/, async (ctx) => {
   ctx.answerCallbackQuery();
@@ -18085,10 +18143,10 @@ bot.on("message:text", async (ctx, next) => {
         const result = await verifyBinanceTxId(settings.binanceApiKey, settings.binanceApiSecret, txId, pData.priceUsdt);
         if (!result.valid) {
           if (result.error === "GEO_RESTRICTED") {
-            // Server IP is geo-restricted by Binance — notify admin for manual review
+            pendingBinanceReviews.set(userId, { pData, txId });
             await ctx.api.editMessageText(
               ctx.chat.id, verifyMsg.message_id,
-              `⏳ <b>Manual Review Required</b>\n\nYour payment has been submitted for manual review by admin.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will be notified once verified. Usually within a few minutes.`,
+              `⏳ <b>Payment Under Review</b>\n\nYour payment has been submitted for admin review.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will receive access once verified — usually within a few minutes.`,
               { parse_mode: "HTML" }
             ).catch(() => {});
             userStates.delete(userId);
@@ -18096,8 +18154,13 @@ bot.on("message:text", async (ctx, next) => {
             try {
               await bot.api.sendMessage(
                 ADMIN_USER_ID,
-                `💳 <b>Binance Pay — Manual Review</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n⚠️ Auto-verification unavailable (server geo-restricted). Please verify manually in Binance Pay app and grant access with:\n<code>/grantaccess ${userId} ${pData.days}</code>`,
-                { parse_mode: "HTML" }
+                `💳 <b>Binance Pay — Review Required</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n<i>Verify this TxID in your Binance Pay app, then tap:</i>`,
+                {
+                  parse_mode: "HTML",
+                  reply_markup: new InlineKeyboard()
+                    .text("✅ Approve", `binance_approve_${userId}`)
+                    .text("❌ Reject", `binance_reject_${userId}`),
+                }
               );
             } catch {}
           } else {
@@ -21769,9 +21832,10 @@ bot.on("message:text", async (ctx, next) => {
 
     if (!result.valid) {
       if (result.error === "GEO_RESTRICTED") {
+        pendingBinanceReviews.set(userId, { pData, txId });
         await ctx.api.editMessageText(
           ctx.chat.id, verifyMsg.message_id,
-          `⏳ <b>Manual Review Required</b>\n\nYour payment has been submitted for manual review by admin.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will be notified once verified. Usually within a few minutes.`,
+          `⏳ <b>Payment Under Review</b>\n\nYour payment has been submitted for admin review.\n\n<b>TxID:</b> <code>${esc(txId)}</code>\n<b>Plan:</b> ${esc(pData.planName)}\n\nYou will receive access once verified — usually within a few minutes.`,
           { parse_mode: "HTML" }
         ).catch(() => {});
         userStates.delete(userId);
@@ -21779,8 +21843,13 @@ bot.on("message:text", async (ctx, next) => {
         try {
           await bot.api.sendMessage(
             ADMIN_USER_ID,
-            `💳 <b>Binance Pay — Manual Review</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n⚠️ Auto-verification unavailable (server geo-restricted). Please verify manually in Binance Pay app and grant access with:\n<code>/grantaccess ${userId} ${pData.days}</code>`,
-            { parse_mode: "HTML" }
+            `💳 <b>Binance Pay — Review Required</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)} (${pData.days} days)\n<b>Amount:</b> ${pData.priceUsdt} USDT\n<b>TxID:</b> <code>${esc(txId)}</code>\n\n<i>Verify this TxID in your Binance Pay app, then tap:</i>`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("✅ Approve", `binance_approve_${userId}`)
+                .text("❌ Reject", `binance_reject_${userId}`),
+            }
           );
         } catch {}
         return;
