@@ -669,7 +669,8 @@ const REFER_GATE_EXEMPT_PREFIXES = [
   "fc_",   // Convert Files steps
   "fn_",   // Number → VCF steps (fn_confirm, fn_step1, fn_step2, etc.)
   // ── Binance Pay purchase flow — must be accessible without active access ────
-  "buy_",  // buy_plan, buy_select_*, buy_cancel
+  "buy_",  // buy_plan, buy_select_*, buy_cancel, buy_method_*
+  "bep20_", // bep20_approve_*, bep20_reject_*
 ];
 const REFER_GATE_EXEMPT_EXACT = new Set(["check_joined"]);
 function isReferGateExempt(cbData: string): boolean {
@@ -1369,6 +1370,7 @@ interface UserState {
     planName: string;
     priceUsdt: number;
     days: number;
+    paymentMethod?: "binance" | "bep20";
   };
   priceAdminData?: {
     step: string;
@@ -5219,6 +5221,9 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
     : `❌ Binance UID not set`;
   const apiStatus = settings.binanceApiKey ? `✅ API Key set` : `❌ API Key not set`;
   const secretStatus = settings.binanceApiSecret ? `✅ Secret set` : `❌ Secret not set`;
+  const bep20Status = settings.bep20Address
+    ? `✅ BEP20 Address: <code>${esc(settings.bep20Address)}</code>`
+    : `❌ BEP20 Address not set`;
 
   let planLines = plans.length > 0
     ? plans.map(p =>
@@ -5229,7 +5234,8 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
   const text =
     `💰 <b>Payment Management</b>\n\n` +
     `<b>Plans:</b>\n${planLines}\n\n` +
-    `<b>Binance Settings:</b>\n${binanceStatus}\n${apiStatus}\n${secretStatus}\n\n` +
+    `<b>Binance Pay:</b>\n${binanceStatus}\n${apiStatus}\n${secretStatus}\n\n` +
+    `<b>USDT BEP20:</b>\n${bep20Status}\n\n` +
     `<b>Stats:</b>\n💵 Total Income: <b>${totalIncome.toFixed(2)} USDT</b>\n📋 Total Transactions: <b>${txCount}</b>`;
 
   const kb = new InlineKeyboard();
@@ -5243,7 +5249,8 @@ async function sendPriceAdminMenu(ctx: any): Promise<void> {
     kb.text(`✏️ Edit — ${plan.name}`, `price_edit_${plan._id}`).row();
   }
 
-  kb.text("⚙️ Binance Settings", "price_binance").row();
+  kb.text("⚙️ Binance Pay Settings", "price_binance").row();
+  kb.text("🔐 USDT BEP20 Settings", "price_bep20").row();
   kb.text("📋 View Transactions", "price_txns").row();
 
   try {
@@ -5327,6 +5334,35 @@ bot.callbackQuery("price_set_apisecret", async (ctx) => {
   await ctx.editMessageText(
     `🔏 <b>Set Binance API Secret</b>\n\nEnter your Binance API Secret Key:\n\n<i>⚠️ This will be stored securely in your database.</i>`,
     { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_binance") }
+  );
+});
+
+// ─── BEP20 Settings ───────────────────────────────────────────────────────────
+bot.callbackQuery("price_bep20", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const settings = await getPaymentSettings();
+  const text =
+    `🔐 <b>USDT BEP20 Settings</b>\n\n` +
+    `<b>Wallet Address (BSC):</b>\n${settings.bep20Address ? `<code>${esc(settings.bep20Address)}</code>` : "<i>Not set</i>"}\n\n` +
+    `<b>Network:</b> BNB Smart Chain (BEP20)\n` +
+    `<b>Token:</b> USDT\n\n` +
+    `Users will be asked to send USDT (BEP20) to this address and submit their transaction hash. You will receive an approval request to manually verify and grant access.\n\n` +
+    `<i>⚠️ Make sure the address is correct — payments go directly to this wallet.</i>`;
+  const kb = new InlineKeyboard()
+    .text("📝 Set BEP20 Wallet Address", "price_set_bep20").row()
+    .text("🔙 Back", "price_menu");
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery("price_set_bep20", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_set_bep20" });
+  await ctx.editMessageText(
+    `📝 <b>Set USDT BEP20 Wallet Address</b>\n\nEnter your BNB Smart Chain (BSC) wallet address where users will send USDT:\n\n<i>Example: 0xABC123...DEF456</i>\n\n<i>⚠️ Double-check this address — any typo means lost funds.</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_bep20") }
   );
 });
 
@@ -5480,24 +5516,52 @@ bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
       .catch(() => ctx.reply("❌ This plan is no longer available. Please choose another plan.", { parse_mode: "HTML" }));
     return;
   }
-  if (!settings.binanceUid) {
+
+  const hasBinance = !!settings.binanceUid;
+  const hasBep20 = !!settings.bep20Address;
+
+  if (!hasBinance && !hasBep20) {
     await ctx.editMessageText(
-      `⚠️ <b>Payment not available right now.</b>\n\nBinance Pay is not configured yet. Contact ${OWNER_USERNAME}.`,
+      `⚠️ <b>Payment not available right now.</b>\n\nNo payment methods are configured yet. Contact ${OWNER_USERNAME}.`,
       { parse_mode: "HTML" }
     ).catch(() => ctx.reply(
-      `⚠️ <b>Payment not available right now.</b>\n\nBinance Pay is not configured yet. Contact ${OWNER_USERNAME}.`,
+      `⚠️ <b>Payment not available right now.</b>\n\nNo payment methods are configured yet. Contact ${OWNER_USERNAME}.`,
       { parse_mode: "HTML" }
     ));
     return;
   }
 
+  // If both methods available → show selection; otherwise go directly to the available method
+  if (hasBinance && hasBep20) {
+    const kb = new InlineKeyboard()
+      .text("💳 Binance Pay (UID)", `buy_method_binance_${planId}`).row()
+      .text("🔐 USDT BEP20 (Wallet)", `buy_method_bep20_${planId}`).row()
+      .text("❌ Cancel", "buy_cancel");
+    const selText =
+      `💳 <b>${esc(plan.name)}</b> — ${plan.days} days — <b>${plan.priceUsdt} USDT</b>\n\n` +
+      `Choose your payment method:`;
+    await ctx.editMessageText(selText, { parse_mode: "HTML", reply_markup: kb })
+      .catch(() => ctx.reply(selText, { parse_mode: "HTML", reply_markup: kb }));
+    return;
+  }
+
+  // Only one method available — route directly
+  if (hasBinance) {
+    await showBinancePayInstructions(ctx, userId, plan, settings);
+  } else {
+    await showBep20PayInstructions(ctx, userId, plan, settings);
+  }
+});
+
+// ─── Helpers to show payment instructions ────────────────────────────────────
+
+async function showBinancePayInstructions(ctx: any, userId: number, plan: any, settings: any) {
   userStates.set(userId, {
     step: "payment_awaiting_txid",
-    paymentData: { planId: plan._id, planName: plan.name, priceUsdt: plan.priceUsdt, days: plan.days },
+    paymentData: { planId: plan._id, planName: plan.name, priceUsdt: plan.priceUsdt, days: plan.days, paymentMethod: "binance" },
   });
-
   const text =
-    `💳 <b>Complete Your Payment</b>\n\n` +
+    `💳 <b>Pay via Binance Pay</b>\n\n` +
     `<b>Plan:</b> ${esc(plan.name)}\n` +
     `<b>Duration:</b> ${plan.days} days\n` +
     `<b>Amount:</b> <b>${plan.priceUsdt} USDT</b>\n\n` +
@@ -5510,7 +5574,6 @@ bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
     `<b>Step 6:</b> Copy the <b>Transaction ID</b> and send it here\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `⏳ <i>After paying, send your Transaction ID (TxID) in this chat to activate your plan.</i>`;
-
   await ctx.editMessageText(text, {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
@@ -5518,6 +5581,118 @@ bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
     parse_mode: "HTML",
     reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
   }));
+}
+
+async function showBep20PayInstructions(ctx: any, userId: number, plan: any, settings: any) {
+  userStates.set(userId, {
+    step: "payment_awaiting_bep20_txhash",
+    paymentData: { planId: plan._id, planName: plan.name, priceUsdt: plan.priceUsdt, days: plan.days, paymentMethod: "bep20" },
+  });
+  const text =
+    `🔐 <b>Pay via USDT BEP20</b>\n\n` +
+    `<b>Plan:</b> ${esc(plan.name)}\n` +
+    `<b>Duration:</b> ${plan.days} days\n` +
+    `<b>Amount:</b> <b>${plan.priceUsdt} USDT</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `<b>Network:</b> BNB Smart Chain (BEP20)\n` +
+    `<b>Token:</b> USDT\n` +
+    `<b>Send to address:</b>\n<code>${esc(settings.bep20Address)}</code>\n` +
+    `<b>Amount:</b> <b>${plan.priceUsdt} USDT</b>\n\n` +
+    `<b>Steps:</b>\n` +
+    `1️⃣ Open your wallet (Trust Wallet / MetaMask / Binance)\n` +
+    `2️⃣ Send exactly <b>${plan.priceUsdt} USDT (BEP20)</b> to the address above\n` +
+    `3️⃣ After sending, open your transaction in BSCScan\n` +
+    `4️⃣ Copy the <b>Transaction Hash (TxHash)</b> and send it here\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⏳ <i>Send your Transaction Hash (TxHash) here after payment. Access will be granted after manual verification.</i>`;
+  await ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
+  }).catch(() => ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
+  }));
+}
+
+// ─── Payment method selection buttons ────────────────────────────────────────
+
+bot.callbackQuery(/^buy_method_binance_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const planId = ctx.match[1];
+  const [plan, settings] = await Promise.all([getPlan(planId), getPaymentSettings()]);
+  if (!plan || !plan.active || !settings.binanceUid) {
+    await ctx.editMessageText("❌ This payment method is not available. Please try again.", { parse_mode: "HTML" })
+      .catch(() => {});
+    return;
+  }
+  await showBinancePayInstructions(ctx, userId, plan, settings);
+});
+
+bot.callbackQuery(/^buy_method_bep20_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const planId = ctx.match[1];
+  const [plan, settings] = await Promise.all([getPlan(planId), getPaymentSettings()]);
+  if (!plan || !plan.active || !settings.bep20Address) {
+    await ctx.editMessageText("❌ This payment method is not available. Please try again.", { parse_mode: "HTML" })
+      .catch(() => {});
+    return;
+  }
+  await showBep20PayInstructions(ctx, userId, plan, settings);
+});
+
+// ─── BEP20 Admin approval buttons ────────────────────────────────────────────
+
+bot.callbackQuery(/^bep20_approve_(\d+)_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const targetUserId = parseInt(ctx.match[1], 10);
+  const planId = ctx.match[2];
+  const plan = await getPlan(planId);
+  if (!plan) {
+    await ctx.editMessageText("❌ Plan not found.", { parse_mode: "HTML", reply_markup: undefined }).catch(() => {});
+    return;
+  }
+  const now = Date.now();
+  const botData = await loadBotData();
+  const existing = botData.accessList[String(targetUserId)];
+  const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+  const accessExpiresAt = baseFrom + plan.days * 86400000;
+  botData.accessList[String(targetUserId)] = { expiresAt: accessExpiresAt, grantedBy: ctx.from.id };
+  await saveBotData(botData);
+  accessCache.del(targetUserId);
+  const expiryDate = new Date(accessExpiresAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  await ctx.editMessageText(
+    `✅ <b>BEP20 Payment Approved</b>\n\nUser <code>${targetUserId}</code> granted access for <b>${plan.name}</b>.\nExpires: <b>${expiryDate}</b>`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+  // Notify user
+  try {
+    await bot.api.sendMessage(
+      targetUserId,
+      `✅ <b>Payment Verified! Access Granted.</b>\n\n🎉 Your USDT BEP20 payment for <b>${esc(plan.name)}</b> has been approved!\n\n📅 <b>Access valid until:</b> ${expiryDate}\n\nTap below to use the bot.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Go to Main Menu", "main_menu") }
+    );
+  } catch {}
+});
+
+bot.callbackQuery(/^bep20_reject_(\d+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const targetUserId = parseInt(ctx.match[1], 10);
+  await ctx.editMessageText(
+    `❌ <b>BEP20 Payment Rejected</b>\n\nUser <code>${targetUserId}</code> payment was rejected.`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+  // Notify user
+  try {
+    await bot.api.sendMessage(
+      targetUserId,
+      `❌ <b>Payment Not Verified</b>\n\nYour USDT BEP20 payment could not be verified. This could be due to:\n• Wrong amount sent\n• Wrong network used (must be BEP20)\n• Invalid transaction hash\n\nPlease contact ${OWNER_USERNAME} for help.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💬 Contact Owner", `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`) }
+    );
+  } catch {}
 });
 
 bot.callbackQuery("buy_cancel", async (ctx) => {
@@ -18021,6 +18196,65 @@ bot.on("message:text", async (ctx, next) => {
         `✅ <b>API Secret saved!</b>\n\nStored securely. Will never be shown again.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Settings", "price_binance") }
       );
+      return;
+    }
+
+    if (state.step === "price_set_bep20" && isAdmin(userId)) {
+      const addr = text.trim();
+      if (!addr || addr.length < 10) { await ctx.reply("❌ Enter a valid BEP20 wallet address:"); return; }
+      await savePaymentSettings({ bep20Address: addr });
+      userStates.delete(userId);
+      await ctx.reply(
+        `✅ <b>BEP20 Wallet Address saved!</b>\n\nAddress: <code>${esc(addr)}</code>\n\nUsers can now pay via USDT BEP20. You'll receive approval requests for each payment.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back to BEP20 Settings", "price_bep20") }
+      );
+      return;
+    }
+
+    // ── BEP20 TxHash submission ──────────────────────────────────────────────
+    if (state.step === "payment_awaiting_bep20_txhash") {
+      const pData = state.paymentData;
+      if (!pData) { userStates.delete(userId); return; }
+      const txHash = text.trim().replace(/\s+/g, "");
+      if (txHash.length < 10) {
+        await ctx.reply(
+          `❌ <b>Invalid Transaction Hash</b>\n\nPlease enter the correct TxHash from your blockchain transaction (usually starts with 0x...).`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+        );
+        return;
+      }
+      userStates.delete(userId);
+      // Notify user
+      await ctx.reply(
+        `⏳ <b>Payment Submitted!</b>\n\n` +
+        `Your USDT BEP20 payment for <b>${esc(pData.planName)}</b> has been submitted for review.\n\n` +
+        `<b>TxHash:</b> <code>${esc(txHash)}</code>\n\n` +
+        `You will receive a notification once your payment is verified. This usually takes a few minutes.`,
+        { parse_mode: "HTML" }
+      );
+      // Notify admin with approve/reject buttons
+      const username = ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`;
+      try {
+        await bot.api.sendMessage(
+          ADMIN_USER_ID,
+          `💰 <b>BEP20 Payment Request</b>\n\n` +
+          `<b>User:</b> ${esc(username)} (<code>${userId}</code>)\n` +
+          `<b>Plan:</b> ${esc(pData.planName)}\n` +
+          `<b>Duration:</b> ${pData.days} days\n` +
+          `<b>Amount:</b> ${pData.priceUsdt} USDT (BEP20)\n` +
+          `<b>TxHash:</b>\n<code>${esc(txHash)}</code>\n\n` +
+          `🔍 Verify on BSCScan:\nhttps://bscscan.com/tx/${encodeURIComponent(txHash)}\n\n` +
+          `Approve to grant access, Reject to deny.`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("✅ Approve", `bep20_approve_${userId}_${pData.planId}`)
+              .text("❌ Reject", `bep20_reject_${userId}`),
+          }
+        );
+      } catch (err: any) {
+        console.error("[BEP20] Failed to notify admin:", err?.message);
+      }
       return;
     }
 
