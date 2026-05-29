@@ -16,6 +16,7 @@ export interface PaymentSettings {
   binanceUid: string;
   binanceApiKey: string;
   binanceApiSecret: string;
+  bep20Address: string;
 }
 
 export interface PaymentTransaction {
@@ -98,6 +99,7 @@ const DEFAULT_SETTINGS: PaymentSettings = {
   binanceUid: "",
   binanceApiKey: "",
   binanceApiSecret: "",
+  bep20Address: "",
 };
 
 export async function getPaymentSettings(): Promise<PaymentSettings> {
@@ -109,6 +111,7 @@ export async function getPaymentSettings(): Promise<PaymentSettings> {
       binanceUid: doc["binanceUid"] ?? "",
       binanceApiKey: doc["binanceApiKey"] ?? "",
       binanceApiSecret: doc["binanceApiSecret"] ?? "",
+      bep20Address: doc["bep20Address"] ?? "",
     };
   } catch { return { ...DEFAULT_SETTINGS }; }
 }
