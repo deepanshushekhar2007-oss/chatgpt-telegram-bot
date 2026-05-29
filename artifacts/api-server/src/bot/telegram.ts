@@ -126,6 +126,7 @@ import {
   getTotalIncome,
   getTransactionCount,
   verifyBinanceTxId,
+  verifyBep20TxHash,
   type PaymentPlan,
 } from "./payments";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
@@ -18211,50 +18212,72 @@ bot.on("message:text", async (ctx, next) => {
       return;
     }
 
-    // ── BEP20 TxHash submission ──────────────────────────────────────────────
+    // ── BEP20 TxHash auto-verification (BSC RPC) ────────────────────────────
     if (state.step === "payment_awaiting_bep20_txhash") {
       const pData = state.paymentData;
       if (!pData) { userStates.delete(userId); return; }
       const txHash = text.trim().replace(/\s+/g, "");
       if (txHash.length < 10) {
         await ctx.reply(
-          `❌ <b>Invalid Transaction Hash</b>\n\nPlease enter the correct TxHash from your blockchain transaction (usually starts with 0x...).`,
+          `❌ <b>Invalid Transaction Hash</b>\n\nPlease enter the correct TxHash from your blockchain transaction (starts with 0x...).`,
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
         );
         return;
       }
-      userStates.delete(userId);
-      // Notify user
-      await ctx.reply(
-        `⏳ <b>Payment Submitted!</b>\n\n` +
-        `Your USDT BEP20 payment for <b>${esc(pData.planName)}</b> has been submitted for review.\n\n` +
-        `<b>TxHash:</b> <code>${esc(txHash)}</code>\n\n` +
-        `You will receive a notification once your payment is verified. This usually takes a few minutes.`,
+      if (await isTxIdUsed(txHash)) {
+        await ctx.reply(
+          `❌ <b>Transaction Already Used</b>\n\nThis TxHash has already been used. Each transaction can only be used once.\n\nContact ${OWNER_USERNAME} if you think this is an error.`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+      const settings = await getPaymentSettings();
+      if (!settings.bep20Address) {
+        await ctx.reply(
+          `⚠️ <b>Verification Unavailable</b>\n\nBEP20 address not configured. Contact ${OWNER_USERNAME} with your TxHash: <code>${esc(txHash)}</code>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+      const verifyMsg = await ctx.reply(
+        `⏳ <b>Verifying your payment...</b>\n\nChecking BSC blockchain for TxHash: <code>${esc(txHash.slice(0, 20))}...</code>`,
         { parse_mode: "HTML" }
       );
-      // Notify admin with approve/reject buttons
-      const username = ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`;
+      const result = await verifyBep20TxHash(txHash, settings.bep20Address, pData.priceUsdt);
+      if (!result.valid) {
+        await ctx.api.editMessageText(
+          ctx.chat.id, verifyMsg.message_id,
+          `❌ <b>Verification Failed</b>\n\n${esc(result.error ?? "Unknown error")}\n\nCheck your TxHash and try again, or contact ${OWNER_USERNAME}.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+        ).catch(() => {});
+        return;
+      }
+      // Grant access
+      const now = Date.now();
+      const botData = await loadBotData();
+      const existing = botData.accessList[String(userId)];
+      const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+      const accessExpiresAt = baseFrom + pData.days * 86400000;
+      botData.accessList[String(userId)] = { expiresAt: accessExpiresAt, grantedBy: 0 };
+      await saveBotData(botData);
+      accessCache.del(userId);
+      await saveTransaction({ userId, planId: pData.planId, planName: pData.planName, days: pData.days, priceUsdt: pData.priceUsdt, txId: txHash, status: "verified", createdAt: now, accessGrantedUntil: accessExpiresAt });
+      userStates.delete(userId);
+      const expiryDate = new Date(accessExpiresAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+      await ctx.api.editMessageText(
+        ctx.chat.id, verifyMsg.message_id,
+        `✅ <b>Payment Verified! Access Granted.</b>\n\n🎉 Thank you for purchasing <b>${esc(pData.planName)}</b>!\n\n📅 <b>Access valid until:</b> ${expiryDate}\n💵 <b>Amount:</b> ${result.amount?.toFixed(4)} USDT (BEP20)\n\nTap below to use the bot.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🏠 Go to Main Menu", "main_menu") }
+      ).catch(() => {});
+      // Notify admin of successful BEP20 payment
       try {
+        const uname = ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`;
         await bot.api.sendMessage(
           ADMIN_USER_ID,
-          `💰 <b>BEP20 Payment Request</b>\n\n` +
-          `<b>User:</b> ${esc(username)} (<code>${userId}</code>)\n` +
-          `<b>Plan:</b> ${esc(pData.planName)}\n` +
-          `<b>Duration:</b> ${pData.days} days\n` +
-          `<b>Amount:</b> ${pData.priceUsdt} USDT (BEP20)\n` +
-          `<b>TxHash:</b>\n<code>${esc(txHash)}</code>\n\n` +
-          `🔍 Verify on BSCScan:\nhttps://bscscan.com/tx/${encodeURIComponent(txHash)}\n\n` +
-          `Approve to grant access, Reject to deny.`,
-          {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("✅ Approve", `bep20_approve_${userId}_${pData.planId}`)
-              .text("❌ Reject", `bep20_reject_${userId}`),
-          }
+          `✅ <b>BEP20 Payment Auto-Verified</b>\n\n<b>User:</b> ${esc(uname)} (<code>${userId}</code>)\n<b>Plan:</b> ${esc(pData.planName)}\n<b>Amount:</b> ${result.amount?.toFixed(4)} USDT\n<b>TxHash:</b>\n<code>${esc(txHash)}</code>\n<b>Access until:</b> ${expiryDate}`,
+          { parse_mode: "HTML" }
         );
-      } catch (err: any) {
-        console.error("[BEP20] Failed to notify admin:", err?.message);
-      }
+      } catch {}
       return;
     }
 
