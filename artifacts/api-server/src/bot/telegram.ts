@@ -111,6 +111,23 @@ import {
   type WaSwitchSlot,
   type WaSwitchProfile,
 } from "./mongo-bot-data";
+import {
+  getActivePlans,
+  getAllPlans,
+  getPlan,
+  createPlan,
+  updatePlan,
+  deletePlan,
+  getPaymentSettings,
+  savePaymentSettings,
+  isTxIdUsed,
+  saveTransaction,
+  getTransactions,
+  getTotalIncome,
+  getTransactionCount,
+  verifyBinanceTxId,
+  type PaymentPlan,
+} from "./payments";
 import { getSessionStats, cleanupStaleSessions, clearMongoSession, listStoredWhatsAppSessions } from "./mongo-auth-state";
 import {
   extractPhonesFromBuffer,
@@ -939,7 +956,11 @@ async function buildReferRequiredMessage(userId: number): Promise<{
     );
     kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
   }
-  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`).row();
+  const plans = await getActivePlans();
+  if (plans.length > 0) {
+    kb.text("💳 Buy Plan with Binance Pay", "buy_plan");
+  }
   return { text, keyboard: kb };
 }
 
@@ -1340,6 +1361,17 @@ interface UserState {
   broadcastData?: {
     message: string;
     users: number[];
+  };
+  paymentData?: {
+    planId: string;
+    planName: string;
+    priceUsdt: number;
+    days: number;
+  };
+  priceAdminData?: {
+    step: string;
+    editPlanId?: string;
+    partialPlan?: { name?: string; days?: number; priceUsdt?: number };
   };
   chatInGroupData?: {
     allGroups: Array<{ id: string; subject: string }>;
@@ -3076,7 +3108,11 @@ bot.command("myaccess", async (ctx) => {
     kb.url("📤 Share My Referral Link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`).row();
   }
   if (state.kind === "none" || state.kind === "trial" || state.kind === "referral") {
-    kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+    kb.url(`💎 Buy Premium (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`).row();
+    const plans = await getActivePlans();
+    if (plans.length > 0) {
+      kb.text("💳 Buy Plan with Binance Pay", "buy_plan");
+    }
   }
 
   await ctx.reply(text, {
@@ -3325,14 +3361,22 @@ async function checkAccessMiddleware(ctx: any): Promise<boolean> {
   // checkForceSub is cached after first check — no Telegram API call overhead.
   if (!(await checkForceSub(ctx))) return false;
   if (!userHasAccess) {
+    const plans = await getActivePlans();
+    const kb = new InlineKeyboard();
+    if (plans.length > 0) kb.text("💳 Buy Plan with Binance Pay", "buy_plan");
     try {
       ctx.answerCallbackQuery({
-        text: `🔒 Subscription required! Contact ${OWNER_USERNAME}`,
+        text: `🔒 Subscription required! Tap the Buy Plan button below.`,
         show_alert: true,
       });
-    } catch {
-      await ctx.reply(`🔒 <b>Subscription Required!</b>\n\nContact owner: ${OWNER_USERNAME}`, { parse_mode: "HTML" });
-    }
+    } catch {}
+    try {
+      await ctx.reply(
+        `🔒 <b>Subscription Required!</b>\n\nYou need an active plan to use this feature.\n\n` +
+        (plans.length > 0 ? `Tap <b>Buy Plan</b> to purchase via Binance Pay.` : `Contact owner: ${OWNER_USERNAME}`),
+        { parse_mode: "HTML", reply_markup: plans.length > 0 ? kb : undefined }
+      );
+    } catch {}
     return false;
   }
   // Lazy-restore WhatsApp session if user has stored creds but the live
@@ -5152,6 +5196,322 @@ bot.command("version", async (ctx) => {
     `  • Date: <code>${commitDate}</code>`;
 
   await ctx.reply(text, { parse_mode: "HTML" });
+});
+
+// ─── /price — Admin Payment Management ───────────────────────────────────────
+bot.command("price", async (ctx) => {
+  if (!isAdmin(ctx.from!.id)) { await ctx.reply("🚫 Admin only."); return; }
+  await sendPriceAdminMenu(ctx);
+});
+
+async function sendPriceAdminMenu(ctx: any): Promise<void> {
+  const [plans, settings, totalIncome, txCount] = await Promise.all([
+    getAllPlans(),
+    getPaymentSettings(),
+    getTotalIncome(),
+    getTransactionCount(),
+  ]);
+
+  const binanceStatus = settings.binanceUid
+    ? `✅ Binance UID: <code>${esc(settings.binanceUid)}</code>`
+    : `❌ Binance UID not set`;
+  const apiStatus = settings.binanceApiKey ? `✅ API Key set` : `❌ API Key not set`;
+  const secretStatus = settings.binanceApiSecret ? `✅ Secret set` : `❌ Secret not set`;
+
+  let planLines = plans.length > 0
+    ? plans.map(p =>
+        `${p.active ? "🟢" : "🔴"} <b>${esc(p.name)}</b> — ${p.days} days — ${p.priceUsdt} USDT`
+      ).join("\n")
+    : `<i>No plans created yet.</i>`;
+
+  const text =
+    `💰 <b>Payment Management</b>\n\n` +
+    `<b>Plans:</b>\n${planLines}\n\n` +
+    `<b>Binance Settings:</b>\n${binanceStatus}\n${apiStatus}\n${secretStatus}\n\n` +
+    `<b>Stats:</b>\n💵 Total Income: <b>${totalIncome.toFixed(2)} USDT</b>\n📋 Total Transactions: <b>${txCount}</b>`;
+
+  const kb = new InlineKeyboard();
+  kb.text("➕ Add Plan", "price_add_plan").row();
+
+  for (const plan of plans) {
+    const statusBtn = plan.active
+      ? `🔴 Disable — ${plan.name}`
+      : `🟢 Enable — ${plan.name}`;
+    kb.text(statusBtn, `price_toggle_${plan._id}`).text(`🗑️ Delete`, `price_del_${plan._id}`).row();
+    kb.text(`✏️ Edit — ${plan.name}`, `price_edit_${plan._id}`).row();
+  }
+
+  kb.text("⚙️ Binance Settings", "price_binance").row();
+  kb.text("📋 View Transactions", "price_txns").row();
+
+  try {
+    if (ctx.callbackQuery) {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+    }
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
+bot.callbackQuery("price_menu", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  await sendPriceAdminMenu(ctx);
+});
+
+bot.callbackQuery("price_add_plan", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
+  const state: UserState = { step: "price_add_name", priceAdminData: { step: "price_add_name", partialPlan: {} } };
+  userStates.set(userId, state);
+  await ctx.editMessageText(
+    `📦 <b>Add New Plan</b>\n\nStep 1/3: Enter the <b>plan name</b>\n\n<i>Example:</i> <code>Weekly</code>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+  );
+});
+
+bot.callbackQuery("price_binance", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const settings = await getPaymentSettings();
+  const text =
+    `⚙️ <b>Binance Pay Settings</b>\n\n` +
+    `<b>Binance UID:</b> ${settings.binanceUid ? `<code>${esc(settings.binanceUid)}</code>` : "<i>Not set</i>"}\n` +
+    `<b>API Key:</b> ${settings.binanceApiKey ? `<code>${settings.binanceApiKey.slice(0, 6)}...${settings.binanceApiKey.slice(-4)}</code>` : "<i>Not set</i>"}\n` +
+    `<b>API Secret:</b> ${settings.binanceApiSecret ? "✅ Set (hidden)" : "<i>Not set</i>"}\n\n` +
+    `<b>How to get API Key:</b>\n` +
+    `1. Go to Binance → Profile → API Management\n` +
+    `2. Create API Key → Label: TelegramBot\n` +
+    `3. Enable only <b>Read Info</b> permission\n` +
+    `4. Copy API Key + Secret Key here`;
+  const kb = new InlineKeyboard()
+    .text("🔑 Set Binance UID", "price_set_uid").row()
+    .text("🔐 Set API Key", "price_set_apikey").row()
+    .text("🔏 Set API Secret", "price_set_apisecret").row()
+    .text("🔙 Back", "price_menu");
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery("price_set_uid", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_set_uid" });
+  await ctx.editMessageText(
+    `🔑 <b>Set Binance Pay UID</b>\n\nEnter your Binance Pay UID (numeric ID shown in Binance Pay → Receive screen):\n\n<i>Example: 123456789</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_binance") }
+  );
+});
+
+bot.callbackQuery("price_set_apikey", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_set_apikey" });
+  await ctx.editMessageText(
+    `🔐 <b>Set Binance API Key</b>\n\nEnter your Binance API Key (read-only):\n\n<i>⚠️ Make sure the key has ONLY "Read Info" permission enabled — NO trading, NO withdrawal.</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_binance") }
+  );
+});
+
+bot.callbackQuery("price_set_apisecret", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_set_apisecret" });
+  await ctx.editMessageText(
+    `🔏 <b>Set Binance API Secret</b>\n\nEnter your Binance API Secret Key:\n\n<i>⚠️ This will be stored securely in your database.</i>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_binance") }
+  );
+});
+
+bot.callbackQuery("price_txns", async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const txns = await getTransactions(20);
+  if (txns.length === 0) {
+    await ctx.editMessageText(
+      `📋 <b>Transactions</b>\n\n<i>No verified transactions yet.</i>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "price_menu") }
+    );
+    return;
+  }
+  const lines = txns.map((t, i) => {
+    const date = new Date(t.createdAt).toLocaleDateString("en-GB");
+    const expiry = new Date(t.accessGrantedUntil).toLocaleDateString("en-GB");
+    return `${i + 1}. 👤 <code>${t.userId}</code> — <b>${esc(t.planName)}</b> — ${t.priceUsdt} USDT\n   📅 ${date} → ⏰ Until ${expiry}\n   🔑 <code>${esc(t.txId.slice(0, 20))}...</code>`;
+  }).join("\n\n");
+  const total = await getTotalIncome();
+  await ctx.editMessageText(
+    `📋 <b>Recent Transactions (last 20)</b>\n\n${lines}\n\n💵 <b>Total Income: ${total.toFixed(2)} USDT</b>`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Back", "price_menu") }
+  );
+});
+
+bot.callbackQuery(/^price_toggle_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const plan = await getPlan(planId);
+  if (!plan) { await ctx.answerCallbackQuery({ text: "Plan not found.", show_alert: true }); return; }
+  await updatePlan(planId, { active: !plan.active });
+  await sendPriceAdminMenu(ctx);
+});
+
+bot.callbackQuery(/^price_del_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const plan = await getPlan(planId);
+  if (!plan) { await ctx.answerCallbackQuery({ text: "Plan not found.", show_alert: true }); return; }
+  await ctx.editMessageText(
+    `🗑️ <b>Delete Plan</b>\n\nAre you sure you want to delete <b>${esc(plan.name)}</b>?\nThis cannot be undone.`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Yes, Delete", `price_del_confirm_${planId}`).text("❌ Cancel", "price_menu") }
+  );
+});
+
+bot.callbackQuery(/^price_del_confirm_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  await deletePlan(planId);
+  await sendPriceAdminMenu(ctx);
+});
+
+bot.callbackQuery(/^price_edit_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const plan = await getPlan(planId);
+  if (!plan) { await ctx.answerCallbackQuery({ text: "Plan not found.", show_alert: true }); return; }
+  const text =
+    `✏️ <b>Edit Plan: ${esc(plan.name)}</b>\n\n` +
+    `Current values:\n` +
+    `• Name: <b>${esc(plan.name)}</b>\n` +
+    `• Duration: <b>${plan.days} days</b>\n` +
+    `• Price: <b>${plan.priceUsdt} USDT</b>\n\n` +
+    `What would you like to edit?`;
+  const kb = new InlineKeyboard()
+    .text("✏️ Name", `price_edit_name_${planId}`)
+    .text("📅 Days", `price_edit_days_${planId}`)
+    .text("💵 Price", `price_edit_price_${planId}`).row()
+    .text("🔙 Back", "price_menu");
+  await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+});
+
+bot.callbackQuery(/^price_edit_name_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_edit_name", priceAdminData: { step: "price_edit_name", editPlanId: planId } });
+  await ctx.editMessageText(
+    `✏️ <b>Edit Plan Name</b>\n\nEnter the new name for this plan:`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+  );
+});
+
+bot.callbackQuery(/^price_edit_days_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_edit_days", priceAdminData: { step: "price_edit_days", editPlanId: planId } });
+  await ctx.editMessageText(
+    `📅 <b>Edit Plan Duration</b>\n\nEnter the new number of days (e.g. <code>30</code>):`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+  );
+});
+
+bot.callbackQuery(/^price_edit_price_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const planId = ctx.match[1];
+  const userId = ctx.from.id;
+  userStates.set(userId, { step: "price_edit_price", priceAdminData: { step: "price_edit_price", editPlanId: planId } });
+  await ctx.editMessageText(
+    `💵 <b>Edit Plan Price</b>\n\nEnter the new price in USDT (e.g. <code>5.00</code>):`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+  );
+});
+
+// ─── Buy Plan flow ────────────────────────────────────────────────────────────
+bot.callbackQuery("buy_plan", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const plans = await getActivePlans();
+  if (plans.length === 0) {
+    await ctx.reply(
+      `😔 <b>No Plans Available</b>\n\nThere are no active plans right now. Please contact ${OWNER_USERNAME}.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const plan of plans) {
+    kb.text(`${plan.name} — ${plan.days} days — ${plan.priceUsdt} USDT`, `buy_select_${plan._id}`).row();
+  }
+  kb.url(`💬 Contact Owner (${OWNER_USERNAME})`, `https://t.me/${OWNER_USERNAME.replace(/^@/, "")}`);
+  await ctx.reply(
+    `💳 <b>Choose a Plan</b>\n\nSelect a plan to purchase via Binance Pay:\n\n` +
+    plans.map(p => `• <b>${esc(p.name)}</b> — ${p.days} days — <b>${p.priceUsdt} USDT</b>`).join("\n"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+bot.callbackQuery(/^buy_select_(.+)$/, async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  const planId = ctx.match[1];
+  const [plan, settings] = await Promise.all([getPlan(planId), getPaymentSettings()]);
+  if (!plan || !plan.active) {
+    await ctx.reply("❌ This plan is no longer available. Please choose another plan.", { parse_mode: "HTML" });
+    return;
+  }
+  if (!settings.binanceUid) {
+    await ctx.reply(
+      `⚠️ <b>Payment not available right now.</b>\n\nBinance Pay is not configured yet. Contact ${OWNER_USERNAME}.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  userStates.set(userId, {
+    step: "payment_awaiting_txid",
+    paymentData: { planId: plan._id, planName: plan.name, priceUsdt: plan.priceUsdt, days: plan.days },
+  });
+
+  const text =
+    `💳 <b>Complete Your Payment</b>\n\n` +
+    `<b>Plan:</b> ${esc(plan.name)}\n` +
+    `<b>Duration:</b> ${plan.days} days\n` +
+    `<b>Amount:</b> <b>${plan.priceUsdt} USDT</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `<b>Step 1:</b> Open your Binance app\n` +
+    `<b>Step 2:</b> Go to <b>Pay → Send</b>\n` +
+    `<b>Step 3:</b> Search by Binance Pay ID: <code>${esc(settings.binanceUid)}</code>\n` +
+    `<b>Step 4:</b> Send exactly <b>${plan.priceUsdt} USDT</b>\n` +
+    `<b>Step 5:</b> Go to <b>Pay → History</b> → find this transaction\n` +
+    `<b>Step 6:</b> Copy the <b>Transaction ID</b> and send it here\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⏳ <i>After paying, send your Transaction ID (TxID) in this chat to activate your plan.</i>`;
+
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel"),
+  });
+});
+
+bot.callbackQuery("buy_cancel", async (ctx) => {
+  ctx.answerCallbackQuery();
+  const userId = ctx.from.id;
+  userStates.delete(userId);
+  await ctx.editMessageText(
+    `❌ <b>Payment Cancelled</b>\n\nYou can start again anytime by tapping the Buy Plan button.`,
+    { parse_mode: "HTML" }
+  );
 });
 
 bot.callbackQuery("broadcast_cancel", async (ctx) => {
@@ -20887,6 +21247,245 @@ bot.on("message:text", async (ctx, next) => {
     }
     const m = await ctx.reply(prompt, { parse_mode: "HTML", reply_markup: kb });
     cgnLinkCollectMsgId.set(userId, m.message_id);
+    return;
+  }
+
+  // ── Payment TxID verification ─────────────────────────────────────────────
+  if (state.step === "payment_awaiting_txid") {
+    const pData = state.paymentData;
+    if (!pData) { userStates.delete(userId); return next(); }
+
+    const txId = text.trim().replace(/\s+/g, "");
+    if (txId.length < 5) {
+      await ctx.reply(
+        `❌ <b>Invalid Transaction ID</b>\n\nPlease enter the correct TxID from your Binance Pay history.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+      );
+      return;
+    }
+
+    // Check if TxID already used
+    if (await isTxIdUsed(txId)) {
+      await ctx.reply(
+        `❌ <b>Transaction Already Used</b>\n\nThis Transaction ID has already been used to activate a plan. Each TxID can only be used once.\n\nIf you believe this is an error, contact ${OWNER_USERNAME}.`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const settings = await getPaymentSettings();
+    if (!settings.binanceApiKey || !settings.binanceApiSecret) {
+      await ctx.reply(
+        `⚠️ <b>Verification Unavailable</b>\n\nThe payment system is not fully configured yet. Please contact ${OWNER_USERNAME} to manually verify your payment.\n\nSend them your TxID: <code>${esc(txId)}</code>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const verifyMsg = await ctx.reply(
+      `⏳ <b>Verifying your payment...</b>\n\nChecking Binance Pay for TxID: <code>${esc(txId.slice(0, 20))}...</code>`,
+      { parse_mode: "HTML" }
+    );
+
+    const result = await verifyBinanceTxId(
+      settings.binanceApiKey,
+      settings.binanceApiSecret,
+      txId,
+      pData.priceUsdt
+    );
+
+    if (!result.valid) {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        verifyMsg.message_id,
+        `❌ <b>Payment Verification Failed</b>\n\n${esc(result.error ?? "Unknown error")}\n\nPlease double-check your TxID and try again, or contact ${OWNER_USERNAME}.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel Payment", "buy_cancel") }
+      ).catch(() => {});
+      return;
+    }
+
+    // Grant access
+    const now = Date.now();
+    const accessMs = pData.days * 24 * 60 * 60 * 1000;
+    const data = await loadBotData();
+    const existing = data.accessList[String(userId)];
+    const baseFrom = existing && existing.expiresAt > now ? existing.expiresAt : now;
+    const expiresAt = baseFrom + accessMs;
+    data.accessList[String(userId)] = { expiresAt, grantedBy: 0 };
+    await saveBotData(data);
+    accessCache.del(userId);
+
+    await saveTransaction({
+      userId,
+      planId: pData.planId,
+      planName: pData.planName,
+      days: pData.days,
+      priceUsdt: pData.priceUsdt,
+      txId,
+      status: "verified",
+      createdAt: now,
+      accessGrantedUntil: expiresAt,
+    });
+
+    userStates.delete(userId);
+
+    const expiryDate = new Date(expiresAt).toLocaleDateString("en-GB", {
+      day: "2-digit", month: "short", year: "numeric",
+    });
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      verifyMsg.message_id,
+      `✅ <b>Payment Verified! Access Granted.</b>\n\n` +
+      `🎉 Thank you for purchasing <b>${esc(pData.planName)}</b>!\n\n` +
+      `📅 <b>Access valid until:</b> ${expiryDate}\n` +
+      `💵 <b>Amount paid:</b> ${result.amount} ${result.currency ?? "USDT"}\n\n` +
+      `You can now use all bot features. Tap the button below to go to the main menu.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🏠 Go to Main Menu", "main_menu"),
+      }
+    ).catch(() => {});
+    return;
+  }
+
+  // ── Price Admin text steps ────────────────────────────────────────────────
+  if (state.step === "price_add_name") {
+    const d = state.priceAdminData;
+    if (!d) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const name = text.trim().slice(0, 50);
+    if (!name) { await ctx.reply("❌ Plan name cannot be empty. Please enter a valid name:"); return; }
+    d.partialPlan = { ...d.partialPlan, name };
+    d.step = "price_add_days";
+    state.step = "price_add_days";
+    await ctx.reply(
+      `✅ Name: <b>${esc(name)}</b>\n\nStep 2/3: Enter the <b>number of days</b> for this plan:\n\n<i>Example:</i> <code>30</code>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+    );
+    return;
+  }
+
+  if (state.step === "price_add_days") {
+    const d = state.priceAdminData;
+    if (!d) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const days = parseInt(text.trim(), 10);
+    if (!days || days < 1 || days > 3650) {
+      await ctx.reply("❌ Please enter a valid number of days (1–3650):"); return;
+    }
+    d.partialPlan = { ...d.partialPlan, days };
+    d.step = "price_add_price";
+    state.step = "price_add_price";
+    await ctx.reply(
+      `✅ Duration: <b>${days} days</b>\n\nStep 3/3: Enter the <b>price in USDT</b>:\n\n<i>Example:</i> <code>5.00</code>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("❌ Cancel", "price_menu") }
+    );
+    return;
+  }
+
+  if (state.step === "price_add_price") {
+    const d = state.priceAdminData;
+    if (!d?.partialPlan?.name || !d?.partialPlan?.days) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const priceUsdt = parseFloat(text.trim());
+    if (!priceUsdt || priceUsdt <= 0 || priceUsdt > 100000) {
+      await ctx.reply("❌ Please enter a valid USDT price (e.g. 5.00):"); return;
+    }
+    const plan = await createPlan(d.partialPlan.name, d.partialPlan.days, priceUsdt);
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>Plan Created Successfully!</b>\n\n` +
+      `📦 <b>${esc(plan.name)}</b>\n` +
+      `📅 Duration: ${plan.days} days\n` +
+      `💵 Price: ${plan.priceUsdt} USDT\n\n` +
+      `Use /price to manage all plans.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Back to Payment Menu", "price_menu") }
+    );
+    return;
+  }
+
+  if (state.step === "price_set_uid") {
+    if (!isAdmin(userId)) return;
+    const uid = text.trim();
+    if (!uid) { await ctx.reply("❌ Please enter a valid Binance Pay UID:"); return; }
+    await savePaymentSettings({ binanceUid: uid });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>Binance Pay UID saved!</b>\n\nUsers will now be shown UID: <code>${esc(uid)}</code> for payments.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Binance Settings", "price_binance") }
+    );
+    return;
+  }
+
+  if (state.step === "price_set_apikey") {
+    if (!isAdmin(userId)) return;
+    const apiKey = text.trim();
+    if (!apiKey) { await ctx.reply("❌ Please enter a valid API Key:"); return; }
+    await savePaymentSettings({ binanceApiKey: apiKey });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>API Key saved!</b>\n\nKey: <code>${apiKey.slice(0, 6)}...${apiKey.slice(-4)}</code>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Binance Settings", "price_binance") }
+    );
+    return;
+  }
+
+  if (state.step === "price_set_apisecret") {
+    if (!isAdmin(userId)) return;
+    const secret = text.trim();
+    if (!secret) { await ctx.reply("❌ Please enter a valid API Secret:"); return; }
+    await savePaymentSettings({ binanceApiSecret: secret });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>API Secret saved!</b>\n\nSecret is stored securely. It will never be shown again.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Back to Binance Settings", "price_binance") }
+    );
+    return;
+  }
+
+  if (state.step === "price_edit_name") {
+    const d = state.priceAdminData;
+    if (!d?.editPlanId) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const name = text.trim().slice(0, 50);
+    if (!name) { await ctx.reply("❌ Plan name cannot be empty:"); return; }
+    await updatePlan(d.editPlanId, { name });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>Plan name updated to: ${esc(name)}</b>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Back to Payment Menu", "price_menu") }
+    );
+    return;
+  }
+
+  if (state.step === "price_edit_days") {
+    const d = state.priceAdminData;
+    if (!d?.editPlanId) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const days = parseInt(text.trim(), 10);
+    if (!days || days < 1 || days > 3650) { await ctx.reply("❌ Please enter a valid number of days (1–3650):"); return; }
+    await updatePlan(d.editPlanId, { days });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>Plan duration updated to: ${days} days</b>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Back to Payment Menu", "price_menu") }
+    );
+    return;
+  }
+
+  if (state.step === "price_edit_price") {
+    const d = state.priceAdminData;
+    if (!d?.editPlanId) { userStates.delete(userId); return next(); }
+    if (!isAdmin(userId)) return;
+    const priceUsdt = parseFloat(text.trim());
+    if (!priceUsdt || priceUsdt <= 0 || priceUsdt > 100000) { await ctx.reply("❌ Please enter a valid USDT price (e.g. 5.00):"); return; }
+    await updatePlan(d.editPlanId, { priceUsdt });
+    userStates.delete(userId);
+    await ctx.reply(
+      `✅ <b>Plan price updated to: ${priceUsdt} USDT</b>`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💰 Back to Payment Menu", "price_menu") }
+    );
     return;
   }
 
