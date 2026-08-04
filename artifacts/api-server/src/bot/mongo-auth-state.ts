@@ -1,0 +1,407 @@
+import { proto } from "@whiskeysockets/baileys";
+import { getCollection } from "./mongodb";
+import type { Collection } from "mongodb";
+
+interface AuthKeyDoc {
+  _id: string;
+  userId: string;
+  category: string;
+  id: string;
+  value: any;
+}
+
+let ttlCleanupPromise: Promise<void> | null = null;
+
+function buildKey(userId: string, category: string, id: string): string {
+  return `${userId}:${category}:${id}`;
+}
+
+const BufferJSON = {
+  replacer: (_key: string, value: any) => {
+    if (
+      value &&
+      typeof value === "object" &&
+      value.type === "Buffer" &&
+      Array.isArray(value.data)
+    ) {
+      return {
+        type: "Buffer",
+        data: Buffer.from(value.data).toString("base64"),
+      };
+    }
+    return value;
+  },
+  reviver: (_key: string, value: any) => {
+    if (
+      value &&
+      typeof value === "object" &&
+      value.type === "Buffer" &&
+      typeof value.data === "string"
+    ) {
+      return Buffer.from(value.data, "base64");
+    }
+    return value;
+  },
+};
+
+function serialize(value: any): string {
+  return JSON.stringify(value, BufferJSON.replacer);
+}
+
+function deserialize(str: string): any {
+  return JSON.parse(str, BufferJSON.reviver);
+}
+
+async function dropTtlIndexes(collection: Collection): Promise<void> {
+  const indexes = await collection.indexes();
+  for (const index of indexes) {
+    const name = index.name;
+    if (!name || name === "_id_") continue;
+    if ((index as any).expireAfterSeconds !== undefined) {
+      await collection.dropIndex(name);
+      console.log(`[MongoDB] Dropped TTL index "${name}" from ${collection.collectionName}`);
+    }
+  }
+}
+
+async function ensureNoSessionTtlIndexes(
+  credsCollection: Collection,
+  keysCollection: Collection
+): Promise<void> {
+  if (!ttlCleanupPromise) {
+    ttlCleanupPromise = Promise.all([
+      dropTtlIndexes(credsCollection),
+      dropTtlIndexes(keysCollection),
+    ]).then(() => undefined);
+  }
+  await ttlCleanupPromise;
+}
+
+export async function useMongoDBAuthState(userId: string) {
+  const credsCollection = await getCollection("wa_creds");
+  const keysCollection = await getCollection("wa_keys");
+
+  await ensureNoSessionTtlIndexes(credsCollection, keysCollection);
+
+  await credsCollection.createIndex({ userId: 1 }, { unique: false });
+  await keysCollection.createIndex(
+    { userId: 1, category: 1, id: 1 },
+    { unique: true }
+  );
+
+  const readCreds = async () => {
+    const doc = await credsCollection.findOne({ _id: userId as any });
+    if (doc && doc.creds) {
+      return deserialize(doc.creds);
+    }
+    return null;
+  };
+
+  const saveCreds = async (creds: any) => {
+    const serialized = serialize(creds);
+    await credsCollection.updateOne(
+      { _id: userId as any },
+      { $set: { userId, creds: serialized, updatedAt: new Date() } },
+      { upsert: true }
+    );
+  };
+
+  const existingCreds = await readCreds();
+  const { initAuthCreds } = await import("@whiskeysockets/baileys");
+  const creds = existingCreds || initAuthCreds();
+
+  const keys = {
+    get: async (type: string, ids: string[]) => {
+      const result: Record<string, any> = {};
+      const filter = {
+        userId,
+        category: type,
+        id: { $in: ids },
+      };
+      const docs = await keysCollection.find(filter).toArray();
+      for (const doc of docs) {
+        let value = deserialize(doc.value);
+        if (type === "app-state-sync-key") {
+          value = proto.Message.AppStateSyncKeyData.fromObject(value);
+        }
+        result[doc.id] = value;
+      }
+      return result;
+    },
+    set: async (data: Record<string, Record<string, any>>) => {
+      const ops: any[] = [];
+      for (const [category, categoryData] of Object.entries(data)) {
+        for (const [id, value] of Object.entries(categoryData)) {
+          const key = buildKey(userId, category, id);
+          if (value) {
+            ops.push({
+              updateOne: {
+                filter: { _id: key },
+                update: {
+                  $set: {
+                    userId,
+                    category,
+                    id,
+                    value: serialize(value),
+                    updatedAt: new Date(),
+                  },
+                },
+                upsert: true,
+              },
+            });
+          } else {
+            ops.push({
+              deleteOne: {
+                filter: { _id: key },
+              },
+            });
+          }
+        }
+      }
+      if (ops.length > 0) {
+        await keysCollection.bulkWrite(ops);
+      }
+    },
+  };
+
+  return {
+    state: { creds, keys },
+    saveCreds: () => saveCreds(creds),
+  };
+}
+
+export async function listStoredWhatsAppSessions(): Promise<Array<{ userId: string; phoneNumber: string; pairingMode: "qr" | "code" }>> {
+  const credsCollection = await getCollection("wa_creds");
+  const docs = await credsCollection.find({}, { projection: { _id: 1, userId: 1, creds: 1, pairingMode: 1 } }).toArray();
+  const sessions: Array<{ userId: string; phoneNumber: string; pairingMode: "qr" | "code" }> = [];
+
+  for (const doc of docs) {
+    const userId = String(doc.userId || doc._id || "");
+    if (!userId || !doc.creds) continue;
+
+    let phoneNumber = "";
+    try {
+      const creds = deserialize(doc.creds);
+      const rawId = creds?.me?.id || creds?.me?.lid || "";
+      const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
+      phoneNumber = digits ? `+${digits}` : "";
+      // registered=true → pairing code flow completed successfully.
+      // doc.pairingMode === "qr" → QR flow completed (savePairingMode is called
+      //   only on connection "open", so this flag is safe — it won't be set for
+      //   an incomplete pairing where me.id exists but user hasn't scanned yet).
+      // We do NOT use me.id alone: Baileys writes me.id before the code is entered,
+      // which would cause incomplete pairing sessions to appear as connected.
+      const hasConnected = creds?.registered === true || doc.pairingMode === "qr";
+      if (!hasConnected) continue;
+    } catch {
+      continue;
+    }
+
+    const pairingMode: "qr" | "code" = (doc.pairingMode === "qr") ? "qr" : "code";
+    sessions.push({ userId, phoneNumber, pairingMode });
+  }
+
+  return sessions;
+}
+
+export async function savePairingMode(userId: string, mode: "qr" | "code"): Promise<void> {
+  try {
+    const credsCollection = await getCollection("wa_creds");
+    await credsCollection.updateOne(
+      { _id: userId as any },
+      { $set: { pairingMode: mode } }
+    );
+  } catch {
+  }
+}
+
+export async function clearMongoSession(userId: string): Promise<void> {
+  const credsCollection = await getCollection("wa_creds");
+  const keysCollection = await getCollection("wa_keys");
+  await credsCollection.deleteOne({ _id: userId as any });
+  await keysCollection.deleteMany({ userId });
+  console.log(`[MongoDB] Cleared session for user: ${userId}`);
+}
+
+/**
+ * Auto-cleanup: Delete stale sessions from MongoDB.
+ *
+ * Rules:
+ * 1. Sessions not updated in `staleAfterDays` days (default 7) are deleted.
+ * 2. Sessions that were NEVER fully paired (registered=false) and older than 1 day are deleted.
+ * 3. Orphaned wa_keys (no matching wa_creds) are also cleaned up.
+ * 4. Sessions in `activeUserIds` are NEVER deleted even if stale.
+ *
+ * Returns a summary of what was deleted.
+ */
+export async function cleanupStaleSessions(
+  activeUserIds: Set<string> = new Set(),
+  staleAfterDays = 7
+): Promise<{ deletedSessions: number; deletedKeys: number; deletedUnpaired: number }> {
+  const credsCollection = await getCollection("wa_creds");
+  const keysCollection = await getCollection("wa_keys");
+
+  const now = new Date();
+  const staleDate = new Date(now.getTime() - staleAfterDays * 24 * 60 * 60 * 1000);
+  const oneDayAgo = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000);
+
+  let deletedSessions = 0;
+  let deletedKeys = 0;
+  let deletedUnpaired = 0;
+
+  // Fetch all creds documents
+  const allDocs = await credsCollection
+    .find({}, { projection: { _id: 1, userId: 1, creds: 1, updatedAt: 1 } })
+    .toArray();
+
+  const toDelete: string[] = [];
+
+  for (const doc of allDocs) {
+    const userId = String(doc.userId || doc._id || "");
+    if (!userId) continue;
+
+    // Never delete currently active sessions
+    if (activeUserIds.has(userId)) continue;
+
+    const updatedAt: Date | undefined = doc.updatedAt instanceof Date
+      ? doc.updatedAt
+      : doc.updatedAt
+        ? new Date(doc.updatedAt)
+        : undefined;
+
+    let isRegistered = false;
+    try {
+      const creds = deserialize(doc.creds);
+      isRegistered = creds?.registered === true || !!(creds?.me?.id && String(creds.me.id).includes("@"));
+    } catch {
+      // Corrupt doc — mark for deletion
+      toDelete.push(userId);
+      continue;
+    }
+
+    // Rule 1: Registered session not updated in staleAfterDays days
+    if (isRegistered && updatedAt && updatedAt < staleDate) {
+      console.log(`[CLEANUP] Stale session userId=${userId} lastSeen=${updatedAt.toISOString()}`);
+      toDelete.push(userId);
+      continue;
+    }
+
+    // Rule 2: Never registered (incomplete pairing) older than 1 day
+    if (!isRegistered && updatedAt && updatedAt < oneDayAgo) {
+      console.log(`[CLEANUP] Unpaired session userId=${userId} createdAt=${updatedAt.toISOString()}`);
+      toDelete.push(userId);
+      deletedUnpaired++;
+      continue;
+    }
+
+    // Rule 3: No updatedAt field and session is very old (fallback)
+    if (!updatedAt && !isRegistered) {
+      console.log(`[CLEANUP] Unknown-age unpaired session userId=${userId}`);
+      toDelete.push(userId);
+      deletedUnpaired++;
+    }
+  }
+
+  // Delete stale creds
+  for (const userId of toDelete) {
+    await credsCollection.deleteOne({ _id: userId as any });
+    const keysResult = await keysCollection.deleteMany({ userId });
+    deletedKeys += keysResult.deletedCount ?? 0;
+    deletedSessions++;
+  }
+
+  // Rule 4: Clean up orphaned wa_keys (userId not in any wa_creds)
+  const remainingUserIds = allDocs
+    .map((d) => String(d.userId || d._id || ""))
+    .filter((id) => id && !toDelete.includes(id));
+
+  let orphanResult;
+  if (remainingUserIds.length > 0) {
+    // Delete keys whose userId is not in remaining sessions
+    orphanResult = await keysCollection.deleteMany({
+      userId: { $nin: remainingUserIds },
+    });
+  } else {
+    // No sessions remain at all — delete ALL keys safely
+    orphanResult = await keysCollection.deleteMany({});
+  }
+  const orphanCount = orphanResult.deletedCount ?? 0;
+  if (orphanCount > 0) {
+    console.log(`[CLEANUP] Deleted ${orphanCount} orphaned wa_keys`);
+    deletedKeys += orphanCount;
+  }
+
+  console.log(
+    `[CLEANUP] Done — deleted ${deletedSessions} stale sessions (${deletedUnpaired} unpaired), ${deletedKeys} keys`
+  );
+
+  return { deletedSessions, deletedKeys, deletedUnpaired };
+}
+
+export interface WaContactRecord {
+  jid: string;
+  name: string;
+  notify?: string;
+}
+
+export async function saveWaContact(
+  userId: string,
+  jid: string,
+  name: string
+): Promise<void> {
+  const col = await getCollection("wa_contacts");
+  await col.updateOne(
+    { userId, jid },
+    { $set: { userId, jid, name, notify: name, updatedAt: new Date() } },
+    { upsert: true }
+  );
+}
+
+export async function loadWaContacts(userId: string): Promise<WaContactRecord[]> {
+  const col = await getCollection("wa_contacts");
+  const docs = await col.find({ userId }).toArray();
+  return docs.map((d: any) => ({ jid: d.jid, name: d.name, notify: d.notify || d.name }));
+}
+
+/**
+ * Get session info for all stored sessions — used by admin Telegram command.
+ */
+export async function getSessionStats(): Promise<Array<{
+  userId: string;
+  phoneNumber: string;
+  registered: boolean;
+  lastSeen: string;
+}>> {
+  const credsCollection = await getCollection("wa_creds");
+  const docs = await credsCollection
+    .find({}, { projection: { _id: 1, userId: 1, creds: 1, updatedAt: 1 } })
+    .toArray();
+
+  const result = [];
+  for (const doc of docs) {
+    const userId = String(doc.userId || doc._id || "");
+    if (!userId) continue;
+
+    let phoneNumber = "";
+    let registered = false;
+    try {
+      const creds = deserialize(doc.creds);
+      const rawId = creds?.me?.id || creds?.me?.lid || "";
+      const digits = String(rawId).split(":")[0].split("@")[0].replace(/[^0-9]/g, "");
+      phoneNumber = digits ? `+${digits}` : "unknown";
+      registered = creds?.registered === true;
+    } catch {
+      phoneNumber = "corrupt";
+    }
+
+    const updatedAt = doc.updatedAt
+      ? new Date(doc.updatedAt).toLocaleDateString("en-IN", {
+          day: "2-digit", month: "short", year: "numeric",
+        })
+      : "unknown";
+
+    result.push({ userId, phoneNumber, registered, lastSeen: updatedAt });
+  }
+
+  return result;
+}
